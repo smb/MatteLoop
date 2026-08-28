@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from fractions import Fraction
 from math import lcm
@@ -9,6 +10,25 @@ from pathlib import Path
 
 import av
 from PIL import Image
+
+_ROTATION_SIDECAR_SCHEMA_VERSION = 1
+_ROTATION_SIDECAR_SUFFIX = ".rembggui.json"
+
+
+def _write_rotation_sidecar(path: Path, rotation: int) -> None:
+    """Write the fixture-only rotation contract PyAV 16 cannot mux portably."""
+    sidecar = path.with_suffix(f"{path.suffix}{_ROTATION_SIDECAR_SUFFIX}")
+    sidecar.write_text(
+        json.dumps(
+            {
+                "rotation_ccw": rotation,
+                "schema_version": _ROTATION_SIDECAR_SCHEMA_VERSION,
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def make_video(
@@ -23,7 +43,11 @@ def make_video(
 
     ``pts`` are timestamps in seconds. When omitted, timestamps are evenly
     spaced according to ``fps``. The caller controls every source image and
-    timestamp, keeping fixture content deterministic.
+    timestamp, keeping fixture content deterministic. ``rotation`` is the
+    counter-clockwise presentation rotation in the adjacent, versioned
+    ``<video>.rembggui.json`` fixture sidecar. PyAV 16 cannot author portable
+    MP4 display-matrix side data, so later source-decoder fixture tests must
+    consume this explicit contract rather than infer rotation from the video.
     """
     if not frames:
         raise ValueError("at least one frame is required")
@@ -49,6 +73,7 @@ def make_video(
     denominator = lcm(*(timestamp.denominator for timestamp in timestamps))
     time_base = Fraction(1, denominator)
     path.parent.mkdir(parents=True, exist_ok=True)
+    _write_rotation_sidecar(path, rotation)
 
     with av.open(str(path), mode="w") as container:
         stream = container.add_stream("libx264", rate=fps)
@@ -56,8 +81,6 @@ def make_video(
         stream.height = height
         stream.pix_fmt = "yuv420p"
         stream.codec_context.time_base = time_base
-        if rotation:
-            stream.metadata["rotate"] = str(rotation)
 
         for image, timestamp in zip(frames, timestamps):
             frame = av.VideoFrame.from_image(image.convert("RGB"))
