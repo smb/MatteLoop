@@ -747,6 +747,62 @@ def test_edited_cut_error_focuses_recovery_and_disables_rebuild() -> None:
     assert capabilities(failed).focus_target is FocusTarget.EDITED_CUT_RECOVERY
 
 
+def test_source_error_cannot_retain_or_enable_a_valid_artifact() -> None:
+    rendered = render_complete()
+    loading = reduce(
+        rendered,
+        SourceLoadRequested(source_id="replacement", request_id="load-2"),
+    )
+    failed = reduce(
+        loading,
+        SourceLoadFailed(
+            source_id="replacement",
+            request_id="load-2",
+            error="unsupported codec",
+        ),
+    )
+
+    assert failed.source is SourceState.ERROR
+    assert failed.artifact is ArtifactState.NONE
+    assert not capabilities(failed).can_open_output
+    assert not capabilities(failed).can_open_folder
+
+    with pytest.raises(ValueError):
+        AppState(
+            source=SourceState.ERROR,
+            source_id=SOURCE_ID,
+            source_request_id=SOURCE_REQUEST_ID,
+            source_error="unsupported codec",
+            artifact=ArtifactState.VALID,
+            artifact_result=ArtifactResult(
+                SOURCE_ID, "render-1", "stale-output.webp"
+            ),
+        )
+
+
+def test_pending_edited_cut_rescan_disables_rebuild_until_matching_result() -> None:
+    detected = edited_cuts_state()
+
+    scanning = scan_for_edited_cuts(detected, request_id="scan-2")
+
+    assert scanning.edited_cuts
+    assert not capabilities(scanning).can_rebuild
+    assert capabilities(scanning).focus_target is FocusTarget.PREVIEW_ACTION
+
+    validated = reduce(
+        scanning,
+        EditedCutsChanged(
+            SOURCE_ID,
+            "render-1",
+            "scan-2",
+            detected=True,
+        ),
+    )
+
+    assert validated.edited_cuts_request_id is None
+    assert capabilities(validated).can_rebuild
+
+
 @pytest.mark.parametrize(
     "values",
     [

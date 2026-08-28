@@ -169,10 +169,13 @@ class AppState:
         ):
             raise ValueError("running preview requires an active preview job")
         if self.artifact is ArtifactState.VALID and (
-            self.artifact_result is None
+            self.source is not SourceState.READY
+            or self.artifact_result is None
             or self.source_id != self.artifact_result.source_id
         ):
-            raise ValueError("valid artifact requires a matching result")
+            raise ValueError(
+                "valid artifact requires a ready source and matching result"
+            )
         if self.edited_cuts and self.artifact is not ArtifactState.VALID:
             raise ValueError("edited cuts require a valid artifact")
 
@@ -658,7 +661,14 @@ def reduce(state: AppState, event: Event) -> AppState:
             state, event.source_id, event.artifact_request_id
         ):
             return state
-        return replace(state, edited_cuts_request_id=event.request_id)
+        focus = state.focus_target
+        if focus is FocusTarget.REBUILD_ACTION:
+            focus = _editor_action_focus(state)
+        return replace(
+            state,
+            edited_cuts_request_id=event.request_id,
+            focus_target=focus,
+        )
 
     if isinstance(event, EditedCutsChanged):
         if not _matches_edited_cuts_result(state, event):
@@ -698,6 +708,7 @@ def capabilities(state: AppState) -> Capabilities:
     editable = idle and ready
     has_artifact = (
         idle
+        and ready
         and state.artifact is ArtifactState.VALID
         and state.artifact_result is not None
         and state.artifact_result.source_id == state.source_id
@@ -712,7 +723,10 @@ def capabilities(state: AppState) -> Capabilities:
         can_preview=editable,
         can_render=(editable and state.model_available and state.model_supports_render),
         can_rebuild=(
-            has_artifact and state.edited_cuts and state.edited_cuts_error is None
+            has_artifact
+            and state.edited_cuts
+            and state.edited_cuts_error is None
+            and state.edited_cuts_request_id is None
         ),
         can_cancel=active and state.job.phase is not JobState.CANCELLING,
         can_open_output=has_artifact,
