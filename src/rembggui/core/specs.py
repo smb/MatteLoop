@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import StrEnum
 from fractions import Fraction
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from rembggui.core.errors import ErrorCode, ValidationError
 
@@ -18,7 +18,12 @@ MIN_FPS = 1
 MAX_FPS = 240
 _MIB_BYTES = Decimal(1024 * 1024)
 _SUPPORTED_SOURCE_SUFFIXES = frozenset({".mp4", ".mov", ".webm", ".mkv"})
-_URI_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:/")
+_URI_PATH_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*):[\\/]")
+_WINDOWS_RESERVED_FILENAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{index}" for index in range(1, 10)}
+    | {f"LPT{index}" for index in range(1, 10)}
+)
 
 
 class EdgeMode(StrEnum):
@@ -292,8 +297,7 @@ class OutputSpec:
             not isinstance(self.filename, str)
             or not self.filename
             or self.filename in {".", "..", ".webp"}
-            or "/" in self.filename
-            or "\\" in self.filename
+            or not _is_valid_output_filename(self.filename)
             or Path(self.filename).suffix.lower() != ".webp"
         ):
             raise ValidationError(
@@ -368,7 +372,8 @@ class RenderRequest:
             )
 
     def preflight_job_paths(self) -> None:
-        """Require filesystems paths to be usable immediately before a job starts."""
+        """Advisory only; real worker operations handle failures from later
+        open/create/write attempts."""
         if (
             not self.source.exists()
             or not self.source.is_file()
@@ -408,4 +413,23 @@ def _is_local_path(path: Path) -> bool:
     if raw_path.startswith(("//", "\\\\")):
         return False
     uri_match = _URI_PATH_RE.match(raw_path)
-    return uri_match is None or len(uri_match.group(0).split(":", maxsplit=1)[0]) == 1
+    if uri_match is None:
+        return True
+    return (
+        len(uri_match.group(1)) == 1
+        and PureWindowsPath(raw_path).drive == f"{uri_match.group(1)}:"
+    )
+
+
+def _is_valid_output_filename(filename: str) -> bool:
+    """Apply portable separators plus the active platform's filename restrictions."""
+    if "\x00" in filename or "/" in filename or "\\" in filename:
+        return False
+    if os.name != "nt":
+        return True
+    if filename.endswith((" ", ".")) or any(
+        character in '<>:"|?*' for character in filename
+    ):
+        return False
+    base_name = filename.partition(".")[0].rstrip(" .").upper()
+    return base_name not in _WINDOWS_RESERVED_FILENAMES

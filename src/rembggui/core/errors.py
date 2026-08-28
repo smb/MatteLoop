@@ -123,9 +123,11 @@ def _required_string(payload: Mapping[str, object], key: str) -> str:
     return value
 
 
-def _invalid_primitives(technical_detail: str) -> ValidationError:
-    return ValidationError(
+def _invalid_primitives(technical_detail: str) -> AppError:
+    return AppError(
         ErrorCode.INVALID_ERROR,
         "error-deserialization",
+        "error.protocol.invalid-payload",
         technical_detail,
+        "restart-worker",
     )

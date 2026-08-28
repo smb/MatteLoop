@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import FrozenInstanceError
 from decimal import Decimal
 from fractions import Fraction
@@ -7,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import rembggui.core.specs as core_specs
 from rembggui.core.errors import ErrorCode, ValidationError
 from rembggui.core.specs import (
     CollisionPolicy,
@@ -229,10 +231,40 @@ def test_output_rejects_invalid_filename(filename: str, tmp_path: Path) -> None:
     assert exc.value.code is ErrorCode.INVALID_OUTPUT
 
 
+def test_output_rejects_embedded_nul_filename(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError) as exc:
+        OutputSpec(directory=tmp_path, filename="cut\x00out.webp")
+
+    assert exc.value.code is ErrorCode.INVALID_OUTPUT
+
+
+@pytest.mark.parametrize("filename", ["CON.webp", "cut?out.webp", "C:cutout.webp"])
+def test_output_rejects_windows_impossible_filename_on_any_host(
+    filename: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(core_specs.os, "name", "nt")
+
+    with pytest.raises(ValidationError) as exc:
+        OutputSpec(directory=tmp_path, filename=filename)
+
+    assert exc.value.code is ErrorCode.INVALID_OUTPUT
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows filename rules apply on Windows")
+@pytest.mark.parametrize("filename", ["CON.webp", "cut?out.webp", "C:cutout.webp"])
+def test_output_preserves_valid_posix_filename_characters(
+    filename: str, tmp_path: Path
+) -> None:
+    output = OutputSpec(directory=tmp_path, filename=filename)
+
+    assert output.filename == filename
+
+
 @pytest.mark.parametrize(
     "directory",
     [
         Path("https://example.test/exports"),
+        Path(r"https:\example.test\exports"),
         Path("//server/share/exports"),
         Path(r"\\server\share\exports"),
     ],
@@ -337,6 +369,8 @@ def test_render_request_validates_all_rebuild_and_regenerate_combinations(
         Path("."),
         Path("source.avi"),
         Path("https://example.test/source.mp4"),
+        Path(r"https:\example.test\source.mp4"),
+        Path(r"file:\example.test\source.mp4"),
         Path("//server/share/source.mp4"),
         Path(r"\\server\share\source.mp4"),
     ],
@@ -357,6 +391,22 @@ def test_render_request_rejects_invalid_source_path(
         )
 
     assert exc.value.code is ErrorCode.INVALID_RENDER_REQUEST
+
+
+def test_render_request_accepts_windows_drive_source_syntax(tmp_path: Path) -> None:
+    request = valid_render_request(tmp_path)
+    source = Path(r"C:\videos\source.mp4")
+
+    rendered = RenderRequest(
+        source=source,
+        sampling=request.sampling,
+        crop=request.crop,
+        segmentation=request.segmentation,
+        framing=request.framing,
+        output=request.output,
+    )
+
+    assert rendered.source == source
 
 
 def test_construction_defers_filesystem_path_preflight(tmp_path: Path) -> None:

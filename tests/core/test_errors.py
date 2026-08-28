@@ -92,14 +92,17 @@ def test_app_error_accepts_absent_or_null_job_id(payload: dict[str, object]) -> 
         [],
     ],
 )
-def test_app_error_malformed_primitives_raise_structured_validation_error(
+def test_app_error_malformed_primitives_raise_structured_protocol_error(
     payload: object,
 ) -> None:
-    with pytest.raises(ValidationError) as exc:
-        AppError.from_primitives(payload)  # type: ignore[arg-type]
+    with pytest.raises(AppError) as exc:
+        AppError.from_primitives(payload)
 
-    assert isinstance(exc.value, AppError)
+    assert type(exc.value) is AppError
     assert exc.value.code is ErrorCode.INVALID_ERROR
+    assert exc.value.stage == "error-deserialization"
+    assert exc.value.message_key == "error.protocol.invalid-payload"
+    assert exc.value.retry_action == "restart-worker"
 
 
 def test_app_error_uses_normal_exception_string() -> None:
