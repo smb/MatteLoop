@@ -74,6 +74,18 @@ class ArtifactResult:
 
 
 @dataclass(frozen=True)
+class PreviewSnapshot:
+    """Preview state preserved while an exclusive replacement attempt runs."""
+
+    phase: PreviewState
+    result: PreviewResult | None
+    request_id: str | None
+    error: object | None
+    attempt_error: object | None
+    stale_category: str | None
+
+
+@dataclass(frozen=True)
 class ActiveJob:
     """Exclusive job identity retained unchanged while cancellation is pending."""
 
@@ -88,6 +100,7 @@ class ActiveJob:
 class AppState:
     source: SourceState = SourceState.EMPTY
     source_id: str | None = None
+    source_request_id: str | None = None
     source_value: object | None = None
     source_error: object | None = None
     model_available: bool = True
@@ -96,9 +109,9 @@ class AppState:
     preview_result: PreviewResult | None = None
     preview_request_id: str | None = None
     preview_error: object | None = None
+    preview_attempt_error: object | None = None
     stale_category: str | None = None
-    preview_before_job: PreviewState = PreviewState.NONE
-    preview_request_before_job: str | None = None
+    preview_before_job: PreviewSnapshot | None = None
     job: ActiveJob = field(default_factory=ActiveJob)
     job_request_id: str | None = None
     artifact: ArtifactState = ArtifactState.NONE
@@ -107,7 +120,61 @@ class AppState:
     preflight_warning: bool = False
     edited_cuts: bool = False
     edited_cuts_error: object | None = None
+    edited_cuts_request_id: str | None = None
     focus_target: FocusTarget = FocusTarget.CHOOSE_VIDEO
+
+    def __post_init__(self) -> None:
+        if self.source is SourceState.LOADING and (
+            self.source_id is None or self.source_request_id is None
+        ):
+            raise ValueError("loading source requires source and request identities")
+        if self.source is SourceState.READY and (
+            self.source_id is None or self.source_value is None
+        ):
+            raise ValueError("ready source requires identity and metadata")
+        if self.source is SourceState.ERROR and (
+            self.source_id is None
+            or self.source_request_id is None
+            or self.source_error is None
+        ):
+            raise ValueError("source error requires identities and an error")
+        if self.preview in {PreviewState.CURRENT, PreviewState.STALE}:
+            if (
+                self.preview_result is None
+                or self.preview_request_id != self.preview_result.request_id
+                or self.source_id != self.preview_result.source_id
+            ):
+                raise ValueError("visible preview requires a matching result identity")
+        if self.preview is PreviewState.ERROR and (
+            self.preview_error is None or self.preview_request_id is None
+        ):
+            raise ValueError("preview error requires an error and request identity")
+        if self.job.phase is JobState.IDLE:
+            if (
+                self.job.job_id is not None
+                or self.job.kind is not None
+                or self.job_request_id is not None
+            ):
+                raise ValueError("idle job cannot retain active identities")
+        elif (
+            self.job.job_id is None
+            or self.job.kind is None
+            or self.job_request_id is None
+            or self.source is not SourceState.READY
+        ):
+            raise ValueError("active job requires job, source, and request identities")
+        if (
+            self.preview is PreviewState.RUNNING
+            and self.job.kind is not JobKind.PREVIEW
+        ):
+            raise ValueError("running preview requires an active preview job")
+        if self.artifact is ArtifactState.VALID and (
+            self.artifact_result is None
+            or self.source_id != self.artifact_result.source_id
+        ):
+            raise ValueError("valid artifact requires a matching result")
+        if self.edited_cuts and self.artifact is not ArtifactState.VALID:
+            raise ValueError("edited cuts require a valid artifact")
 
 
 @dataclass(frozen=True)
@@ -127,17 +194,20 @@ class Capabilities:
 @dataclass(frozen=True)
 class SourceLoadRequested:
     source_id: str
+    request_id: str
 
 
 @dataclass(frozen=True)
 class SourceLoaded:
     source_id: str
+    request_id: str
     value: object
 
 
 @dataclass(frozen=True)
 class SourceLoadFailed:
     source_id: str
+    request_id: str
     error: object
 
 
@@ -158,12 +228,16 @@ class PreviewRequested:
 @dataclass(frozen=True)
 class ModelPrepared:
     job_id: str
+    source_id: str
+    request_id: str
     stage: str = "Segmentation"
 
 
 @dataclass(frozen=True)
 class JobStageChanged:
     job_id: str
+    source_id: str
+    request_id: str
     stage: str
 
 
@@ -235,7 +309,17 @@ class CancelAcknowledged:
 
 
 @dataclass(frozen=True)
+class EditedCutsScanRequested:
+    source_id: str
+    artifact_request_id: str
+    request_id: str
+
+
+@dataclass(frozen=True)
 class EditedCutsChanged:
+    source_id: str
+    artifact_request_id: str
+    request_id: str
     detected: bool
     error: object | None = None
 
@@ -259,6 +343,7 @@ type Event = (
     | RenderFailed
     | CancelRequested
     | CancelAcknowledged
+    | EditedCutsScanRequested
     | EditedCutsChanged
 )
 
@@ -272,16 +357,14 @@ def reduce(state: AppState, event: Event) -> AppState:
         return AppState(
             source=SourceState.LOADING,
             source_id=event.source_id,
+            source_request_id=event.request_id,
             model_available=state.model_available,
             model_supports_render=state.model_supports_render,
             focus_target=FocusTarget.NONE,
         )
 
     if isinstance(event, SourceLoaded):
-        if (
-            state.source is not SourceState.LOADING
-            or event.source_id != state.source_id
-        ):
+        if not _matches_source_request(state, event.source_id, event.request_id):
             return state
         return replace(
             state,
@@ -292,10 +375,7 @@ def reduce(state: AppState, event: Event) -> AppState:
         )
 
     if isinstance(event, SourceLoadFailed):
-        if (
-            state.source is not SourceState.LOADING
-            or event.source_id != state.source_id
-        ):
+        if not _matches_source_request(state, event.source_id, event.request_id):
             return state
         return replace(
             state,
@@ -322,8 +402,8 @@ def reduce(state: AppState, event: Event) -> AppState:
             state,
             preview=PreviewState.RUNNING,
             preview_error=None,
-            preview_before_job=state.preview,
-            preview_request_before_job=state.preview_request_id,
+            preview_attempt_error=None,
+            preview_before_job=_preview_snapshot(state),
             preview_request_id=event.request_id,
             job=ActiveJob(
                 event.job_id,
@@ -338,7 +418,13 @@ def reduce(state: AppState, event: Event) -> AppState:
         )
 
     if isinstance(event, ModelPrepared):
-        if not _matches_job(state, event.job_id, JobKind.PREVIEW):
+        if not _matches_job_notification(
+            state,
+            event.job_id,
+            event.source_id,
+            event.request_id,
+            {JobKind.PREVIEW},
+        ):
             return state
         if state.job.phase is not JobState.PREPARING_MODEL:
             return state
@@ -353,10 +439,16 @@ def reduce(state: AppState, event: Event) -> AppState:
         )
 
     if isinstance(event, JobStageChanged):
-        if event.job_id != state.job.job_id or state.job.phase in {
-            JobState.IDLE,
-            JobState.CANCELLING,
-        }:
+        if (
+            not _matches_job_notification(
+                state,
+                event.job_id,
+                event.source_id,
+                event.request_id,
+                {JobKind.PREVIEW, JobKind.RENDER, JobKind.REBUILD},
+            )
+            or state.job.phase is JobState.CANCELLING
+        ):
             return state
         phase = state.job.phase
         if phase is JobState.PREPARING_MODEL and event.stage == "Segmentation":
@@ -377,9 +469,9 @@ def reduce(state: AppState, event: Event) -> AppState:
             preview=PreviewState.CURRENT,
             preview_result=event.result,
             preview_error=None,
+            preview_attempt_error=None,
             stale_category=None,
-            preview_before_job=PreviewState.NONE,
-            preview_request_before_job=None,
+            preview_before_job=None,
             job=ActiveJob(),
             job_request_id=None,
             focus_target=FocusTarget.RESULT_CANVAS,
@@ -394,13 +486,30 @@ def reduce(state: AppState, event: Event) -> AppState:
             event.request_id,
         ):
             return state
+        previous = state.preview_before_job
+        if previous is not None and previous.result is not None:
+            return replace(
+                state,
+                preview=PreviewState.STALE,
+                preview_result=previous.result,
+                preview_request_id=previous.request_id,
+                preview_error=None,
+                preview_attempt_error=event.error,
+                stale_category="Preview failed",
+                preview_before_job=None,
+                job=ActiveJob(),
+                job_request_id=None,
+                focus_target=FocusTarget.PREVIEW_ACTION,
+            )
         return replace(
             state,
             preview=PreviewState.ERROR,
+            preview_result=None,
+            preview_request_id=event.request_id,
             preview_error=event.error,
+            preview_attempt_error=event.error,
             stale_category=None,
-            preview_before_job=PreviewState.NONE,
-            preview_request_before_job=None,
+            preview_before_job=None,
             job=ActiveJob(),
             job_request_id=None,
             focus_target=FocusTarget.PREVIEW_ACTION,
@@ -471,6 +580,9 @@ def reduce(state: AppState, event: Event) -> AppState:
             artifact=ArtifactState.VALID,
             artifact_result=event.result,
             artifact_error=None,
+            edited_cuts=False,
+            edited_cuts_error=None,
+            edited_cuts_request_id=None,
             preflight_warning=False,
             focus_target=FocusTarget.SUCCESS_BANNER,
         )
@@ -518,32 +630,57 @@ def reduce(state: AppState, event: Event) -> AppState:
         ):
             return state
         focus = state.job.initiator_focus
-        preview = state.preview
-        preview_request_id = state.preview_request_id
-        if state.job.kind is JobKind.PREVIEW:
-            preview = state.preview_before_job
-            preview_request_id = state.preview_request_before_job
+        previous = state.preview_before_job
+        if state.job.kind is JobKind.PREVIEW and previous is not None:
+            return replace(
+                state,
+                preview=previous.phase,
+                preview_result=previous.result,
+                preview_request_id=previous.request_id,
+                preview_error=previous.error,
+                preview_attempt_error=previous.attempt_error,
+                stale_category=previous.stale_category,
+                preview_before_job=None,
+                job=ActiveJob(),
+                job_request_id=None,
+                focus_target=focus,
+            )
         return replace(
             state,
-            preview=preview,
-            preview_request_id=preview_request_id,
-            preview_before_job=PreviewState.NONE,
-            preview_request_before_job=None,
+            preview_before_job=None,
             job=ActiveJob(),
             job_request_id=None,
             focus_target=focus,
         )
 
+    if isinstance(event, EditedCutsScanRequested):
+        if not _matches_artifact_identity(
+            state, event.source_id, event.artifact_request_id
+        ):
+            return state
+        return replace(state, edited_cuts_request_id=event.request_id)
+
     if isinstance(event, EditedCutsChanged):
-        focus = state.focus_target
+        if not _matches_edited_cuts_result(state, event):
+            return state
+        preview = state.preview
+        stale_category = state.stale_category
+        if event.detected and preview is PreviewState.CURRENT:
+            preview = PreviewState.STALE
+            stale_category = "Edited cuts"
         if event.error is not None:
             focus = FocusTarget.EDITED_CUT_RECOVERY
         elif event.detected:
             focus = FocusTarget.REBUILD_ACTION
+        else:
+            focus = _editor_action_focus(state)
         return replace(
             state,
+            preview=preview,
+            stale_category=stale_category,
             edited_cuts=event.detected,
             edited_cuts_error=event.error,
+            edited_cuts_request_id=None,
             focus_target=focus,
         )
 
@@ -553,9 +690,18 @@ def reduce(state: AppState, event: Event) -> AppState:
 def capabilities(state: AppState) -> Capabilities:
     """Derive every widget enablement flag and focus intent from application state."""
     idle = state.job.phase is JobState.IDLE
-    ready = state.source is SourceState.READY
+    ready = (
+        state.source is SourceState.READY
+        and state.source_id is not None
+        and state.source_value is not None
+    )
     editable = idle and ready
-    has_artifact = idle and state.artifact is ArtifactState.VALID
+    has_artifact = (
+        idle
+        and state.artifact is ArtifactState.VALID
+        and state.artifact_result is not None
+        and state.artifact_result.source_id == state.source_id
+    )
     active = not idle
     return Capabilities(
         can_choose_source=(
@@ -566,10 +712,7 @@ def capabilities(state: AppState) -> Capabilities:
         can_preview=editable,
         can_render=(editable and state.model_available and state.model_supports_render),
         can_rebuild=(
-            editable
-            and state.artifact is ArtifactState.VALID
-            and state.edited_cuts
-            and state.edited_cuts_error is None
+            has_artifact and state.edited_cuts and state.edited_cuts_error is None
         ),
         can_cancel=active and state.job.phase is not JobState.CANCELLING,
         can_open_output=has_artifact,
@@ -600,8 +743,28 @@ def _start_render(
     )
 
 
-def _matches_job(state: AppState, job_id: str, kind: JobKind) -> bool:
-    return state.job.job_id == job_id and state.job.kind is kind
+def _matches_source_request(state: AppState, source_id: str, request_id: str) -> bool:
+    return (
+        state.source is SourceState.LOADING
+        and state.source_id == source_id
+        and state.source_request_id == request_id
+    )
+
+
+def _matches_job_notification(
+    state: AppState,
+    job_id: str,
+    source_id: str,
+    request_id: str,
+    kinds: set[JobKind],
+) -> bool:
+    return (
+        state.job.phase is not JobState.IDLE
+        and state.job.job_id == job_id
+        and state.job.kind in kinds
+        and state.source_id == source_id
+        and state.job_request_id == request_id
+    )
 
 
 def _matches_result(
@@ -611,10 +774,12 @@ def _matches_result(
     source_id: str,
     request_id: str,
 ) -> bool:
-    return (
-        _matches_job(state, job_id, kind)
-        and state.source_id == source_id
-        and state.job_request_id == request_id
+    return _matches_job_notification(
+        state,
+        job_id,
+        source_id,
+        request_id,
+        {kind},
     )
 
 
@@ -624,11 +789,42 @@ def _matches_render_result(
     source_id: str,
     request_id: str,
 ) -> bool:
+    return _matches_job_notification(
+        state,
+        job_id,
+        source_id,
+        request_id,
+        {JobKind.RENDER, JobKind.REBUILD},
+    )
+
+
+def _matches_artifact_identity(
+    state: AppState, source_id: str, artifact_request_id: str
+) -> bool:
     return (
-        state.job.kind in {JobKind.RENDER, JobKind.REBUILD}
-        and state.job.job_id == job_id
+        state.artifact is ArtifactState.VALID
+        and state.artifact_result is not None
         and state.source_id == source_id
-        and state.job_request_id == request_id
+        and state.artifact_result.source_id == source_id
+        and state.artifact_result.request_id == artifact_request_id
+    )
+
+
+def _matches_edited_cuts_result(state: AppState, event: EditedCutsChanged) -> bool:
+    return (
+        _matches_artifact_identity(state, event.source_id, event.artifact_request_id)
+        and state.edited_cuts_request_id == event.request_id
+    )
+
+
+def _preview_snapshot(state: AppState) -> PreviewSnapshot:
+    return PreviewSnapshot(
+        phase=state.preview,
+        result=state.preview_result,
+        request_id=state.preview_request_id,
+        error=state.preview_error,
+        attempt_error=state.preview_attempt_error,
+        stale_category=state.stale_category,
     )
 
 
