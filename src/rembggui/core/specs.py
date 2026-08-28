@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import StrEnum
@@ -16,6 +18,7 @@ MIN_FPS = 1
 MAX_FPS = 240
 _MIB_BYTES = Decimal(1024 * 1024)
 _SUPPORTED_SOURCE_SUFFIXES = frozenset({".mp4", ".mov", ".webm", ".mkv"})
+_URI_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:/")
 
 
 class EdgeMode(StrEnum):
@@ -34,8 +37,8 @@ class CollisionPolicy(StrEnum):
 class SamplingSpec:
     """Timestamp-based output sampling over a half-open [start, end) interval."""
 
-    end: Fraction = field(default_factory=lambda: Fraction(1))
     start: Fraction = field(default_factory=lambda: Fraction(0))
+    end: Fraction = field(default_factory=lambda: Fraction(1))
     fps: int = 15
 
     def __post_init__(self) -> None:
@@ -69,6 +72,21 @@ class SamplingSpec:
         """Whether *timestamp* belongs to this Start-inclusive, End-exclusive range."""
         return self.start <= timestamp < self.end
 
+    def validate_for_duration(self, duration: Fraction) -> None:
+        """Validate the export interval against one probed source duration."""
+        if not isinstance(duration, Fraction) or duration <= 0:
+            raise ValidationError(
+                ErrorCode.INVALID_SAMPLING,
+                "sampling",
+                "source duration must be a positive Fraction",
+            )
+        if self.start >= duration or self.end > duration:
+            raise ValidationError(
+                ErrorCode.INVALID_SAMPLING,
+                "sampling",
+                "sampling interval must satisfy start < duration and end <= duration",
+            )
+
 
 @dataclass(frozen=True)
 class CropSpec:
@@ -78,6 +96,9 @@ class CropSpec:
     y: int
     width: int
     height: int
+
+    def __post_init__(self) -> None:
+        self.validate()
 
     def validate(self) -> None:
         fields = (self.x, self.y, self.width, self.height)
@@ -160,6 +181,7 @@ class FramingSpec:
             )
         if (
             not isinstance(self.alpha_threshold, Decimal)
+            or not self.alpha_threshold.is_finite()
             or not Decimal(0) <= self.alpha_threshold <= Decimal(100)
         ):
             raise ValidationError(
@@ -177,7 +199,11 @@ class FramingSpec:
                 "framing",
                 "padding must be an integer greater than or equal to zero",
             )
-        if not isinstance(self.stretch_x, Decimal) or self.stretch_x <= 0:
+        if (
+            not isinstance(self.stretch_x, Decimal)
+            or not self.stretch_x.is_finite()
+            or self.stretch_x <= 0
+        ):
             raise ValidationError(
                 ErrorCode.INVALID_FRAMING,
                 "framing",
@@ -242,7 +268,11 @@ class OutputSpec:
         collision_policy: CollisionPolicy = CollisionPolicy.CANCEL,
     ) -> OutputSpec:
         """Create output settings from a GUI MiB value without binary float drift."""
-        if not isinstance(max_mib, Decimal) or max_mib < 0:
+        if (
+            not isinstance(max_mib, Decimal)
+            or not max_mib.is_finite()
+            or max_mib < 0
+        ):
             raise ValidationError(
                 ErrorCode.INVALID_OUTPUT,
                 "output",
@@ -252,7 +282,7 @@ class OutputSpec:
         return cls(directory, filename, max_bytes, collision_policy)
 
     def validate(self) -> None:
-        if not isinstance(self.directory, Path) or self.directory == Path(""):
+        if not isinstance(self.directory, Path) or not _is_local_path(self.directory):
             raise ValidationError(
                 ErrorCode.INVALID_OUTPUT,
                 "output",
@@ -311,7 +341,7 @@ class RenderRequest:
     def validate(self) -> None:
         if (
             not isinstance(self.source, Path)
-            or self.source == Path("")
+            or not _is_local_path(self.source)
             or self.source.suffix.lower() not in _SUPPORTED_SOURCE_SUFFIXES
         ):
             raise ValidationError(
@@ -337,10 +367,45 @@ class RenderRequest:
                 "rebuild and regenerate are mutually exclusive",
             )
 
-    def validate_for_source(self, width: int, height: int) -> tuple[int, int]:
+    def preflight_job_paths(self) -> None:
+        """Require filesystems paths to be usable immediately before a job starts."""
+        if (
+            not self.source.exists()
+            or not self.source.is_file()
+            or not os.access(self.source, os.R_OK)
+        ):
+            raise ValidationError(
+                ErrorCode.INVALID_RENDER_REQUEST,
+                "request",
+                "source must be an existing readable local regular file",
+            )
+        if (
+            not self.output.directory.exists()
+            or not self.output.directory.is_dir()
+            or not os.access(self.output.directory, os.R_OK | os.W_OK | os.X_OK)
+        ):
+            raise ValidationError(
+                ErrorCode.INVALID_OUTPUT,
+                "output",
+                "output directory must permit reading, writing, and traversal",
+            )
+
+    def validate_for_source(
+        self, width: int, height: int, duration: Fraction
+    ) -> tuple[int, int]:
         """Validate source-specific crop and conservative post-process dimensions."""
+        self.sampling.validate_for_duration(duration)
         self.crop.validate_for(width, height)
         final_dimensions = self.framing.dimensions_after_padding_and_stretch(
             self.crop.width, self.crop.height
         )
         return self.framing.validate_final_dimensions(*final_dimensions)
+
+
+def _is_local_path(path: Path) -> bool:
+    """Reject URI and network path syntaxes while retaining relative local paths."""
+    raw_path = str(path)
+    if raw_path.startswith(("//", "\\\\")):
+        return False
+    uri_match = _URI_PATH_RE.match(raw_path)
+    return uri_match is None or len(uri_match.group(0).split(":", maxsplit=1)[0]) == 1

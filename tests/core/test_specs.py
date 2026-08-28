@@ -57,12 +57,43 @@ def test_sampling_rejects_empty_or_backwards_half_open_intervals(
 
 
 def test_sampling_preserves_start_inclusive_end_exclusive_semantics() -> None:
-    sampling = SamplingSpec(end=Fraction(2), fps=15)
+    sampling = SamplingSpec(end=Fraction(2))
 
     assert sampling.start == Fraction(0)
     assert sampling.contains(Fraction(0))
     assert sampling.contains(Fraction(3, 2))
     assert not sampling.contains(Fraction(2))
+    assert sampling.fps == 15
+
+
+def test_sampling_public_positional_order_is_start_end_fps() -> None:
+    sampling = SamplingSpec(Fraction(0), Fraction(2), 15)
+
+    assert sampling.start == Fraction(0)
+    assert sampling.end == Fraction(2)
+    assert sampling.fps == 15
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "duration", "accepted"),
+    [
+        (Fraction(0), Fraction(2), Fraction(2), True),
+        (Fraction(1), Fraction(2), Fraction(2), True),
+        (Fraction(2), Fraction(3), Fraction(2), False),
+        (Fraction(0), Fraction(3), Fraction(2), False),
+    ],
+)
+def test_sampling_validates_interval_against_source_duration(
+    start: Fraction, end: Fraction, duration: Fraction, accepted: bool
+) -> None:
+    sampling = SamplingSpec(start, end, 15)
+
+    if accepted:
+        sampling.validate_for_duration(duration)
+    else:
+        with pytest.raises(ValidationError) as exc:
+            sampling.validate_for_duration(duration)
+        assert exc.value.code is ErrorCode.INVALID_SAMPLING
 
 
 def test_crop_must_be_positive_and_inside_oriented_source() -> None:
@@ -85,7 +116,7 @@ def test_crop_rejects_negative_origin_or_empty_extent(
     values: tuple[int, int, int, int],
 ) -> None:
     with pytest.raises(ValidationError) as exc:
-        CropSpec(*values).validate()
+        CropSpec(*values)
 
     assert exc.value.code is ErrorCode.INVALID_CROP
 
@@ -94,6 +125,22 @@ def test_crop_accepts_right_and_bottom_source_edges() -> None:
     crop = CropSpec(x=90, y=80, width=10, height=20)
 
     crop.validate_for(100, 100)
+
+
+@pytest.mark.parametrize(
+    ("crop", "source_width", "source_height"),
+    [
+        (CropSpec(x=91, y=0, width=10, height=10), 100, 100),
+        (CropSpec(x=0, y=91, width=10, height=10), 100, 100),
+    ],
+)
+def test_crop_rejects_right_and_bottom_overflow_independently(
+    crop: CropSpec, source_width: int, source_height: int
+) -> None:
+    with pytest.raises(ValidationError) as exc:
+        crop.validate_for(source_width, source_height)
+
+    assert exc.value.code is ErrorCode.INVALID_CROP
 
 
 def test_segmentation_defaults_and_edge_mode_are_immutable() -> None:
@@ -105,7 +152,16 @@ def test_segmentation_defaults_and_edge_mode_are_immutable() -> None:
         segmentation.model_id = "u2net"  # type: ignore[misc]
 
 
-@pytest.mark.parametrize("threshold", [Decimal("-0.01"), Decimal("100.01")])
+@pytest.mark.parametrize(
+    "threshold",
+    [
+        Decimal("-0.01"),
+        Decimal("100.01"),
+        Decimal("NaN"),
+        Decimal("Infinity"),
+        Decimal("-Infinity"),
+    ],
+)
 def test_framing_rejects_alpha_threshold_outside_percentage_range(
     threshold: Decimal,
 ) -> None:
@@ -113,6 +169,13 @@ def test_framing_rejects_alpha_threshold_outside_percentage_range(
         FramingSpec(alpha_threshold=threshold)
 
     assert exc.value.code is ErrorCode.INVALID_FRAMING
+
+
+@pytest.mark.parametrize("threshold", [Decimal("0"), Decimal("100")])
+def test_framing_accepts_alpha_threshold_percentage_boundaries(
+    threshold: Decimal,
+) -> None:
+    assert FramingSpec(alpha_threshold=threshold).alpha_threshold == threshold
 
 
 @pytest.mark.parametrize("padding", [-1, -10])
@@ -123,7 +186,16 @@ def test_framing_rejects_negative_padding(padding: int) -> None:
     assert exc.value.code is ErrorCode.INVALID_FRAMING
 
 
-@pytest.mark.parametrize("stretch_x", [Decimal("0"), Decimal("-0.01")])
+@pytest.mark.parametrize(
+    "stretch_x",
+    [
+        Decimal("0"),
+        Decimal("-0.01"),
+        Decimal("NaN"),
+        Decimal("Infinity"),
+        Decimal("-Infinity"),
+    ],
+)
 def test_framing_rejects_non_positive_horizontal_stretch(stretch_x: Decimal) -> None:
     with pytest.raises(ValidationError) as exc:
         FramingSpec(stretch_x=stretch_x)
@@ -157,6 +229,21 @@ def test_output_rejects_invalid_filename(filename: str, tmp_path: Path) -> None:
     assert exc.value.code is ErrorCode.INVALID_OUTPUT
 
 
+@pytest.mark.parametrize(
+    "directory",
+    [
+        Path("https://example.test/exports"),
+        Path("//server/share/exports"),
+        Path(r"\\server\share\exports"),
+    ],
+)
+def test_output_rejects_non_local_directory_syntax(directory: Path) -> None:
+    with pytest.raises(ValidationError) as exc:
+        OutputSpec(directory=directory, filename="cutout.webp")
+
+    assert exc.value.code is ErrorCode.INVALID_OUTPUT
+
+
 def test_output_uses_decimal_mib_conversion_and_path() -> None:
     output = OutputSpec.from_mib(
         directory=Path("exports"),
@@ -168,6 +255,22 @@ def test_output_uses_decimal_mib_conversion_and_path() -> None:
     assert output.max_bytes == 1_572_864
     assert output.path == Path("exports/cutout.webp")
     assert output.collision_policy is CollisionPolicy.REPLACE
+
+
+def test_output_zero_decimal_mib_means_no_size_limit() -> None:
+    output = OutputSpec.from_mib(Path("."), "cutout.webp", Decimal("0"))
+
+    assert output.max_bytes is None
+
+
+@pytest.mark.parametrize(
+    "max_mib", [Decimal("NaN"), Decimal("Infinity"), Decimal("-Infinity")]
+)
+def test_output_rejects_non_finite_maximum_size(max_mib: Decimal) -> None:
+    with pytest.raises(ValidationError) as exc:
+        OutputSpec.from_mib(Path("."), "cutout.webp", max_mib)
+
+    assert exc.value.code is ErrorCode.INVALID_OUTPUT
 
 
 @pytest.mark.parametrize("max_mib", [Decimal("-0.1"), Decimal("-1")])
@@ -182,28 +285,62 @@ def test_render_request_is_frozen(tmp_path: Path) -> None:
     request = valid_render_request(tmp_path)
 
     with pytest.raises(FrozenInstanceError):
-        request.sampling = SamplingSpec(end=Fraction(2), fps=15)  # type: ignore[misc]
+        request.sampling = SamplingSpec(Fraction(0), Fraction(2), 15)  # type: ignore[misc]
 
 
-def test_render_request_rejects_rebuild_and_regenerate_together(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("rebuild", "regenerate", "accepted"),
+    [
+        (False, False, True),
+        (True, False, True),
+        (False, True, True),
+        (True, True, False),
+    ],
+)
+def test_render_request_validates_all_rebuild_and_regenerate_combinations(
+    tmp_path: Path, rebuild: bool, regenerate: bool, accepted: bool
+) -> None:
     request = valid_render_request(tmp_path)
 
-    with pytest.raises(ValidationError) as exc:
-        RenderRequest(
+    if accepted:
+        rendered = RenderRequest(
             source=request.source,
             sampling=request.sampling,
             crop=request.crop,
             segmentation=request.segmentation,
             framing=request.framing,
             output=request.output,
-            rebuild=True,
-            regenerate=True,
+            rebuild=rebuild,
+            regenerate=regenerate,
         )
+        assert rendered.rebuild is rebuild
+        assert rendered.regenerate is regenerate
+    else:
+        with pytest.raises(ValidationError) as exc:
+            RenderRequest(
+                source=request.source,
+                sampling=request.sampling,
+                crop=request.crop,
+                segmentation=request.segmentation,
+                framing=request.framing,
+                output=request.output,
+                rebuild=rebuild,
+                regenerate=regenerate,
+            )
 
-    assert exc.value.code is ErrorCode.INVALID_RENDER_REQUEST
+        assert exc.value.code is ErrorCode.INVALID_RENDER_REQUEST
 
 
-@pytest.mark.parametrize("source", [Path("."), Path("source.avi")])
+@pytest.mark.parametrize(
+    "source",
+    [
+        Path("."),
+        Path("source.avi"),
+        Path("https://example.test/source.mp4"),
+        Path("//server/share/source.mp4"),
+        Path(r"\\server\share\source.mp4"),
+    ],
+)
 def test_render_request_rejects_invalid_source_path(
     source: Path, tmp_path: Path
 ) -> None:
@@ -220,3 +357,79 @@ def test_render_request_rejects_invalid_source_path(
         )
 
     assert exc.value.code is ErrorCode.INVALID_RENDER_REQUEST
+
+
+def test_construction_defers_filesystem_path_preflight(tmp_path: Path) -> None:
+    request = valid_render_request(tmp_path)
+
+    assert request.source == tmp_path / "source.mp4"
+
+
+def test_job_path_preflight_requires_readable_regular_source_file(
+    tmp_path: Path,
+) -> None:
+    request = valid_render_request(tmp_path)
+
+    with pytest.raises(ValidationError) as exc:
+        request.preflight_job_paths()
+
+    assert exc.value.code is ErrorCode.INVALID_RENDER_REQUEST
+
+
+def test_job_path_preflight_accepts_regular_source_and_dot_output_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.mp4"
+    source.touch()
+    monkeypatch.chdir(tmp_path)
+    request = RenderRequest(
+        source=source,
+        sampling=SamplingSpec(),
+        crop=CropSpec(0, 0, 128, 128),
+        segmentation=SegmentationSpec(),
+        framing=FramingSpec(),
+        output=OutputSpec(Path("."), "cutout.webp"),
+    )
+
+    request.preflight_job_paths()
+
+
+def test_job_path_preflight_requires_an_existing_usable_output_directory(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.mp4"
+    source.touch()
+    request = RenderRequest(
+        source=source,
+        sampling=SamplingSpec(),
+        crop=CropSpec(0, 0, 128, 128),
+        segmentation=SegmentationSpec(),
+        framing=FramingSpec(),
+        output=OutputSpec(tmp_path / "missing", "cutout.webp"),
+    )
+
+    with pytest.raises(ValidationError) as exc:
+        request.preflight_job_paths()
+
+    assert exc.value.code is ErrorCode.INVALID_OUTPUT
+
+
+def test_source_validation_combines_duration_crop_and_final_dimensions(
+    tmp_path: Path,
+) -> None:
+    request = valid_render_request(tmp_path)
+
+    assert request.validate_for_source(128, 128, Fraction(1)) == (128, 128)
+
+    too_long = RenderRequest(
+        source=request.source,
+        sampling=SamplingSpec(Fraction(0), Fraction(2), 15),
+        crop=request.crop,
+        segmentation=request.segmentation,
+        framing=request.framing,
+        output=request.output,
+    )
+    with pytest.raises(ValidationError) as exc:
+        too_long.validate_for_source(128, 128, Fraction(1))
+
+    assert exc.value.code is ErrorCode.INVALID_SAMPLING

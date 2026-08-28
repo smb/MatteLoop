@@ -16,6 +16,7 @@ class ErrorCode(StrEnum):
     INVALID_OUTPUT = "invalid_output"
     INVALID_RENDER_REQUEST = "invalid_render_request"
     INVALID_FINAL_DIMENSIONS = "invalid_final_dimensions"
+    INVALID_ERROR = "invalid_error"
     IMPOSSIBLE_SIZE = "impossible_size"
     JOB_ALREADY_RUNNING = "job_already_running"
     SEGMENTATION_PROCESS_CRASHED = "segmentation_process_crashed"
@@ -56,23 +57,41 @@ class AppError(Exception):
         }
 
     @classmethod
-    def from_primitives(cls, payload: Mapping[str, object]) -> AppError:
+    def from_primitives(cls, payload: object) -> AppError:
         """Recreate an error emitted by a worker from JSON-decoded primitives."""
-        job_id = payload.get("job_id")
-        if job_id is not None and not isinstance(job_id, str):
-            raise ValueError("job_id must be a string or null")
+        if not isinstance(payload, Mapping):
+            raise _invalid_primitives("payload must be an object")
         try:
             code = ErrorCode(_required_string(payload, "code"))
-            return cls(
-                code=code,
-                stage=_required_string(payload, "stage"),
-                message_key=_required_string(payload, "message_key"),
-                technical_detail=_required_string(payload, "technical_detail"),
-                retry_action=_required_string(payload, "retry_action"),
-                job_id=job_id,
-            )
+            stage = _required_string(payload, "stage")
+            message_key = _required_string(payload, "message_key")
+            technical_detail = _required_string(payload, "technical_detail")
+            retry_action = _required_string(payload, "retry_action")
+            job_id = payload.get("job_id")
+            if job_id is not None and not isinstance(job_id, str):
+                raise ValueError("job_id must be a string or null")
         except ValueError as error:
-            raise ValueError("invalid AppError primitives") from error
+            raise _invalid_primitives(
+                "payload fields do not match the AppError contract"
+            ) from error
+
+        if message_key == "error.validation" and retry_action == "correct-input":
+            return ValidationError(
+                code,
+                stage,
+                technical_detail,
+                message_key,
+                retry_action,
+                job_id,
+            )
+        return AppError(
+            code,
+            stage,
+            message_key,
+            technical_detail,
+            retry_action,
+            job_id,
+        )
 
 
 class ValidationError(AppError):
@@ -102,3 +121,11 @@ def _required_string(payload: Mapping[str, object], key: str) -> str:
     if not isinstance(value, str):
         raise ValueError(f"{key} must be a string")
     return value
+
+
+def _invalid_primitives(technical_detail: str) -> ValidationError:
+    return ValidationError(
+        ErrorCode.INVALID_ERROR,
+        "error-deserialization",
+        technical_detail,
+    )
