@@ -817,7 +817,7 @@ The plan is design-complete for implementation. Run `/design-review` against the
 |--------|---------|-----|------|--------|----------|
 | CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | Not run; `/office-hours` supplied the approved product design |
 | Codex Review | `/codex review` | Independent 2nd opinion | 1 | SKIPPED | Already running under Codex; nested pass intentionally skipped |
-| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | CLEAR | 21 issues resolved, 0 critical gaps |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 2 | CLEAR | Focused rerun: 6 issues resolved, 0 critical gaps; prior full review: 21 issues resolved |
 | Design Review | `/plan-design-review` | UI/UX gaps | 1 | CLEAR | Score 7/10 → 9/10; 5 decisions resolved; 3 mockups generated, 1 approved |
 | DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | Not run |
 
