@@ -7,6 +7,8 @@ from fractions import Fraction
 from rembggui.core.errors import ErrorCode, ValidationError
 from rembggui.core.specs import MAX_FPS, MIN_FPS
 
+MAX_OUTPUT_FRAMES = 100_000
+
 
 def sample_times(
     start: Fraction, end: Fraction, fps: int
@@ -15,6 +17,12 @@ def sample_times(
     _validate_sampling_inputs(start, end, fps)
     frame_step = Fraction(1, fps)
     frame_count = _ceiling((end - start) * fps)
+    if frame_count > MAX_OUTPUT_FRAMES:
+        raise ValidationError(
+            ErrorCode.INVALID_SAMPLING,
+            "timebase",
+            "output frame count must not exceed 100000",
+        )
     return tuple(start + index * frame_step for index in range(frame_count))
 
 
@@ -23,12 +31,12 @@ def webp_delays(frame_count: int, fps: int) -> tuple[int, ...]:
     if (
         not isinstance(frame_count, int)
         or isinstance(frame_count, bool)
-        or frame_count < 1
+        or not 1 <= frame_count <= MAX_OUTPUT_FRAMES
     ):
         raise ValidationError(
             ErrorCode.INVALID_SAMPLING,
             "timebase",
-            "frame_count must be a positive integer",
+            "frame_count must be an integer between 1 and 100000",
         )
     _validate_fps(fps)
 

@@ -6,7 +6,7 @@ import os
 import threading
 import time
 from dataclasses import replace
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from fractions import Fraction
 from pathlib import Path
 
@@ -336,6 +336,95 @@ def test_render_tracks_framing_and_size_but_not_destination_or_job_mode(
     assert render_fingerprint(new_framing, cut_key=cut_key) != baseline
     assert render_fingerprint(new_limit, cut_key=cut_key) != baseline
     assert render_fingerprint(request, cut_key="ee" * 32) != baseline
+
+
+def test_render_fingerprint_distinguishes_long_exact_decimal_values(
+    tmp_path: Path,
+) -> None:
+    request = request_a(tmp_path)
+    first = replace(
+        request,
+        framing=replace(
+            request.framing,
+            stretch_x=Decimal("1.123456789012345678901234567890123456789"),
+        ),
+    )
+    second = replace(
+        request,
+        framing=replace(
+            request.framing,
+            stretch_x=Decimal("1.123456789012345678901234567890123456788"),
+        ),
+    )
+
+    assert render_fingerprint(first, cut_key="ef" * 32) != render_fingerprint(
+        second, cut_key="ef" * 32
+    )
+
+
+def test_render_fingerprint_canonicalizes_equivalent_decimal_forms(
+    tmp_path: Path,
+) -> None:
+    request = request_a(tmp_path)
+    trailing_zero = replace(
+        request,
+        framing=replace(
+            request.framing,
+            alpha_threshold=Decimal("1.2300"),
+            stretch_x=Decimal("1.2500"),
+        ),
+    )
+    exponent_form = replace(
+        request,
+        framing=replace(
+            request.framing,
+            alpha_threshold=Decimal("123e-2"),
+            stretch_x=Decimal("125e-2"),
+        ),
+    )
+
+    assert render_fingerprint(
+        trailing_zero, cut_key="ef" * 32
+    ) == render_fingerprint(exponent_form, cut_key="ef" * 32)
+
+
+def test_render_fingerprint_canonicalizes_signed_zero(tmp_path: Path) -> None:
+    request = request_a(tmp_path)
+    negative_zero = replace(
+        request,
+        framing=replace(request.framing, alpha_threshold=Decimal("-0.000")),
+    )
+    positive_zero = replace(
+        request,
+        framing=replace(request.framing, alpha_threshold=Decimal("0")),
+    )
+
+    assert render_fingerprint(
+        negative_zero, cut_key="ef" * 32
+    ) == render_fingerprint(positive_zero, cut_key="ef" * 32)
+
+
+def test_render_fingerprint_is_independent_of_decimal_context_precision(
+    tmp_path: Path,
+) -> None:
+    request = replace(
+        request_a(tmp_path),
+        framing=FramingSpec(
+            True,
+            Decimal("2.123456789012345678901234567890123456789"),
+            8,
+            Decimal("1.987654321098765432109876543210987654321"),
+        ),
+    )
+
+    with localcontext() as context:
+        context.prec = 6
+        low_precision = render_fingerprint(request, cut_key="ef" * 32)
+    with localcontext() as context:
+        context.prec = 60
+        high_precision = render_fingerprint(request, cut_key="ef" * 32)
+
+    assert low_precision == high_precision
 
 
 @pytest.mark.parametrize(

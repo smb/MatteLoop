@@ -239,8 +239,12 @@ def _framing(framing: FramingSpec) -> dict[str, object]:
 
 
 def _canonical_decimal(value: Decimal) -> str:
-    normalized = value.normalize()
-    return "0" if normalized == 0 else format(normalized, "f")
+    if value.is_zero():
+        return "0"
+    fixed_point = format(value, "f")
+    if "." in fixed_point:
+        fixed_point = fixed_point.rstrip("0").rstrip(".")
+    return fixed_point
 
 
 def _canonical_hash(payload: dict[str, object]) -> str:

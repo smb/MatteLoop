@@ -61,6 +61,25 @@ def test_sampling_rejects_non_fraction_boundaries() -> None:
     assert exc.value.code is ErrorCode.INVALID_SAMPLING
 
 
+def test_sampling_accepts_exactly_one_hundred_thousand_output_frames() -> None:
+    timestamps = sample_times(Fraction(0), Fraction(100_000), 1)
+
+    assert len(timestamps) == 100_000
+    assert timestamps[0] == Fraction(0)
+    assert timestamps[-1] == Fraction(99_999)
+
+
+def test_sampling_rejects_more_than_one_hundred_thousand_output_frames() -> None:
+    with pytest.raises(ValidationError) as exc:
+        sample_times(Fraction(0), Fraction(100_001), 1)
+
+    assert exc.value.code is ErrorCode.INVALID_SAMPLING
+    assert exc.value.stage == "timebase"
+    assert exc.value.technical_detail == (
+        "output frame count must not exceed 100000"
+    )
+
+
 def test_sixty_fps_delays_distribute_rounding() -> None:
     delays = webp_delays(6, 60)
 
@@ -79,6 +98,25 @@ def test_cumulative_delays_stay_within_half_a_millisecond() -> None:
     encoded_milliseconds = sum(delays)
     exact_milliseconds = Fraction(997_000, 240)
     assert abs(Fraction(encoded_milliseconds) - exact_milliseconds) <= Fraction(1, 2)
+
+
+def test_webp_delays_accepts_exactly_one_hundred_thousand_frames() -> None:
+    delays = webp_delays(100_000, 1)
+
+    assert len(delays) == 100_000
+    assert delays[0] == 1000
+    assert delays[-1] == 1000
+
+
+def test_webp_delays_rejects_more_than_one_hundred_thousand_frames() -> None:
+    with pytest.raises(ValidationError) as exc:
+        webp_delays(100_001, 1)
+
+    assert exc.value.code is ErrorCode.INVALID_SAMPLING
+    assert exc.value.stage == "timebase"
+    assert exc.value.technical_detail == (
+        "frame_count must be an integer between 1 and 100000"
+    )
 
 
 @pytest.mark.parametrize(
