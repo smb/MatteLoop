@@ -494,7 +494,32 @@ V1's tested media baseline is 8-bit SDR video in:
 
 ## Test Strategy
 
-The automated target is 42 technical path groups in `core/` and `jobs/`; the 8 GUI/user-flow groups and 2 packaging groups are explicit manual release checks. Tests use pytest with synthetic public fixtures only. Hypothesis, a hard coverage percentage gate, and a required pytest-qt suite are intentionally absent; coverage may be reported informationally.
+The automated target is 42 technical path groups in `core/` and `jobs/` plus 6 focused Qt presentation-contract groups in `ui/`. Two platform/assistive-technology GUI groups and 2 packaging groups remain explicit manual release checks. Tests use pytest, pytest-qt, and synthetic public fixtures only. Hypothesis and a hard coverage percentage gate are intentionally absent; coverage may be reported informationally.
+
+```text
+PLANNED TEST COVERAGE — implementation does not exist yet
+
+CODE PATHS                                             USER FLOWS
+[★★★ PLANNED UNIT] specs/reducer/errors                [★★★ PLANNED QT] Load → Ready state presentation
+  ├── valid + boundary + invalid inputs                  ├── picker/drop equivalent state events
+  ├── capability/state matrix                            └── source error → recovery focus
+  └── stale/late/cancel events                         [★★★ PLANNED QT] Preview modal [→E2E]
+[★★★ PLANNED UNIT] time/crop/geometry                    ├── async open → stage/progress
+  ├── CFR/VFR/[Start, End)                               ├── Escape once → CANCELLING
+  ├── rotate/letterbox/DPI transforms                    └── CancelAck → close/focus return
+  └── paint/hit/focus/a11y geometry parity             [★★★ PLANNED QT] Editor interaction
+[★★★ PLANNED INTEGRATION] media/jobs [→E2E]              ├── keyboard-context isolation
+  ├── decode → segment → cuts → encode                   ├── primary/stale/success states
+  ├── crash/cancel/protocol/cleanup                      └── minimum layout/action shelf
+  └── download/cache/edit/rebuild failures             [★★★ PLANNED QT] Accessible virtual controls
+[MANUAL RELEASE] real models/codecs/frozen apps           ├── names/roles/values/actions/events
+  └── four native artifacts                              └── shared accessible/visual rectangles
+                                                        [MANUAL RELEASE] native DnD, DPI, screenreaders
+
+Current implemented coverage: 0 planned paths (design-only repository)
+Planned gaps: 0 unassigned paths; no LLM/eval surface
+Legend: ★★★ behavior + edge + error | [→E2E] multi-component integration
+```
 
 ### Automated unit tests
 
@@ -517,12 +542,21 @@ The automated target is 42 technical path groups in `core/` and `jobs/`; the 8 G
 - Test persistent-cut promotion before encode, failed encode after promotion, external edit detection, immutable Rebuild snapshot, editor-save race, invalid PNG sets, union invalidation, and preservation of the previous valid cache.
 - Test corrupt input, unwritable output, advisory low-disk confirmation, actual disk-full failure, single-frame range, empty alpha union, and cancellation at each documented safe boundary.
 
+### Automated Qt presentation-contract tests
+
+- Use pytest-qt with the offscreen Qt platform for deterministic PR checks; inject fake source/model/job adapters so ordinary GUI tests never download weights, run ONNX, or depend on a system codec.
+- Parameterize every user-visible state-matrix row and assert visible state copy, enabled actions, primary-action styling/property, stale/current markers, and intended focus target. Avoid pixel screenshots and theme-dependent color assertions.
+- Exercise the parent-owned `JobDialog` through asynchronous `open()`: stage updates, one Cancel request from button/Escape/close, persistent `CANCELLING`, rejection of late job IDs, close only after the matching terminal event, and correct success/error/cancel focus return.
+- Exercise editor-context keyboard routing so arrows, Shift+arrows, I/O, and hold-Space act only in their documented focus contexts and never steal input from fields, buttons, or dialogs.
+- Query the custom `QAccessibleInterface` tree for parent/virtual-child counts, names, roles, current values/value text, actions, focus, and screen rectangles; observe representative focus/value/location events after reducer and geometry changes.
+- At 1100×720 logical pixels, assert side-by-side canvases, 340 px inspector, at least 176 px timeline, and a visible fixed 104 px action shelf. Pure geometry tests cover the 100/150/200% device-scale matrix; native visual fidelity remains a manual release check.
+
 ### Manual GUI release check
 
-- File picker and drag/drop equivalence; first-frame display; bounded filmstrip; debounced pointer scrubbing; exact keyboard steps; In/Out and crop synchronization.
-- Explicit modal preview, stale overlay, linked zoom/lens/Space comparison, global-trim estimate, model manager, progress stages, cancellation acknowledgement, errors, and output collision.
-- External edit workflow: `Open Cut Folder`, edit a PNG, `Show edited cut`, `Rebuild from edited cuts`, and verify that edits saved after the snapshot affect only the next job.
-- Keyboard focus, accessibility labels, 100/150/200% DPI, minimum window size, and editor lock during every exclusive job.
+- On each target OS, verify native file picker and drag/drop, real window modality/close behavior, clipboard/path handling, and the packaged application's first-frame/filmstrip behavior.
+- With VoiceOver, Narrator, and the documented Ubuntu screenreader, traverse custom timeline/crop children and confirm spoken names, values, bounds changes, focus order, stage announcements, and cancellation acknowledgement.
+- Visually verify linked zoom/lens/Space comparison, crop/range hit regions, global-trim estimate, stale/current/error treatments, and minimum-window behavior at 100/150/200% scaling and supported native themes.
+- Run the external edit workflow with a real editor: `Open Cut Folder`, edit a PNG, `Show edited cut`, `Rebuild from edited cuts`, and verify that edits saved after the snapshot affect only the next job.
 
 ### Manually started release qualification
 
@@ -613,7 +647,7 @@ No runtime dependency on an externally installed `ffmpeg`, ImageMagick, `img2web
 - Signing, Apple notarization, and Windows signing — explicitly rejected; public artifacts remain unsigned with documented launch warnings.
 - Additional output formats — explicitly rejected; animated WebP plus editable PNG cuts covers the stated workflow.
 - ViTMatte and arbitrary imported ONNX sessions — explicitly rejected; the tested pinned `rembg` catalog is the trust boundary.
-- Automated pytest-qt user-flow coverage — GUI flows are a manual release check.
+- Pixel-screenshot E2E and fully automated native screenreader/drag-drop matrices — focused pytest-qt presentation contracts run in PRs, while these platform-specific checks remain manual release gates.
 - Nightly or pull-request real-model/codec/frozen-artifact matrices — qualification runs only through manual release dispatch.
 - Curated real portrait/hair acceptance footage — synthetic public fixtures are the only maintained test media; ad-hoc user videos are exploratory.
 - Restoring the last source, preview, job, cloud token, or active workspace — restart returns to idle/default state.
@@ -689,7 +723,7 @@ Conflict flags: Lanes A and C both touch source/crop contracts if interfaces are
 
 Synthesized from this review's findings. Each task derives from a specific finding above. Run with Codex; checkbox as you ship.
 
-- [ ] **T1 (P1, human: ~1 day / CC: ~2h)** — Project foundation — Create the public Python project, dependency locks, synthetic fixture generator, and PR checks.
+- [ ] **T1 (P1, human: ~1 day / CC: ~2h)** — Project foundation — Create the public Python project, dependency locks including pytest-qt, synthetic fixture generator, and headless PR checks.
   - Surfaced by: Test Review — repository has no Python/test scaffold and ordinary CI is intentionally synthetic-only.
   - Files: `pyproject.toml`, `src/rembggui/`, `tests/`, `.github/workflows/ci.yml`, `.gitignore`
   - Verify: pytest, the configured type-check command, and the configured lint command all pass.
@@ -710,9 +744,9 @@ Synthesized from this review's findings. Each task derives from a specific findi
   - Files: `src/rembggui/jobs/models/`, `tests/jobs/models/`, `resources/model-manifest.json`
   - Verify: local fake-download tests plus manual release qualification for every real local model.
 - [ ] **T6 (P1, human: ~6 days / CC: ~2.5 days)** — Visual editor, accessibility, and preview — Build the approved timeline-first workspace, side-by-side canvas, visual crop, complete state matrix, fixed action shelf, accessible custom controls, stale preview, and exclusive modal progress/cancel UI.
-  - Surfaced by: Architecture/Performance plus Focused Design Review — visual cut/crop and explicit one-frame preview require bounded thumbnails, deterministic state presentation, a stable 1100×720 layout, and keyboard/screenreader parity.
-  - Files: `DESIGN.md`, `src/rembggui/ui/`, `tests/core/test_timeline.py`, `docs/release/gui-checklist.md`
-  - Verify: automated reducer/timeline tests plus every row of the user-visible state matrix at 1100×720 and 100/150/200% scaling; complete keyboard-only and screenreader manual checks including modal cancellation acknowledgement and focus return.
+  - Surfaced by: Architecture/Test Review plus Focused Design Review — visual cut/crop and explicit one-frame preview require bounded thumbnails, deterministic state presentation, a stable 1100×720 layout, keyboard/screenreader parity, and focused Qt contract automation.
+  - Files: `DESIGN.md`, `src/rembggui/ui/`, `tests/core/test_timeline.py`, `tests/ui/`, `docs/release/gui-checklist.md`
+  - Verify: pytest-qt covers every presentation state, asynchronous modal cancellation/focus, keyboard contexts, accessible virtual controls, and the 1100×720 layout; pure geometry tests cover 100/150/200% scaling; native screenreader and visual DPI checks remain manual.
 - [ ] **T7 (P1, human: ~5 days / CC: ~2 days)** — Persistent cuts/render/rebuild — Promote validated cuts before encoding, expose external editing, snapshot Rebuild input, and atomically create lossless WebP.
   - Surfaced by: Architecture/Code Quality — externally editable cuts must survive later failures and running jobs must read immutable snapshots.
   - Files: `src/rembggui/core/media/`, `src/rembggui/jobs/render/`, `src/rembggui/ui/workspace/`, `tests/jobs/render/`
