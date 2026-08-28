@@ -78,6 +78,7 @@ The suggested automatic inference after a 250 ms scrub pause is intentionally no
 1. **UI (`rembggui/ui`)**
    - `MainWindow`, source drop strip, paired preview canvas, visual timeline, crop overlay, inspector, model manager, and modal job dialog.
    - Owns widgets and presentation only. It renders immutable state and emits typed user events.
+   - Custom-painted timeline and crop widgets install a `QAccessible` factory. Their widget wrapper and virtual children expose standard roles, values, actions, focus, and screen geometry without adding visible overlay widgets.
 
 2. **Core (`rembggui/core`)**
    - Frozen `SamplingSpec`, `CropSpec`, `SegmentationSpec`, `FramingSpec`, and `OutputSpec`; `RenderRequest` composes them into a validated job snapshot.
@@ -279,6 +280,8 @@ Action emphasis is state-dependent without moving either button:
 
 - Stable tab order: source strip → Original canvas/crop → Result canvas → timeline/playhead → range controls → inspector sections → fixed Preview/Render shelf.
 - Every custom canvas/timeline object exposes an accessible name, role, current value, and value text. Required names include `Crop rectangle`, all eight crop handles, `Export start`, `Export end`, and `Preview frame playhead`.
+- Timeline and crop each provide a custom `QAccessibleInterface` registered through `QAccessible.installFactory`; the parent widget uses the `QAccessibleWidget` convenience path and exposes virtual children for IN, OUT, playhead, crop rectangle, and all eight crop handles. Interactive children implement the applicable value and action interfaces, and their accessible rectangles use the same widget-to-screen transform as painting and hit testing.
+- Reducer or geometry changes emit the matching accessibility focus, value, name/description, visibility, and location events through `QAccessible.updateAccessibility`. Accessibility state is an adapter over the immutable editor state, never a second mutable copy of control values.
 - Timeline keyboard behavior remains Left/Right one frame, Shift+Left/Right larger step, `I` set Start, and `O` set End. Shortcuts operate only in the editor context and never while typing in a field.
 - Crop has an equivalent numeric editing path at all times. When the overlay is focused, arrows move it by one source pixel and Shift+arrows by ten; focused handles resize with the same increments. Bounds are announced after the operation settles.
 - Space performs hold-to-compare only while Result has focus. It never steals Space from buttons, fields, dialogs, or timeline playback controls.
