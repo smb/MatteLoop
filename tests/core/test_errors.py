@@ -115,3 +115,18 @@ def test_app_error_uses_normal_exception_string() -> None:
     )
 
     assert str(error) == "bad output"
+
+
+def test_source_changed_error_code_round_trips_for_reload_recovery() -> None:
+    error = AppError(
+        ErrorCode.SOURCE_CHANGED,
+        "source-hash",
+        "error.source.changed",
+        "source changed while hashing",
+        "reload-source",
+    )
+
+    restored = AppError.from_primitives(error.to_primitives())
+
+    assert restored.code is ErrorCode.SOURCE_CHANGED
+    assert restored.retry_action == "reload-source"

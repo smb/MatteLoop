@@ -21,6 +21,7 @@ class ErrorCode(StrEnum):
     JOB_ALREADY_RUNNING = "job_already_running"
     SEGMENTATION_PROCESS_CRASHED = "segmentation_process_crashed"
     MODEL_CHECKSUM_MISMATCH = "model_checksum_mismatch"
+    SOURCE_CHANGED = "source_changed"
     CUTS_CHANGED_DURING_SNAPSHOT = "cuts_changed_during_snapshot"
     CLOUD_CONSENT_REQUIRED = "cloud_consent_required"
 
