@@ -131,6 +131,7 @@ Rules:
 - Qt's UI thread owns every widget.
 - Interactive source decoding and background thumbnail/hash work use dedicated single-purpose workers. Background work pauses while an exclusive modal job runs; there is no general-purpose thread pool competing with render.
 - Every frame-reading activity owns its own read-only PyAV `InputContainer`: interactive frame worker, thumbnail worker, and render job never share or move a container across threads.
+- Thumbnail and interactive frame workers may construct and transform `QImage`, but never touch `QPixmap` or a widget. GUI conversion and cache insertion occur only after source ID and request generation still match; stale resize/DPI/source results are dropped.
 - ONNX session creation/inference is isolated in one spawned `SegmentationProcess` because heavyweight sessions and native cleanup are not reliably memory-bounded inside a long-lived GUI process. It owns exactly one model session and accepts one request at a time through a versioned control `Pipe` plus one reusable shared-memory frame slot. The parent owns and unlinks shared memory. Switching models terminates and joins the process before spawning its replacement, guaranteeing OS-level memory reclamation; frozen entry points call `multiprocessing.freeze_support()`.
 - Every operation receives a `JobContext` containing job ID, progress sink, cancellation state, and workspace. Qt workers adapt `requestInterruption()`, downloads adapt `QNetworkReply.abort()`, and the child process returns `CancelAck`; controls unlock only after acknowledgement.
 - Progress events contain `stage`, `completed`, `total`, and a human-readable detail. Indeterminate stages remain explicitly indeterminate instead of showing fake percentages.
@@ -156,14 +157,14 @@ Rules:
 
 ### Visual timeline and preview-frame selection
 
-- A viewport-adaptive cached filmstrip represents the complete original video with approximately one thumbnail per 80–100 logical pixels, clamped to 12–48 evenly sampled images. A source-fingerprint-keyed LRU disk cache is capped at 256 MiB; resize generates only missing samples and prioritizes the visible set.
+- A viewport-adaptive cached filmstrip represents the complete original video with approximately one thumbnail per 80–100 logical pixels, clamped to 12–48 evenly sampled images. A source-fingerprint-keyed LRU disk cache is capped at 256 MiB and the GUI-owned in-memory pixmap LRU at 64 MiB; resize generates only missing samples and prioritizes the visible set.
 - A playhead scrubs the entire original and moves immediately. The large exact source frame is decoded only after 100–150 ms without further pointer motion; intermediate requests are replaced by the newest timestamp.
 - Start and End handles define the render range. Excluded ranges are dimmed; the selected range remains clear.
 - If the playhead is outside the render range, the timeline and metadata show `Outside export range`; preview inference is still allowed.
 - Timecode and absolute frame-number fields stay synchronized with the playhead. For variable-frame-rate input, timestamp is authoritative and the displayed frame index is informational.
 - `Set Start to Playhead`, `Set End to Playhead`, and `Reset Range` are available through compact buttons and timeline context actions.
 - Keyboard support: Left/Right steps one exact decoded frame without debounce; Shift+Left/Right makes a larger step; `I` sets Start; `O` sets End; Space is reserved for original/result comparison when focus is on the preview.
-- Thumbnail generation is asynchronous and cancelable while the editor is idle, never blocks immediate first-frame display, and pauses for modal preview/render/rebuild jobs. Typical source length is 1–2 minutes, so the bounded scheme is intentionally simple rather than a zoomable multi-resolution index.
+- Thumbnail generation is asynchronous and cancelable while the editor is idle, never blocks immediate first-frame display, and pauses for modal preview/render/rebuild jobs. Each request carries source ID, timestamp, target logical dimensions, device-pixel ratio, and request generation. The worker decodes and scales directly to the required physical dimensions as `QImage`; only the GUI thread may convert accepted current-generation images to `QPixmap`. Full-resolution timeline frames never enter either thumbnail cache. Typical source length is 1–2 minutes, so the bounded scheme is intentionally simple rather than a zoomable multi-resolution index.
 - The export interval is `[Start, End)`: Start is included and End is excluded, except that End may equal the probed source duration.
 - Start and End are primary. Editing Start leaves End fixed; editing End leaves Start fixed; the displayed Duration recomputes. Editing Duration sets `End = min(source_duration, Start + Duration)`.
 - Handles cannot cross and maintain at least one output-frame interval (`1/FPS`). Values snap to milliseconds for display but retain rational timestamps internally.
@@ -534,7 +535,7 @@ Legend: ★★★ behavior + edge + error | [→E2E] multi-component integration
 ### Automated integration tests
 
 - Generate tiny constant- and variable-frame-rate public fixtures with known colors, motion, rotation, pixel aspect, and duration; do not store or require real portrait/hair footage.
-- Exercise separate PyAV containers for frame, thumbnail, and render workers and prove stale decode results cannot replace the current playhead frame.
+- Exercise separate PyAV containers for frame, thumbnail, and render workers and prove stale decode results cannot replace the current playhead frame. Verify thumbnail requests scale in the worker to target physical pixels, stale resize/DPI generations are discarded, no full-resolution image enters either thumbnail cache, `QPixmap` conversion is GUI-thread-only, and the in-memory LRU remains within 64 MiB.
 - Exercise the versioned Pipe/shared-memory protocol using a deterministic fake segmentation child: one request in flight, cancellation acknowledgement, child crash, protocol mismatch, cleanup, and restart.
 - Verify preview/render parity through pre-global-trim processing and exact framing parity when trim is off or a matching union cache exists.
 - Validate still and animated WebP alpha, loop, timing, dimensions, stable union crop, impossible size targets, staged writes, and atomic replacement.
