@@ -119,9 +119,11 @@ Rules:
 - A preview request transitions `IDLE → PREPARING_MODEL` when acquisition/session setup is needed, then `PREVIEWING`; with a ready cached session it transitions directly `IDLE → PREVIEWING`. Success/error/cancel acknowledgement returns to `IDLE`. It is disabled during any non-idle job and there is no hidden queue.
 - Render is disabled while preview/model work is running and for SAM. A current preview is recommended but not required: rendering with `PreviewState=NONE|STALE|ERROR` opens `Preview first` (default), `Render anyway`, or `Cancel`.
 - Preview, model preparation, final render, and Rebuild are exclusive modal jobs. The entire editor is locked until success, failure, or acknowledged cancellation; the wait dialog alone remains interactive.
+- `JobDialog` is a parent-owned, long-lived `QDialog` opened asynchronously with `open()` after setting `Qt.ApplicationModal`; the application never starts an exclusive job through `QDialog.exec()` or another nested event loop. Its signals dispatch typed reducer events, and the dialog lifetime follows the active `JobContext` rather than a blocking call stack.
 - A relevant setting/playhead change moves `CURRENT` to `STALE` without deleting the old result; the stale overlay names the changed category.
 - Only one inference/render job may use the single segmentation process at a time. There is no multi-session cache in V1; selecting another model evicts the current process before preparation begins.
 - Cancel changes the job to `CANCELLING`; controls unlock only after the worker acknowledges. One ONNX inference or encoder call may finish before cancellation takes effect.
+- `JobDialog.reject()`, Escape, and any available window-close action are guarded: while a job is active they dispatch `CancelRequested` exactly once and leave the dialog open in `CANCELLING`. Only a matching terminal worker event (`CancelAck`, success, or safely-cleaned-up failure) may close and dispose the dialog; late events with another job ID cannot affect it.
 
 ### Worker model
 
@@ -259,6 +261,7 @@ Action emphasis is state-dependent without moving either button:
 - The editor is application-modal, visually dimmed, removed from the active tab order, and never unlocks while cancellation is pending.
 - `Cancel` is initially focused only when a job was invoked by pointer; keyboard invocation preserves a predictable dialog reading order of title → stage → detail → progress → `Show details` → `Cancel`.
 - Escape is equivalent to activating `Cancel`, never an unsafe close. The window close control is omitted or disabled while native work cannot stop immediately.
+- The dialog uses asynchronous `QDialog.open()` with `Qt.ApplicationModal`, never `QDialog.exec()`. Its guarded `reject()` converts Escape and close attempts into one reducer-owned cancellation request; it cannot accept or close while `JobState=CANCELLING` and closes only after the matching terminal job event.
 - Accessibility announcements occur on stage changes and coarse progress boundaries, not once per frame. `Cancelling…`, success, and failure are each announced once.
 - Preview success closes automatically and moves visible focus to Result. Render success closes automatically and moves focus to the success banner. Failure becomes the structured error dialog only after job cleanup is safe.
 
