@@ -212,7 +212,7 @@ Always visible controls are model, edge treatment, output FPS, selected range, o
 - Error `#FF6B6B`; warning `#F3B849`; success `#63D69A`.
 - Checkerboard `#252A2E` / `#343A3F`.
 - Spacing scale 4/8/12/16/24/32 px; control radius 4 px; structural surfaces 0–2 px; primary action height 40 px.
-- Motion: 120 ms hover/focus, 180 ms disclosure, 240 ms result transition; no decorative animation.
+- Motion: only a 120 ms hover/focus color response; disclosures and preview results update immediately, with no spatial or decorative animation.
 
 The historical baseline wireframe is stored at:
 
@@ -295,7 +295,7 @@ Action emphasis is state-dependent without moving either button:
 - Focus uses a 2 px alpha-green ring with a dark separation stroke and at least 3:1 contrast against adjacent surfaces. Text meets WCAG AA contrast: 4.5:1 normal text, 3:1 large text; status and control boundaries meet 3:1.
 - Primary controls are at least 40 logical pixels high and have an effective 44×44 target through hit padding. Visual timeline/crop handles may remain compact but expose at least a 24 px pointer hit region and a 44 px touch hit region.
 - Status never relies on green/amber/red alone. Icons, labels, and accessible descriptions carry the same meaning.
-- System reduced-motion preference removes the 180/240 ms disclosure/result transitions; no workflow depends on animation.
+- V1 contains no disclosure or result-transition animation and therefore requires no unreliable cross-platform system reduced-motion detection. The remaining brief hover/focus color response changes neither geometry nor workflow state; no workflow depends on animation.
 
 ## Approved Mockups
 
