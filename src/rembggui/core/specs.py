@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ntpath
 import os
 import re
 from dataclasses import dataclass, field
@@ -19,11 +20,6 @@ MAX_FPS = 240
 _MIB_BYTES = Decimal(1024 * 1024)
 _SUPPORTED_SOURCE_SUFFIXES = frozenset({".mp4", ".mov", ".webm", ".mkv"})
 _URI_PATH_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*):[\\/]")
-_WINDOWS_RESERVED_FILENAMES = frozenset(
-    {"CON", "PRN", "AUX", "NUL"}
-    | {f"COM{index}" for index in range(1, 10)}
-    | {f"LPT{index}" for index in range(1, 10)}
-)
 
 
 class EdgeMode(StrEnum):
@@ -427,9 +423,4 @@ def _is_valid_output_filename(filename: str) -> bool:
         return False
     if os.name != "nt":
         return True
-    if filename.endswith((" ", ".")) or any(
-        character in '<>:"|?*' for character in filename
-    ):
-        return False
-    base_name = filename.partition(".")[0].rstrip(" .").upper()
-    return base_name not in _WINDOWS_RESERVED_FILENAMES
+    return ":" not in filename and not ntpath.isreserved(filename)

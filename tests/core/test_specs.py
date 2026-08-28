@@ -250,6 +250,20 @@ def test_output_rejects_windows_impossible_filename_on_any_host(
     assert exc.value.code is ErrorCode.INVALID_OUTPUT
 
 
+@pytest.mark.parametrize(
+    "filename", ["cut\x01out.webp", "CONIN$.webp", "CONOUT$.webp"]
+)
+def test_output_rejects_standard_windows_reserved_filename_on_any_host(
+    filename: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(core_specs.os, "name", "nt")
+
+    with pytest.raises(ValidationError) as exc:
+        OutputSpec(directory=tmp_path, filename=filename)
+
+    assert exc.value.code is ErrorCode.INVALID_OUTPUT
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Windows filename rules apply on Windows")
 @pytest.mark.parametrize("filename", ["CON.webp", "cut?out.webp", "C:cutout.webp"])
 def test_output_preserves_valid_posix_filename_characters(
