@@ -668,7 +668,7 @@ The matrix expands the test-plan path groups into production failures. `Automate
 | Spec creation/settings load | Missing or invalid persisted primitive violates a current limit | Automated | Per-field default and validation | Corrected value/default, no crash |
 | Source probe | Corrupt/audio-only/HDR source has no supported frame stream | Automated | Reject before state becomes READY | Actionable source error |
 | Exact frame worker | Slow seek returns after a newer playhead request | Automated | Monotonic request ID discards stale result | Newest frame remains visible |
-| Thumbnail worker/cache | Decode fails or cache exceeds its 256 MiB bound | Automated | Placeholder plus LRU eviction | Timeline remains usable; warning in log |
+| Thumbnail worker/cache | Decode fails, a stale resize result arrives, full-resolution frames enter the cache, or worker code creates `QPixmap` | Automated | Generation guard, worker-side `QImage` scaling, 64 MiB RAM/256 MiB disk LRU, GUI-thread conversion | Timeline remains usable; decode failure uses a placeholder and log warning |
 | Range/timeline reducer | In/Out cross or VFR timestamp rounds to an empty interval | Automated | Pure invariant enforcement | Handle snaps/rejection message |
 | Crop transform | Rotation/DPI mapping creates an out-of-bounds rectangle | Automated + Manual | Clamp and reject zero dimensions | Overlay/fields show valid crop |
 | Complete source fingerprint | Source changes while SHA-256 streams | Automated | Discard hash/cache association | Reload-source prompt |
@@ -677,6 +677,9 @@ The matrix expands the test-plan path groups into production failures. `Automate
 | Segmentation process start | Frozen spawn recurses, exits, or cannot import runtime | Automated protocol + Manual artifact | `freeze_support`, join/cleanup, structured failure | Retry/restart guidance |
 | Shared-memory protocol | Child crashes or replies with wrong version/job ID | Automated | Ignore payload, terminate child, parent unlink | Retryable inference error |
 | Preview | Settings change while the result returns | Automated + Manual | Fingerprint/job-ID check | Old image remains visibly stale |
+| Exclusive `JobDialog` | Escape/close bypasses cancellation or a late event closes a newer job dialog | Automated Qt + Manual | Guarded `reject()`, one `CancelRequested`, matching terminal job ID required | Dialog remains in `Cancelling…` until cleanup is safe |
+| Timeline/crop geometry and accessibility | Paint, hit region, focus ring, or virtual screenreader child drifts after zoom/DPI/resize | Automated pure + Qt + Manual screenreader | One immutable `InteractionGeometry` snapshot and emitted accessibility events | Pointer, keyboard, and spoken position/value remain aligned |
+| Keyboard/minimum layout | Editor shortcut steals text input or the action shelf disappears at 1100×720 | Automated Qt + Manual native | Focus-context shortcut guards and hard layout assertions | Field input is preserved; Preview/Render remain reachable |
 | Cut staging/promotion | Invalid PNG or cancellation during promotion | Automated | Validate staged sibling; retain prior set | Specific cut-stage error |
 | Encoding after cut promotion | WebP encode fails after successful segmentation | Automated | Persistent cuts remain; scratch/output cleaned | `Rebuild from edited cuts` remains available |
 | External edit detection | Editor writes a corrupt/mismatched frame | Automated + Manual | Full set validation before snapshot | Frame/file-specific rebuild error |
@@ -696,6 +699,8 @@ The matrix expands the test-plan path groups into production failures. `Automate
 - `src/rembggui/core/state.py` should carry the compact `event → reducer → AppState → capability` ASCII state-flow comment from this plan.
 - `src/rembggui/jobs/segmentation_host.py` should document parent ownership of Pipe/shared memory and the one-request/one-response protocol as ASCII.
 - `src/rembggui/jobs/render.py` should carry the normal-render versus edited-Rebuild pipeline diagram so promotion/snapshot ordering cannot be “simplified” incorrectly.
+- `src/rembggui/ui/job_dialog.py` should carry the asynchronous `open → running → cancelling → terminal event → close` ownership diagram, including the guarded reject path.
+- `src/rembggui/ui/geometry.py` should show the `AppState + viewport + DPR → InteractionGeometry → paint/hit/focus/accessibility` fan-out so no consumer reintroduces coordinate math.
 
 ## Worktree Parallelization Strategy
 
@@ -714,7 +719,7 @@ Parallel lanes after the scaffold:
 
 - **Lane A:** core contracts → media primitives → render/framing core.
 - **Lane B:** frozen runtime spike → segmentation/model jobs → render orchestration.
-- **Lane C:** timeline/crop widget shell can start against frozen interfaces, then waits for Lanes A+B before GUI/preview integration.
+- **Lane C:** timeline/crop geometry, bounded thumbnail presentation, accessibility adapters, and pytest-qt widget shell can start against frozen interfaces, then waits for Lanes A+B before GUI/preview integration.
 
 Launch Lanes A and B in parallel worktrees after the scaffold. Lane C may build visual widgets in parallel once spec/reducer interfaces are frozen. Merge A+B before connecting preview; implement Render/Rebuild integration sequentially because it touches both `core/` and `jobs/`. Qualification and V1.1 run last.
 
@@ -724,10 +729,10 @@ Conflict flags: Lanes A and C both touch source/crop contracts if interfaces are
 
 Synthesized from this review's findings. Each task derives from a specific finding above. Run with Codex; checkbox as you ship.
 
-- [ ] **T1 (P1, human: ~1 day / CC: ~2h)** — Project foundation — Create the public Python project, dependency locks including pytest-qt, synthetic fixture generator, and headless PR checks.
+- [ ] **T1 (P1, human: ~1 day / CC: ~2h)** — Project foundation — Create the public Python project, dependency locks including pytest-qt, synthetic fixture generator, and offscreen Qt PR checks.
   - Surfaced by: Test Review — repository has no Python/test scaffold and ordinary CI is intentionally synthetic-only.
   - Files: `pyproject.toml`, `src/rembggui/`, `tests/`, `.github/workflows/ci.yml`, `.gitignore`
-  - Verify: pytest, the configured type-check command, and the configured lint command all pass.
+  - Verify: pytest including `QT_QPA_PLATFORM=offscreen pytest tests/ui`, the configured type-check command, and the configured lint command all pass.
 - [ ] **T2 (P1, human: ~2 days / CC: ~5h)** — Core contracts — Implement frozen specs, pure reducer/capabilities, targeted fingerprints, and structured errors.
   - Surfaced by: Architecture/Code Quality — immutable AppState, composable specs, late-job rejection, and serializable `AppError` decisions.
   - Files: `src/rembggui/core/`, `tests/core/`
@@ -744,8 +749,8 @@ Synthesized from this review's findings. Each task derives from a specific findi
   - Surfaced by: Architecture — app-controlled manifest/download/cache with one real session and explicit special models.
   - Files: `src/rembggui/jobs/models/`, `tests/jobs/models/`, `resources/model-manifest.json`
   - Verify: local fake-download tests plus manual release qualification for every real local model.
-- [ ] **T6 (P1, human: ~6 days / CC: ~2.5 days)** — Visual editor, accessibility, and preview — Build the approved timeline-first workspace, side-by-side canvas, visual crop, complete state matrix, fixed action shelf, accessible custom controls, stale preview, and exclusive modal progress/cancel UI.
-  - Surfaced by: Architecture/Test Review plus Focused Design Review — visual cut/crop and explicit one-frame preview require bounded thumbnails, deterministic state presentation, a stable 1100×720 layout, keyboard/screenreader parity, and focused Qt contract automation.
+- [ ] **T6 (P1, human: ~8 days / CC: ~3 days)** — Visual editor, accessible interactions, preview, and Qt contracts — Build the approved timeline-first workspace with shared `InteractionGeometry`, scaled/bounded thumbnails, `QAccessible` virtual controls, the complete state matrix, and the asynchronous guarded modal job dialog.
+  - Surfaced by: Architecture/Code Quality/Test/Performance plus Focused Design Review — custom controls require one geometry source and an explicit accessibility tree; jobs require non-nested modal lifetime; the richer UI contract requires focused pytest-qt coverage; thumbnails require a GUI-thread-safe bounded cache.
   - Files: `DESIGN.md`, `src/rembggui/ui/`, `tests/core/test_timeline.py`, `tests/ui/`, `docs/release/gui-checklist.md`
   - Verify: pytest-qt covers every presentation state, asynchronous modal cancellation/focus, keyboard contexts, accessible virtual controls, and the 1100×720 layout; pure geometry tests cover 100/150/200% scaling; native screenreader and visual DPI checks remain manual.
 - [ ] **T7 (P1, human: ~5 days / CC: ~2 days)** — Persistent cuts/render/rebuild — Promote validated cuts before encoding, expose external editing, snapshot Rebuild input, and atomically create lossless WebP.
@@ -793,18 +798,18 @@ The plan is design-complete for implementation. Run `/design-review` against the
 
 ## Engineering Review Summary
 
-- Step 0 Scope Challenge: scope reduced from five runtime layers to three implementation areas without reducing user-facing capability.
-- Architecture Review: 7 issues found and resolved.
-- Code Quality Review: 6 issues found and resolved.
-- Test Review: coverage diagram produced; 4 gaps resolved through explicit automated/manual boundaries.
-- Performance Review: 4 issues found and resolved.
+- Step 0 Scope Challenge: the prior three-area scope reduction remains valid; the focused design delta adds no runtime layer, service, or artifact type.
+- Architecture Review: 2 delta issues found and resolved — asynchronous guarded modal lifetime and virtual custom-control accessibility.
+- Code Quality Review: 2 delta issues found and resolved — one immutable interaction-geometry source and removal of nonessential transitions.
+- Test Review: updated coverage diagram produced; 1 delta gap resolved with focused pytest-qt presentation contracts and a QA test-plan artifact.
+- Performance Review: 1 delta issue found and resolved — worker-scaled `QImage` thumbnails, GUI-thread-only `QPixmap`, and a 64 MiB RAM LRU.
 - NOT in scope and What Already Exists: written above.
-- TODO review: 4 items proposed individually; 0 added by explicit user choice.
+- TODO review: 0 new deferred items; every focused finding is folded into P1 tasks T1/T6.
 - Failure modes: 0 critical gaps; every listed path has a test or manual check plus a visible/error-handled boundary.
-- Outside voice: nested Codex pass skipped because the review already ran under Codex.
+- Outside voice: skipped for this targeted delta rerun; the active review already runs under Codex and introduced no unresolved architecture choice.
 - Parallelization: 3 lanes; core and process/package work can run in parallel after the scaffold, with GUI/render integration sequential at shared boundaries.
-- Lake Score: 13/21 issue recommendations selected the most complete option; the remaining choices deliberately favor simple modal execution, manual release gates, synthetic fixtures, lightweight settings, and advisory disk checks.
-- Retrospective: the branch contains only the initial gstack setup commit, so there is no earlier implementation/review cycle to regress against.
+- Lake Score: 6/6 focused recommendations selected the complete/recommended option.
+- Retrospective: the branch contains the prior full engineering review and focused design review but still no implementation; this rerun intentionally hardens the new UI/a11y/modal contracts before code exists.
 
 ## GSTACK REVIEW REPORT
 
