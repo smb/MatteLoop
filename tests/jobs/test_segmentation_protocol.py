@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import multiprocessing
 import threading
 import time
 from multiprocessing import Pipe, active_children
@@ -205,6 +206,21 @@ def test_launch_normalization_never_executes_custom_reducer() -> None:
     with pytest.raises(AppError):
         SegmentationClient({"custom": Reducer()}, child_target=fake_segmentation_child)
     assert not reducer_called
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    [
+        {"value": "\ud800"},
+        {"\udfff": "value"},
+    ],
+)
+def test_launch_normalization_rejects_isolated_surrogates(
+    unsafe: dict[str, object],
+) -> None:
+    with pytest.raises(AppError) as exc:
+        SegmentationClient(unsafe, child_target=fake_segmentation_child)
+    assert exc.value.code is ErrorCode.SEGMENTATION_PROTOCOL_MISMATCH
 
 
 @pytest.mark.parametrize(
@@ -441,6 +457,9 @@ def test_cancel_cannot_overtake_request_wire_send() -> None:
             request_send_entered.set()
             assert release_request_send.wait(timeout=1)
 
+        def _before_cancel_wire_wait(self) -> None:
+            cancel_attempted.set()
+
     segmentation = BarrierClient(
         {"mode": "delayed-cancel"},
         child_target=fake_segmentation_child,
@@ -457,7 +476,6 @@ def test_cancel_cannot_overtake_request_wire_send() -> None:
     segment_thread.start()
 
     def cancel() -> None:
-        cancel_attempted.set()
         cancel_results.append(segmentation.cancel("j1"))
 
     assert request_send_entered.wait(timeout=1)
@@ -474,6 +492,97 @@ def test_cancel_cannot_overtake_request_wire_send() -> None:
     assert caught and caught[0].code is ErrorCode.JOB_CANCELLED
     assert segmentation.is_running
     segmentation.close()
+
+
+def test_same_thread_close_during_segment_is_rejected_without_deadlock() -> None:
+    class ReentrantCloseClient(SegmentationClient):
+        close_error: AppError | None = None
+
+        def _before_request_wire_send(self) -> None:
+            try:
+                self.close()
+            except AppError as error:
+                self.close_error = error
+
+    segmentation = ReentrantCloseClient(
+        {"mode": "success"}, child_target=fake_segmentation_child
+    )
+    segmentation.start()
+    output = segmentation.segment(red_frame(), request())
+    assert output.shape == (4, 5, 4)
+    assert segmentation.close_error is not None
+    assert segmentation.close_error.code is ErrorCode.JOB_ALREADY_RUNNING
+    assert segmentation.close_error.job_id == "j1"
+    assert segmentation.is_running
+    segmentation.close()
+
+
+def test_accepted_cancel_completes_before_concurrent_close_cleanup() -> None:
+    receive_entered = threading.Event()
+    release_receive = threading.Event()
+    close_wait_boundary = threading.Event()
+    close_finished = threading.Event()
+
+    class CloseBarrierClient(SegmentationClient):
+        def __init__(self) -> None:
+            super().__init__(
+                {"mode": "delayed-cancel"},
+                child_target=fake_segmentation_child,
+                response_timeout=2,
+                startup_timeout=2,
+            )
+            self.receive_calls = 0
+
+        def _receive_child_unlocked(
+            self,
+            timeout: float,
+            *,
+            expected_job_id: str | None,
+        ) -> object:
+            self.receive_calls += 1
+            if self.receive_calls == 2:
+                receive_entered.set()
+                assert release_receive.wait(timeout=1)
+            return super()._receive_child_unlocked(
+                timeout, expected_job_id=expected_job_id
+            )
+
+        def _before_close_operation_wait(self) -> None:
+            close_wait_boundary.set()
+
+    segmentation = CloseBarrierClient()
+    segmentation.start()
+    segment_errors: list[AppError] = []
+    segment_thread = threading.Thread(
+        target=lambda: _capture_segment_error(segmentation, segment_errors)
+    )
+    segment_thread.start()
+    assert receive_entered.wait(timeout=1)
+    assert segmentation.cancel("j1")
+
+    def close() -> None:
+        segmentation.close()
+        close_finished.set()
+
+    close_thread = threading.Thread(target=close)
+    close_thread.start()
+    boundary_seen = close_wait_boundary.wait(timeout=1)
+    if not boundary_seen:
+        release_receive.set()
+        segment_thread.join(timeout=2)
+        close_thread.join(timeout=2)
+    assert boundary_seen
+    assert not close_finished.is_set()
+    release_receive.set()
+    segment_thread.join(timeout=2)
+    close_thread.join(timeout=2)
+    assert not segment_thread.is_alive()
+    assert not close_thread.is_alive()
+    assert segment_errors and segment_errors[0].code is ErrorCode.JOB_CANCELLED
+    assert close_finished.is_set()
+    assert not segmentation.is_running
+    assert segmentation.shared_memory_name is None
+    assert segmentation.active_job_id is None
 
 
 def test_cancel_during_invalid_image_preparation_is_not_admitted() -> None:
@@ -614,6 +723,7 @@ def test_cancel_during_request_serialization_failure_is_not_admitted(
 def test_close_during_local_preparation_prevents_cancel_admission() -> None:
     prepared = threading.Event()
     release_preparation = threading.Event()
+    close_finished = threading.Event()
 
     class BarrierClient(SegmentationClient):
         def _after_local_preparation(self) -> None:
@@ -631,12 +741,17 @@ def test_close_during_local_preparation_prevents_cancel_admission() -> None:
     thread.start()
     assert prepared.wait(timeout=1)
     cancel_result = segmentation.cancel("j1")
-    segmentation.close()
+    close_thread = threading.Thread(
+        target=lambda: (segmentation.close(), close_finished.set())
+    )
+    close_thread.start()
+    assert not close_finished.wait(timeout=0.05)
     release_preparation.set()
     thread.join(timeout=1)
+    close_thread.join(timeout=1)
     assert not cancel_result
-    assert caught and caught[0].code is ErrorCode.SEGMENTATION_PROCESS_CRASHED
-    assert caught[0].job_id == "j1"
+    assert not caught
+    assert close_finished.is_set()
     assert segmentation.active_job_id is None
 
 
@@ -715,14 +830,15 @@ def test_close_is_idempotent_and_unlinks_parent_slot() -> None:
         orphan.close()
 
 
-def test_close_during_inference_terminates_child_and_unlinks_slot() -> None:
+def test_close_during_inference_waits_for_result_then_unlinks_slot() -> None:
     segmentation = client("delayed-cancel")
     segmentation.start()
     caught: list[AppError] = []
+    outputs: list[np.ndarray] = []
 
     def run_segment() -> None:
         try:
-            segmentation.segment(red_frame(), request())
+            outputs.append(segmentation.segment(red_frame(), request()))
         except AppError as error:
             caught.append(error)
 
@@ -733,10 +849,14 @@ def test_close_during_inference_terminates_child_and_unlinks_slot() -> None:
         time.sleep(0.005)
     slot_name = segmentation.shared_memory_name
     assert slot_name is not None
-    segmentation.close()
+    close_thread = threading.Thread(target=segmentation.close)
+    close_thread.start()
     thread.join(timeout=2)
+    close_thread.join(timeout=2)
     assert not thread.is_alive()
-    assert caught and caught[0].code is ErrorCode.SEGMENTATION_PROCESS_CRASHED
+    assert not close_thread.is_alive()
+    assert not caught
+    assert outputs and outputs[0].shape == (4, 5, 4)
     with pytest.raises(FileNotFoundError):
         orphan = SharedMemory(name=slot_name, create=False)
         orphan.close()
@@ -857,12 +977,20 @@ class _ProcessDouble:
         stubborn: bool = False,
         join_error: bool = False,
         close_failures: int = 0,
+        start_error: bool = False,
     ) -> None:
         self.alive = alive
         self.stubborn = stubborn
         self.join_error = join_error
         self.close_failures = close_failures
+        self.start_error = start_error
         self.actions: list[str] = []
+
+    def start(self) -> None:
+        self.actions.append("start")
+        if self.start_error:
+            raise OSError("process start failed")
+        self.alive = True
 
     def is_alive(self) -> bool:
         return self.alive
@@ -888,6 +1016,85 @@ class _ProcessDouble:
         if self.close_failures:
             self.close_failures -= 1
             raise OSError("process close failed")
+
+
+class _StartupContextDouble:
+    def __init__(
+        self,
+        parent: _ConnectionDouble,
+        child: _ConnectionDouble,
+        process: _ProcessDouble,
+    ) -> None:
+        self.parent = parent
+        self.child = child
+        self.process = process
+
+    def Pipe(self, *, duplex: bool) -> tuple[_ConnectionDouble, _ConnectionDouble]:
+        assert duplex
+        return self.parent, self.child
+
+    def Process(self, **_kwargs: object) -> _ProcessDouble:
+        return self.process
+
+
+def test_spawn_start_failure_retains_failed_parent_close_until_retry() -> None:
+    parent = _ConnectionDouble(close_failures=1)
+    child = _ConnectionDouble()
+    process = _ProcessDouble(alive=False, start_error=True)
+    context = _StartupContextDouble(parent, child, process)
+    segmentation = SegmentationClient(
+        {"mode": "success"},
+        child_target=fake_segmentation_child,
+        mp_context=context,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(AppError) as exc:
+        segmentation.start()
+    assert exc.value.code is ErrorCode.SEGMENTATION_CLEANUP_FAILED
+    assert segmentation._connection is parent
+    assert segmentation._child_endpoint is None
+    assert segmentation._process is None
+    assert parent.close_calls == 1
+    assert child.closed
+    assert process.actions == ["start", "close"]
+    assert not process.alive
+
+    segmentation._mp_context = multiprocessing.get_context("spawn")
+    segmentation.start()
+    assert parent.close_calls == 2
+    assert segmentation.is_running
+    segmentation.close()
+
+
+def test_child_endpoint_close_failure_is_owned_until_cleanup_retry() -> None:
+    parent = _ConnectionDouble()
+    child = _ConnectionDouble(close_failures=2)
+    process = _ProcessDouble(alive=False)
+    context = _StartupContextDouble(parent, child, process)
+    segmentation = SegmentationClient(
+        {"mode": "success"},
+        child_target=fake_segmentation_child,
+        mp_context=context,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(AppError) as exc:
+        segmentation.start()
+    assert exc.value.code is ErrorCode.SEGMENTATION_CLEANUP_FAILED
+    assert segmentation._connection is None
+    assert segmentation._child_endpoint is child
+    assert segmentation._process is None
+    assert parent.closed
+    assert child.close_calls == 2
+    assert not process.alive
+    assert "terminate" in process.actions
+    assert "close" in process.actions
+
+    segmentation._mp_context = multiprocessing.get_context("spawn")
+    segmentation.start()
+    assert child.close_calls == 3
+    assert segmentation._child_endpoint is None
+    assert segmentation.is_running
+    segmentation.close()
 
 
 def _install_process_doubles(
@@ -1226,6 +1433,49 @@ def test_production_loop_acknowledges_cancel_only_after_inference_barrier() -> N
         slot.unlink()
 
 
+def test_production_loop_acks_queued_cancel_before_queued_shutdown() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    def inference(frame: np.ndarray, _session: object) -> np.ndarray:
+        entered.set()
+        assert release.wait(timeout=1)
+        return np.zeros(frame.shape[:2] + (4,), dtype=np.uint8)
+
+    parent, thread = _start_production_loop(inference)
+    slot = SharedMemory(create=True, size=16)
+    try:
+        frame = red_frame(2, 2)
+        slot.buf[: frame.nbytes] = frame.tobytes()
+        parent.send_bytes(
+            encode_parent_message(
+                SegmentRequest(
+                    PROTOCOL_VERSION,
+                    "j1",
+                    "r1",
+                    SharedFrame(slot.name, frame.shape, "uint8", frame.nbytes),
+                )
+            )
+        )
+        assert entered.wait(timeout=1)
+        parent.send_bytes(encode_parent_message(CancelRequest(PROTOCOL_VERSION, "j1")))
+        parent.send_bytes(encode_parent_message(Shutdown(PROTOCOL_VERSION)))
+        release.set()
+        assert parent.poll(1)
+        assert decode_child_message(
+            parent.recv_bytes(MAX_PROTOCOL_MESSAGE_BYTES)
+        ) == CancelAck(PROTOCOL_VERSION, "j1")
+        thread.join(timeout=1)
+        assert not thread.is_alive()
+        if parent.poll():
+            with pytest.raises(EOFError):
+                parent.recv_bytes(MAX_PROTOCOL_MESSAGE_BYTES)
+    finally:
+        parent.close()
+        slot.close()
+        slot.unlink()
+
+
 def test_production_loop_rejects_insufficient_actual_slot_capacity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1300,6 +1550,83 @@ def test_production_loop_source_buffer_failure_keeps_cancel_ack_path(
         )
         failure = _assert_failure_then_late_cancel_ack(parent, thread)
         assert failure.error["code"] == ErrorCode.SEGMENTATION_PROTOCOL_MISMATCH
+        parent.send_bytes(encode_parent_message(Shutdown(PROTOCOL_VERSION)))
+        thread.join(timeout=1)
+        assert not thread.is_alive()
+    finally:
+        parent.close()
+
+
+@pytest.mark.parametrize("failure_mode", ["acquire", "copy", "write"])
+def test_production_loop_output_buffer_failure_acks_late_cancel_without_stale_state(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str,
+) -> None:
+    class OutputFailSlot:
+        name = "output-fail-slot"
+        size = 16
+        failed = False
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.storage = memoryview(bytearray(16))
+            self.buf_accesses = 0
+
+        @property
+        def buf(self) -> memoryview:
+            self.buf_accesses += 1
+            if (
+                self.buf_accesses == 2
+                and not type(self).failed
+                and failure_mode == "acquire"
+            ):
+                type(self).failed = True
+                raise BufferError("injected output buffer acquisition failure")
+            if (
+                self.buf_accesses == 2
+                and not type(self).failed
+                and failure_mode == "write"
+            ):
+                type(self).failed = True
+                return memoryview(bytes(16))
+            return self.storage
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr(segmentation_host_module, "SharedMemory", OutputFailSlot)
+
+    class CopyFailArray(np.ndarray):
+        def tobytes(self, order: str = "C") -> bytes:
+            raise BufferError("injected result copy failure")
+
+    def inference(frame: np.ndarray, _session: object) -> np.ndarray:
+        result = np.zeros(frame.shape[:2] + (4,), dtype=np.uint8)
+        if failure_mode == "copy" and not OutputFailSlot.failed:
+            OutputFailSlot.failed = True
+            return result.view(CopyFailArray)
+        return result
+
+    parent, thread = _start_production_loop(inference)
+    wire_slot = SharedFrame("output-fail-slot", (2, 2, 3), "uint8", 12)
+    try:
+        parent.send_bytes(
+            encode_parent_message(
+                SegmentRequest(PROTOCOL_VERSION, "j1", "r1", wire_slot)
+            )
+        )
+        failure = _assert_failure_then_late_cancel_ack(parent, thread)
+        assert failure.error["code"] == ErrorCode.SEGMENTATION_PROTOCOL_MISMATCH
+
+        parent.send_bytes(
+            encode_parent_message(
+                SegmentRequest(PROTOCOL_VERSION, "j1", "r2", wire_slot)
+            )
+        )
+        assert parent.poll(1)
+        response = decode_child_message(parent.recv_bytes(MAX_PROTOCOL_MESSAGE_BYTES))
+        assert response == SegmentResponse(
+            PROTOCOL_VERSION, "j1", "r2", (2, 2, 4), "uint8", 16
+        )
         parent.send_bytes(encode_parent_message(Shutdown(PROTOCOL_VERSION)))
         thread.join(timeout=1)
         assert not thread.is_alive()
