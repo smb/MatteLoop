@@ -502,6 +502,21 @@ def test_child_launch_reproves_exact_manifest_bound_regular_file(
     assert verified.inference_kwargs == ()
 
 
+def test_child_launch_binds_cache_without_resolving_filesystem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog, payload, _artifact_path = _verified_launch(tmp_path)
+
+    def forbid_resolve(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("verified child launch must not resolve cache paths")
+
+    monkeypatch.setattr(Path, "resolve", forbid_resolve)
+
+    verified = _validate_verified_launch_payload(payload, catalog=catalog)
+
+    assert verified.model_bytes == b"verified-model"
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

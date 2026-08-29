@@ -47,6 +47,14 @@ class DownloadTransport(Protocol):
     def open(self, url: str) -> DownloadResponse: ...
 
 
+class _LexicalPathApi(Protocol):
+    def abspath(self, path: str) -> str: ...
+
+    def normcase(self, path: str) -> str: ...
+
+    def normpath(self, path: str) -> str: ...
+
+
 class DownloadHttpError(Exception):
     def __init__(self, status: int) -> None:
         self.status = status
@@ -312,13 +320,19 @@ class ModelDownloader:
 
 
 def _flight_lock(target: Path) -> Lock:
-    key = os.path.normcase(str(target.resolve(strict=False)))
+    key = _lexical_lock_key(target)
     with _flight_guard:
         lock = _flight_locks.get(key)
         if lock is None:
             lock = Lock()
             _flight_locks[key] = lock
         return lock
+
+
+def _lexical_lock_key(target: Path, *, path_api: _LexicalPathApi = os.path) -> str:
+    """Normalize an absolute lock identity without consulting the filesystem."""
+    absolute = path_api.abspath(os.fspath(target))
+    return path_api.normcase(path_api.normpath(absolute))
 
 
 def _open_part(  # type: ignore[no-untyped-def]

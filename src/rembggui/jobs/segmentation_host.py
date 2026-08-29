@@ -43,6 +43,11 @@ import numpy as np
 from numpy.typing import NDArray
 
 from rembggui.core.errors import AppError, ErrorCode
+from rembggui.jobs.models.cache_fs import (
+    BoundDirectoryCloseError,
+    BoundModelDirectory,
+    UnsafeCacheError,
+)
 from rembggui.jobs.protocol import (
     CONTROL_JOB_ID,
     MAX_PROTOCOL_MESSAGE_BYTES,
@@ -1139,28 +1144,43 @@ def _validate_verified_launch_payload(
         raise _model_preparation_error(
             "child model home is outside the version/model cache namespace"
         )
+    cache_root = home.parent.parent
     try:
-        version_info = home.parent.lstat()
-        home_info = home.lstat()
+        bound = BoundModelDirectory.bind(
+            cache_root,
+            catalog.rembg_version,
+            spec.id,
+            create=False,
+        )
+    except UnsafeCacheError as error:
+        raise _model_cache_error(str(error)) from error
     except OSError as error:
         raise _model_cache_error(
-            f"child model namespace cannot be inspected: {type(error).__name__}"
+            f"child model namespace cannot be bound: {type(error).__name__}"
         ) from error
-    if (
-        stat.S_ISLNK(version_info.st_mode)
-        or not stat.S_ISDIR(version_info.st_mode)
-        or stat.S_ISLNK(home_info.st_mode)
-        or not stat.S_ISDIR(home_info.st_mode)
-    ):
-        raise _model_cache_error("child model namespace contains a symbolic link")
-    artifact_path = home / artifact.runtime_filename
-    if artifact_path.resolve(strict=False).parent != home.resolve(strict=True):
-        raise _model_cache_error("child model artifact escapes its cache namespace")
-    model_bytes = _read_verified_child_artifact(
-        artifact_path,
-        expected_size=artifact.size_bytes,
-        expected_sha256=artifact.sha256,
-    )
+    if bound is None:
+        raise _model_cache_error("child model namespace does not exist")
+    artifact_path = bound.target(artifact.runtime_filename)
+    try:
+        with bound:
+            model_bytes = _read_verified_bound_artifact(
+                bound,
+                artifact.runtime_filename,
+                expected_size=artifact.size_bytes,
+                expected_sha256=artifact.sha256,
+            )
+            bound.assert_still_named()
+    except BoundDirectoryCloseError as error:
+        cause = (
+            error.primary_error
+            if error.primary_error is not None
+            else error.close_error
+        )
+        raise _model_cache_error(
+            f"child model namespace cleanup failed: {type(error.close_error).__name__}"
+        ) from cause
+    except UnsafeCacheError as error:
+        raise _model_cache_error(str(error)) from error
     return _VerifiedModelLaunch(
         spec.id,
         artifact_path,
@@ -1172,11 +1192,15 @@ def _validate_verified_launch_payload(
     )
 
 
-def _read_verified_child_artifact(
-    path: Path, *, expected_size: int, expected_sha256: str
+def _read_verified_bound_artifact(
+    bound: BoundModelDirectory,
+    filename: str,
+    *,
+    expected_size: int,
+    expected_sha256: str,
 ) -> bytes:
     try:
-        before = path.lstat()
+        before = bound.lstat(filename)
     except OSError as error:
         raise _model_cache_error(
             f"verified model artifact cannot be inspected: {type(error).__name__}"
@@ -1189,11 +1213,8 @@ def _read_verified_child_artifact(
         raise _model_cache_error(
             "verified model artifact is not a size-matched regular file"
         )
-    flags = os.O_RDONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
     try:
-        descriptor = os.open(path, flags)
+        descriptor = bound.open_read(filename)
     except OSError as error:
         raise _model_cache_error(
             f"verified model artifact cannot be opened: {type(error).__name__}"
@@ -1218,7 +1239,7 @@ def _read_verified_child_artifact(
     finally:
         os.close(descriptor)
     try:
-        after = path.lstat()
+        after = bound.lstat(filename)
     except OSError as error:
         raise _model_cache_error(
             f"verified model artifact disappeared after hashing: {type(error).__name__}"

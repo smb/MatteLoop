@@ -1,8 +1,9 @@
 """Handle-bound access to one canonical model-cache directory.
 
-POSIX operations are relative to an open directory descriptor. Windows keeps
-every cache namespace directory open without delete sharing, which prevents a
-parent rename/reparse-point swap while full-path file APIs are in use.
+POSIX operations are relative to an open directory descriptor. Windows opens
+only the volume/share anchor by full path, then keeps every descendant handle
+bound without write/delete sharing and performs cache I/O handle-relatively.
+Even an in-place reparse mutation cannot redirect an operation to another tree.
 """
 
 from __future__ import annotations
@@ -16,16 +17,53 @@ from typing import Protocol
 
 _FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+_WINDOWS_DIRECTORY_ACCESS = 0x80000000
+_WINDOWS_DIRECTORY_SHARE = 0x00000001
+_WINDOWS_DIRECTORY_FLAGS = 0x02000000 | 0x00200000
 
 
 class _WindowsDirectoryApi(Protocol):
-    def open_directory(self, path: Path) -> int: ...
+    def open_anchor(
+        self,
+        path: Path,
+        *,
+        desired_access: int,
+        share_mode: int,
+        flags: int,
+    ) -> int: ...
 
-    def create_directory(self, path: Path) -> None: ...
+    def open_child_directory(
+        self,
+        parent_handle: int,
+        name: str,
+        *,
+        create: bool,
+        desired_access: int,
+        share_mode: int,
+        flags: int,
+    ) -> int: ...
 
     def file_attributes(self, handle: int) -> int: ...
 
     def close_handle(self, handle: int) -> None: ...
+
+    def lstat_at(self, directory_handle: int, filename: str) -> os.stat_result: ...
+
+    def open_read_at(self, directory_handle: int, filename: str) -> int: ...
+
+    def open_new_at(self, directory_handle: int, filename: str) -> int: ...
+
+    def unlink_at(
+        self, directory_handle: int, filename: str, *, require_regular: bool
+    ) -> None: ...
+
+    def replace_at(
+        self, directory_handle: int, source: str, destination: str
+    ) -> None: ...
+
+    def flush_directory(self, directory_handle: int) -> None: ...
+
+    def assert_directory_handle(self, directory_handle: int) -> None: ...
 
 
 class UnsafeCacheError(Exception):
@@ -111,6 +149,9 @@ class BoundModelDirectory:
         _validate_filename(filename)
         if self._fd is not None:
             return os.stat(filename, dir_fd=self._fd, follow_symlinks=False)
+        if self._windows_handles:
+            api = self._require_windows_api()
+            return api.lstat_at(self._windows_handles[-1], filename)
         return (self.path / filename).lstat()
 
     def open_read(self, filename: str) -> int:
@@ -120,6 +161,9 @@ class BoundModelDirectory:
             flags |= os.O_NOFOLLOW
         if self._fd is not None:
             return os.open(filename, flags, dir_fd=self._fd)
+        if self._windows_handles:
+            api = self._require_windows_api()
+            return api.open_read_at(self._windows_handles[-1], filename)
         return os.open(self.path / filename, flags)
 
     def open_new(self, filename: str):  # type: ignore[no-untyped-def]
@@ -129,6 +173,9 @@ class BoundModelDirectory:
             flags |= os.O_NOFOLLOW
         if self._fd is not None:
             descriptor = os.open(filename, flags, 0o600, dir_fd=self._fd)
+        elif self._windows_handles:
+            api = self._require_windows_api()
+            descriptor = api.open_new_at(self._windows_handles[-1], filename)
         else:
             descriptor = os.open(self.path / filename, flags, 0o600)
         return os.fdopen(descriptor, "wb")
@@ -145,6 +192,9 @@ class BoundModelDirectory:
             )
         if self._fd is not None:
             os.unlink(filename, dir_fd=self._fd)
+        elif self._windows_handles:
+            api = self._require_windows_api()
+            api.unlink_at(self._windows_handles[-1], filename, require_regular=True)
         else:
             (self.path / filename).unlink()
         return True
@@ -160,6 +210,9 @@ class BoundModelDirectory:
             raise UnsafeCacheError(f"model cache target {filename!r} is a directory")
         if self._fd is not None:
             os.unlink(filename, dir_fd=self._fd)
+        elif self._windows_handles:
+            api = self._require_windows_api()
+            api.unlink_at(self._windows_handles[-1], filename, require_regular=False)
         else:
             (self.path / filename).unlink()
         return True
@@ -174,10 +227,17 @@ class BoundModelDirectory:
                 src_dir_fd=self._fd,
                 dst_dir_fd=self._fd,
             )
+        elif self._windows_handles:
+            api = self._require_windows_api()
+            api.replace_at(self._windows_handles[-1], source, destination)
         else:
             os.replace(self.path / source, self.path / destination)
 
     def fsync(self) -> None:
+        if self._windows_handles:
+            api = self._require_windows_api()
+            api.flush_directory(self._windows_handles[-1])
+            return
         if self._fd is None:
             return
         try:
@@ -191,6 +251,10 @@ class BoundModelDirectory:
                 raise
 
     def assert_still_named(self) -> None:
+        if self._windows_handles:
+            api = self._require_windows_api()
+            api.assert_directory_handle(self._windows_handles[-1])
+            return
         if self._fd is None:
             info = self.path.lstat()
             if (
@@ -213,6 +277,12 @@ class BoundModelDirectory:
             or named.st_ino != opened.st_ino
         ):
             raise UnsafeCacheError("bound model cache directory was redirected")
+
+    def _require_windows_api(self) -> _WindowsDirectoryApi:
+        api = self._windows_api
+        if api is None:
+            raise RuntimeError("Windows directory handles have no owner API")
+        return api
 
 
 def _bind_posix(path: Path, *, create: bool) -> BoundModelDirectory | None:
@@ -271,24 +341,34 @@ def _bind_windows(
     current = chain[-1]
     bound: BoundModelDirectory | None = None
     try:
-        for index, component_path in enumerate(chain):
+        anchor = chain[0]
+        try:
+            anchor_handle = active_api.open_anchor(
+                anchor,
+                desired_access=_WINDOWS_DIRECTORY_ACCESS,
+                share_mode=_WINDOWS_DIRECTORY_SHARE,
+                flags=_WINDOWS_DIRECTORY_FLAGS,
+            )
+        except FileNotFoundError:
+            raise UnsafeCacheError(
+                "model cache volume or share anchor is unavailable"
+            ) from None
+        handles.append(anchor_handle)
+        _validate_windows_directory_handle(active_api, anchor_handle)
+        for component_path in chain[1:]:
             try:
-                handle = active_api.open_directory(component_path)
+                handle = active_api.open_child_directory(
+                    handles[-1],
+                    component_path.name,
+                    create=create,
+                    desired_access=_WINDOWS_DIRECTORY_ACCESS,
+                    share_mode=_WINDOWS_DIRECTORY_SHARE,
+                    flags=_WINDOWS_DIRECTORY_FLAGS,
+                )
             except FileNotFoundError:
-                if index == 0:
-                    raise UnsafeCacheError(
-                        "model cache volume or share anchor is unavailable"
-                    ) from None
-                if not create:
-                    return None
-                active_api.create_directory(component_path)
-                handle = active_api.open_directory(component_path)
+                return None
             handles.append(handle)
-            attributes = active_api.file_attributes(handle)
-            if not attributes & _FILE_ATTRIBUTE_DIRECTORY:
-                raise UnsafeCacheError("opened model cache handle is not a directory")
-            if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
-                raise UnsafeCacheError("opened model cache handle is a reparse point")
+            _validate_windows_directory_handle(active_api, handle)
         bound = BoundModelDirectory(
             current,
             descriptor=None,
@@ -299,6 +379,14 @@ def _bind_windows(
     finally:
         if bound is None:
             _close_windows_handles(active_api, tuple(handles))
+
+
+def _validate_windows_directory_handle(api: _WindowsDirectoryApi, handle: int) -> None:
+    attributes = api.file_attributes(handle)
+    if not attributes & _FILE_ATTRIBUTE_DIRECTORY:
+        raise UnsafeCacheError("opened model cache handle is not a directory")
+    if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+        raise UnsafeCacheError("opened model cache handle is a reparse point")
 
 
 def _windows_path_chain[PathT: PurePath](
@@ -378,10 +466,15 @@ def _close_windows_handles(api: _WindowsDirectoryApi, handles: tuple[int, ...]) 
 class _CtypesWindowsDirectoryApi:
     __slots__ = (
         "_close_handle",
-        "_create_directory",
         "_create_file",
+        "_flush_file_buffers",
+        "_get_file_information",
         "_get_information",
         "_invalid",
+        "_nt_create_file",
+        "_nt_set_information_file",
+        "_rtl_nt_status_to_dos_error",
+        "_set_file_information",
     )
 
     def __init__(self) -> None:
@@ -400,9 +493,6 @@ class _CtypesWindowsDirectoryApi:
             wintypes.HANDLE,
         )
         create_file.restype = wintypes.HANDLE
-        create_directory = kernel32.CreateDirectoryW
-        create_directory.argtypes = (wintypes.LPCWSTR, wintypes.LPVOID)
-        create_directory.restype = wintypes.BOOL
         get_information = kernel32.GetFileInformationByHandleEx
         get_information.argtypes = (
             wintypes.HANDLE,
@@ -414,22 +504,82 @@ class _CtypesWindowsDirectoryApi:
         close_handle = kernel32.CloseHandle
         close_handle.argtypes = (wintypes.HANDLE,)
         close_handle.restype = wintypes.BOOL
+        get_file_information = kernel32.GetFileInformationByHandle
+        get_file_information.argtypes = (wintypes.HANDLE, wintypes.LPVOID)
+        get_file_information.restype = wintypes.BOOL
+        set_file_information = kernel32.SetFileInformationByHandle
+        set_file_information.argtypes = (
+            wintypes.HANDLE,
+            wintypes.INT,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+        )
+        set_file_information.restype = wintypes.BOOL
+        flush_file_buffers = kernel32.FlushFileBuffers
+        flush_file_buffers.argtypes = (wintypes.HANDLE,)
+        flush_file_buffers.restype = wintypes.BOOL
+        ntdll = getattr(ctypes, "WinDLL")("ntdll", use_last_error=True)
+        nt_create_file = ntdll.NtCreateFile
+        nt_create_file.argtypes = (
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.LPVOID,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+        )
+        nt_create_file.restype = wintypes.LONG
+        nt_set_information_file = ntdll.NtSetInformationFile
+        nt_set_information_file.argtypes = (
+            wintypes.HANDLE,
+            wintypes.LPVOID,
+            wintypes.LPVOID,
+            wintypes.ULONG,
+            wintypes.INT,
+        )
+        nt_set_information_file.restype = wintypes.LONG
+        rtl_nt_status_to_dos_error = ntdll.RtlNtStatusToDosError
+        rtl_nt_status_to_dos_error.argtypes = (wintypes.LONG,)
+        rtl_nt_status_to_dos_error.restype = wintypes.ULONG
         self._create_file = create_file
-        self._create_directory = create_directory
         self._get_information = get_information
+        self._get_file_information = get_file_information
+        self._set_file_information = set_file_information
+        self._flush_file_buffers = flush_file_buffers
         self._close_handle = close_handle
+        self._nt_create_file = nt_create_file
+        self._nt_set_information_file = nt_set_information_file
+        self._rtl_nt_status_to_dos_error = rtl_nt_status_to_dos_error
         self._invalid = wintypes.HANDLE(-1).value
 
-    def open_directory(self, path: Path) -> int:
+    def open_anchor(
+        self,
+        path: Path,
+        *,
+        desired_access: int,
+        share_mode: int,
+        flags: int,
+    ) -> int:
         import ctypes
 
+        if (
+            desired_access != _WINDOWS_DIRECTORY_ACCESS
+            or share_mode != _WINDOWS_DIRECTORY_SHARE
+            or flags != _WINDOWS_DIRECTORY_FLAGS
+        ):
+            raise ValueError("Windows cache directory open is not hardened")
         handle = self._create_file(
             str(path),
-            0x80000000,
-            0x00000001 | 0x00000002,
+            desired_access,
+            share_mode,
             None,
             3,
-            0x02000000 | 0x00200000,
+            flags,
             None,
         )
         if handle == self._invalid:
@@ -445,30 +595,370 @@ class _CtypesWindowsDirectoryApi:
             raise OSError(last_error, "could not bind cache directory")
         return int(handle)
 
-    def create_directory(self, path: Path) -> None:
+    def open_child_directory(
+        self,
+        parent_handle: int,
+        name: str,
+        *,
+        create: bool,
+        desired_access: int,
+        share_mode: int,
+        flags: int,
+    ) -> int:
+        _validate_windows_component(name)
+        self._require_hardened_open(desired_access, share_mode, flags)
+        return self._open_relative(
+            parent_handle,
+            name,
+            desired_access=desired_access,
+            share_mode=share_mode,
+            disposition=3 if create else 1,
+            options=0x00000001 | 0x00000020 | 0x00200000,
+        )
+
+    def lstat_at(self, directory_handle: int, filename: str) -> os.stat_result:
+        _validate_windows_component(filename)
+        handle = self._open_relative(
+            directory_handle,
+            filename,
+            desired_access=0x00000080 | 0x00100000,
+            share_mode=0x00000001,
+            disposition=1,
+            options=0x00000020 | 0x00200000,
+        )
+        try:
+            return self._stat_handle(handle)
+        finally:
+            self.close_handle(handle)
+
+    def open_read_at(self, directory_handle: int, filename: str) -> int:
+        _validate_windows_component(filename)
+        handle = self._open_relative(
+            directory_handle,
+            filename,
+            desired_access=0x80000000,
+            share_mode=0x00000001,
+            disposition=1,
+            options=0x00000020 | 0x00000040 | 0x00200000,
+        )
+        try:
+            self._require_regular_file_handle(handle)
+            return self._handle_to_fd(handle, os.O_RDONLY)
+        except BaseException:
+            self.close_handle(handle)
+            raise
+
+    def open_new_at(self, directory_handle: int, filename: str) -> int:
+        _validate_windows_component(filename)
+        handle = self._open_relative(
+            directory_handle,
+            filename,
+            desired_access=0x40000000 | 0x80000000,
+            share_mode=0x00000001,
+            disposition=2,
+            options=0x00000020 | 0x00000040 | 0x00200000,
+        )
+        try:
+            self._require_regular_file_handle(handle)
+            return self._handle_to_fd(handle, os.O_WRONLY)
+        except BaseException:
+            self.close_handle(handle)
+            raise
+
+    def unlink_at(
+        self, directory_handle: int, filename: str, *, require_regular: bool
+    ) -> None:
         import ctypes
 
-        if self._create_directory(str(path), None):
+        _validate_windows_component(filename)
+        handle = self._open_relative(
+            directory_handle,
+            filename,
+            desired_access=0x00010000 | 0x00000080 | 0x00100000,
+            share_mode=0x00000001 | 0x00000002 | 0x00000004,
+            disposition=1,
+            options=0x00000020 | 0x00200000,
+        )
+
+        class FileDispositionInfo(ctypes.Structure):
+            _fields_ = (("DeleteFile", ctypes.c_ubyte),)
+
+        try:
+            attributes = self.file_attributes(handle)
+            if require_regular and (
+                attributes & (_FILE_ATTRIBUTE_DIRECTORY | _FILE_ATTRIBUTE_REPARSE_POINT)
+            ):
+                raise UnsafeCacheError("model cache target is not a regular file")
+            if (
+                not require_regular
+                and attributes & _FILE_ATTRIBUTE_DIRECTORY
+                and not attributes & _FILE_ATTRIBUTE_REPARSE_POINT
+            ):
+                raise UnsafeCacheError("model cache target is a directory")
+            info = FileDispositionInfo(True)
+            if not self._set_file_information(
+                handle,
+                4,
+                ctypes.byref(info),
+                ctypes.sizeof(info),
+            ):
+                self._raise_last_error("could not unlink bound cache entry")
+        finally:
+            self.close_handle(handle)
+
+    def replace_at(self, directory_handle: int, source: str, destination: str) -> None:
+        import ctypes
+
+        _validate_windows_component(source)
+        _validate_windows_component(destination)
+        source_handle = self._open_relative(
+            directory_handle,
+            source,
+            desired_access=0x00010000 | 0x00000080 | 0x00100000,
+            share_mode=0x00000001,
+            disposition=1,
+            options=0x00000020 | 0x00000040 | 0x00200000,
+        )
+
+        class IoStatusBlock(ctypes.Structure):
+            _fields_ = (
+                ("Status", ctypes.c_void_p),
+                ("Information", ctypes.c_size_t),
+            )
+
+        class FileRenameInformation(ctypes.Structure):
+            _fields_ = (
+                ("ReplaceIfExists", ctypes.c_ubyte),
+                ("RootDirectory", ctypes.c_void_p),
+                ("FileNameLength", ctypes.c_uint32),
+                ("FileName", ctypes.c_uint16 * 1),
+            )
+
+        try:
+            self._require_regular_file_handle(source_handle)
+            encoded = destination.encode("utf-16-le")
+            filename_offset = FileRenameInformation.FileName.offset
+            buffer = ctypes.create_string_buffer(
+                ctypes.sizeof(FileRenameInformation) + len(encoded)
+            )
+            info = ctypes.cast(buffer, ctypes.POINTER(FileRenameInformation)).contents
+            info.ReplaceIfExists = True
+            # A NULL root plus a validated simple name renames within the opened
+            # source file's existing directory. That source was itself opened
+            # relative to ``directory_handle``, so no pathname is reparsed.
+            info.RootDirectory = None
+            info.FileNameLength = len(encoded)
+            ctypes.memmove(
+                ctypes.addressof(buffer) + filename_offset,
+                encoded,
+                len(encoded),
+            )
+            io_status = IoStatusBlock()
+            status = int(
+                self._nt_set_information_file(
+                    source_handle,
+                    ctypes.byref(io_status),
+                    buffer,
+                    len(buffer),
+                    10,
+                )
+            )
+            if status < 0:
+                self._raise_nt_status(status, destination)
+        finally:
+            self.close_handle(source_handle)
+
+    def flush_directory(self, directory_handle: int) -> None:
+        import ctypes
+
+        if self._flush_file_buffers(directory_handle):
             return
         last_error = getattr(ctypes, "get_last_error")()
-        if last_error == 183:
-            # A racing creator is safe: the following OPEN_REPARSE_POINT handle
-            # identity proof decides whether the resulting entry is admissible.
+        if last_error in {1, 5, 6, 50}:
             return
-        if last_error == 5:
-            raise PermissionError(
-                last_error, "could not create cache directory", str(path)
+        raise OSError(last_error, "could not flush bound cache directory")
+
+    def assert_directory_handle(self, directory_handle: int) -> None:
+        _validate_windows_directory_handle(self, directory_handle)
+
+    def _open_relative(
+        self,
+        parent_handle: int,
+        name: str,
+        *,
+        desired_access: int,
+        share_mode: int,
+        disposition: int,
+        options: int,
+    ) -> int:
+        import ctypes
+
+        class UnicodeString(ctypes.Structure):
+            _fields_ = (
+                ("Length", ctypes.c_uint16),
+                ("MaximumLength", ctypes.c_uint16),
+                ("Buffer", ctypes.c_void_p),
             )
-        raise OSError(last_error, "could not create cache directory", str(path))
+
+        class ObjectAttributes(ctypes.Structure):
+            _fields_ = (
+                ("Length", ctypes.c_uint32),
+                ("RootDirectory", ctypes.c_void_p),
+                ("ObjectName", ctypes.POINTER(UnicodeString)),
+                ("Attributes", ctypes.c_uint32),
+                ("SecurityDescriptor", ctypes.c_void_p),
+                ("SecurityQualityOfService", ctypes.c_void_p),
+            )
+
+        class IoStatusBlock(ctypes.Structure):
+            _fields_ = (
+                ("Status", ctypes.c_void_p),
+                ("Information", ctypes.c_size_t),
+            )
+
+        encoded_name = name.encode("utf-16-le")
+        name_buffer = ctypes.create_string_buffer(encoded_name + b"\0\0")
+        name_bytes = len(encoded_name)
+        unicode_name = UnicodeString(
+            name_bytes,
+            name_bytes + 2,
+            ctypes.addressof(name_buffer),
+        )
+        attributes = ObjectAttributes(
+            ctypes.sizeof(ObjectAttributes),
+            parent_handle,
+            ctypes.pointer(unicode_name),
+            0x00000040,
+            None,
+            None,
+        )
+        io_status = IoStatusBlock()
+        handle = ctypes.c_void_p()
+        status = int(
+            self._nt_create_file(
+                ctypes.byref(handle),
+                desired_access,
+                ctypes.byref(attributes),
+                ctypes.byref(io_status),
+                None,
+                0,
+                share_mode,
+                disposition,
+                options,
+                None,
+                0,
+            )
+        )
+        if status < 0:
+            self._raise_nt_status(status, name)
+        if handle.value is None:
+            raise OSError("NtCreateFile returned an empty cache handle")
+        return int(handle.value)
+
+    def _stat_handle(self, handle: int) -> os.stat_result:
+        import ctypes
+
+        class FileTime(ctypes.Structure):
+            _fields_ = (("Low", ctypes.c_uint32), ("High", ctypes.c_uint32))
+
+        class ByHandleFileInformation(ctypes.Structure):
+            _fields_ = (
+                ("FileAttributes", ctypes.c_uint32),
+                ("CreationTime", FileTime),
+                ("LastAccessTime", FileTime),
+                ("LastWriteTime", FileTime),
+                ("VolumeSerialNumber", ctypes.c_uint32),
+                ("FileSizeHigh", ctypes.c_uint32),
+                ("FileSizeLow", ctypes.c_uint32),
+                ("NumberOfLinks", ctypes.c_uint32),
+                ("FileIndexHigh", ctypes.c_uint32),
+                ("FileIndexLow", ctypes.c_uint32),
+            )
+
+        info = ByHandleFileInformation()
+        if not self._get_file_information(handle, ctypes.byref(info)):
+            self._raise_last_error("could not stat bound cache entry")
+        attributes = int(info.FileAttributes)
+        if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+            file_type = stat.S_IFLNK
+        elif attributes & _FILE_ATTRIBUTE_DIRECTORY:
+            file_type = stat.S_IFDIR
+        else:
+            file_type = stat.S_IFREG
+        size = (int(info.FileSizeHigh) << 32) | int(info.FileSizeLow)
+        inode = (int(info.FileIndexHigh) << 32) | int(info.FileIndexLow)
+        return os.stat_result(
+            (
+                file_type | 0o600,
+                inode,
+                int(info.VolumeSerialNumber),
+                int(info.NumberOfLinks),
+                0,
+                0,
+                size,
+                self._filetime_seconds(info.LastAccessTime),
+                self._filetime_seconds(info.LastWriteTime),
+                self._filetime_seconds(info.CreationTime),
+            )
+        )
+
+    @staticmethod
+    def _filetime_seconds(value: object) -> float:
+        low = int(getattr(value, "Low"))
+        high = int(getattr(value, "High"))
+        return (((high << 32) | low) - 116_444_736_000_000_000) / 10_000_000
+
+    def _require_regular_file_handle(self, handle: int) -> None:
+        attributes = self.file_attributes(handle)
+        if attributes & (_FILE_ATTRIBUTE_DIRECTORY | _FILE_ATTRIBUTE_REPARSE_POINT):
+            raise UnsafeCacheError("model cache target is not a regular file")
+
+    def _handle_to_fd(self, handle: int, flags: int) -> int:
+        import msvcrt
+
+        return int(
+            msvcrt.open_osfhandle(  # type: ignore[attr-defined]
+                handle, flags | getattr(os, "O_BINARY", 0)
+            )
+        )
+
+    def _raise_nt_status(self, status: int, name: str) -> None:
+        code = int(self._rtl_nt_status_to_dos_error(status))
+        if code in {2, 3}:
+            raise FileNotFoundError(code, "cache entry does not exist", name)
+        if code in {80, 183}:
+            raise FileExistsError(code, "cache entry already exists", name)
+        if code == 5:
+            raise PermissionError(code, "cache entry access denied", name)
+        raise OSError(code, "relative cache operation failed", name)
+
+    @staticmethod
+    def _require_hardened_open(
+        desired_access: int, share_mode: int, flags: int
+    ) -> None:
+        if (
+            desired_access != _WINDOWS_DIRECTORY_ACCESS
+            or share_mode != _WINDOWS_DIRECTORY_SHARE
+            or flags != _WINDOWS_DIRECTORY_FLAGS
+        ):
+            raise ValueError("Windows cache directory open is not hardened")
+
+    @staticmethod
+    def _raise_last_error(message: str) -> None:
+        import ctypes
+
+        last_error = getattr(ctypes, "get_last_error")()
+        if last_error == 5:
+            raise PermissionError(last_error, message)
+        raise OSError(last_error, message)
 
     def file_attributes(self, handle: int) -> int:
         import ctypes
-        from ctypes import wintypes
 
         class FileAttributeTagInfo(ctypes.Structure):
             _fields_ = (
-                ("FileAttributes", wintypes.DWORD),
-                ("ReparseTag", wintypes.DWORD),
+                ("FileAttributes", ctypes.c_uint32),
+                ("ReparseTag", ctypes.c_uint32),
             )
 
         info = FileAttributeTagInfo()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ntpath
 import os
 import ssl
 import threading
@@ -403,6 +404,60 @@ def test_single_flight_collision_opens_transport_once(tmp_path: Path) -> None:
     assert len(paths) == 2
     assert paths[0] == paths[1]
     assert len(transport.urls) == 1
+
+
+def test_single_flight_key_never_calls_path_resolve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import rembggui.jobs.models.download as download_module
+
+    target = tmp_path / "cache" / "2.0.72" / "u2net" / "u2net.onnx"
+
+    def forbid_resolve(*_args: object, **_kwargs: object) -> NoReturn:
+        raise AssertionError("single-flight key must not resolve the filesystem")
+
+    monkeypatch.setattr(Path, "resolve", forbid_resolve)
+
+    assert download_module._flight_lock(target) is download_module._flight_lock(target)
+
+
+def test_single_flight_lock_identity_survives_symlink_namespace_swap(
+    tmp_path: Path,
+) -> None:
+    import rembggui.jobs.models.download as download_module
+
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    first_root.mkdir()
+    second_root.mkdir()
+    cache_link = tmp_path / "cache-link"
+    cache_link.symlink_to(first_root, target_is_directory=True)
+    target = cache_link / "2.0.72" / "u2net" / "u2net.onnx"
+
+    before = download_module._flight_lock(target)
+    cache_link.unlink()
+    cache_link.symlink_to(second_root, target_is_directory=True)
+    after = download_module._flight_lock(target)
+
+    assert before is after
+
+
+def test_single_flight_key_normalizes_lexical_dotdot_and_windows_case(
+    tmp_path: Path,
+) -> None:
+    import rembggui.jobs.models.download as download_module
+
+    direct = tmp_path / "cache" / "2.0.72" / "u2net" / "u2net.onnx"
+    equivalent = (
+        tmp_path / "cache" / "ignored" / ".." / "2.0.72" / "u2net" / "u2net.onnx"
+    )
+
+    assert download_module._flight_lock(direct) is download_module._flight_lock(
+        equivalent
+    )
+    assert download_module._lexical_lock_key(  # type: ignore[attr-defined]
+        Path("C:/CACHE/ignored/../U2NET.ONNX"), path_api=ntpath
+    ) == ntpath.normcase(ntpath.abspath("C:/CACHE/ignored/../U2NET.ONNX"))
 
 
 def test_success_fsyncs_file_and_parent_before_return(
