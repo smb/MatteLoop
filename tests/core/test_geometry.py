@@ -8,6 +8,7 @@ import pytest
 
 from rembggui.core.geometry import (
     CropGeometryState,
+    InteractionGeometry,
     MediaTransform,
     PointF,
     RectF,
@@ -85,8 +86,8 @@ def test_crop_geometry_shares_transform_across_every_consumer() -> None:
     assert geometry.pointer_hit["north_west"].contains(
         geometry.visual["north_west"]
     )
-    assert geometry.touch_hit["north_west"] == RectF(-2, -2, 44, 44)
-    assert geometry.accessible_screen["north_west"] == RectF(147, 72, 66, 66)
+    assert geometry.touch_hit["north_west"] == RectF(0, 0, 44, 44)
+    assert geometry.accessible_screen["north_west"] == RectF(150, 75, 66, 66)
     assert geometry.screen_to_source(PointF(180, 105)) == PointF(10, 10)
 
 
@@ -127,6 +128,40 @@ def test_crop_is_clamped_before_all_eight_handle_rectangles_are_derived() -> Non
         "south_west",
         "west",
     }
+
+
+def test_every_crop_hit_target_is_effective_and_inside_the_viewport() -> None:
+    geometry = build_crop_geometry(
+        state=CropGeometryState(
+            source_size=SizeF(100, 100),
+            crop=RectF(0, 0, 1, 1),
+        ),
+        viewport=SizeF(100, 100),
+        dpr=1,
+    )
+
+    for rect in geometry.pointer_hit.values():
+        assert rect.width >= 24
+        assert rect.height >= 24
+        assert RectF(0, 0, 100, 100).contains(rect)
+    for rect in geometry.touch_hit.values():
+        assert rect.width >= 44
+        assert rect.height >= 44
+        assert RectF(0, 0, 100, 100).contains(rect)
+
+
+def test_hit_targets_use_the_full_viewport_when_it_is_below_minimum_size() -> None:
+    geometry = build_crop_geometry(
+        state=CropGeometryState(
+            source_size=SizeF(100, 100),
+            crop=RectF(0, 0, 1, 1),
+        ),
+        viewport=SizeF(20, 10),
+        dpr=1,
+    )
+
+    assert set(geometry.pointer_hit.values()) == {RectF(0, 0, 20, 10)}
+    assert set(geometry.touch_hit.values()) == {RectF(0, 0, 20, 10)}
 
 
 def test_overlap_priority_is_dragged_then_focused_then_handles_then_region() -> None:
@@ -203,6 +238,69 @@ def test_timeline_range_retains_rational_values_and_one_frame_minimum() -> None:
         )
 
 
+def test_every_timeline_target_is_effective_and_inside_the_viewport() -> None:
+    geometry = build_timeline_geometry(
+        state=TimelineGeometryState(
+            duration=Fraction(1),
+            start=Fraction(1, 2),
+            end=Fraction(51, 100),
+            playhead=Fraction(1, 2),
+            fps=240,
+        ),
+        viewport=SizeF(100, 100),
+        dpr=1,
+    )
+
+    for rect in geometry.pointer_hit.values():
+        assert rect.width >= 24
+        assert rect.height >= 24
+        assert RectF(0, 0, 100, 100).contains(rect)
+    for rect in geometry.touch_hit.values():
+        assert rect.width >= 44
+        assert rect.height >= 44
+        assert RectF(0, 0, 100, 100).contains(rect)
+
+
+def test_timeline_targets_use_full_viewport_below_minimum_size() -> None:
+    geometry = build_timeline_geometry(
+        state=TimelineGeometryState(
+            duration=Fraction(1),
+            start=Fraction(0),
+            end=Fraction(1),
+            playhead=Fraction(1, 2),
+        ),
+        viewport=SizeF(20, 10),
+        dpr=1,
+    )
+
+    assert set(geometry.pointer_hit.values()) == {RectF(0, 0, 20, 10)}
+    assert set(geometry.touch_hit.values()) == {RectF(0, 0, 20, 10)}
+
+
+def test_timeline_requires_frozen_screen_and_viewport_values() -> None:
+    with pytest.raises(ValueError, match="screen_origin"):
+        TimelineGeometryState(
+            duration=Fraction(1),
+            start=Fraction(0),
+            end=Fraction(1),
+            playhead=Fraction(0),
+            screen_origin=[0, 0],  # type: ignore[arg-type]
+        )
+
+    state = TimelineGeometryState(
+        duration=Fraction(1),
+        start=Fraction(0),
+        end=Fraction(1),
+        playhead=Fraction(0),
+    )
+    with pytest.raises(ValueError, match="viewport"):
+        build_timeline_geometry(
+            state=state,
+            viewport=[100, 100],  # type: ignore[arg-type]
+            dpr=1,
+        )
+
+
 def test_geometry_values_and_maps_are_immutable() -> None:
     state = CropGeometryState(
         source_size=SizeF(100, 100),
@@ -216,6 +314,43 @@ def test_geometry_values_and_maps_are_immutable() -> None:
         geometry.visual["crop"] = RectF(0, 0, 1, 1)  # type: ignore[index]
     with pytest.raises(FrozenInstanceError):
         geometry.visual._mapping = {}  # type: ignore[misc]
+
+
+def test_direct_interaction_geometry_copies_mutable_inputs() -> None:
+    rectangles = {"target": RectF(1, 2, 24, 24)}
+    priority = ["target"]
+    transform = MediaTransform(SizeF(100, 100), SizeF(100, 100))
+
+    geometry = InteractionGeometry(
+        visual=rectangles,  # type: ignore[arg-type]
+        pointer_hit=rectangles,  # type: ignore[arg-type]
+        touch_hit=rectangles,  # type: ignore[arg-type]
+        focus=rectangles,  # type: ignore[arg-type]
+        accessible_screen=rectangles,  # type: ignore[arg-type]
+        transform=transform,
+        priority=priority,  # type: ignore[arg-type]
+    )
+    rectangles["target"] = RectF(90, 90, 1, 1)
+    priority.clear()
+
+    assert geometry.visual["target"] == RectF(1, 2, 24, 24)
+    assert geometry.priority == ("target",)
+    assert geometry.hit_test(PointF(2, 3)) == "target"
+
+
+def test_direct_interaction_geometry_rejects_arbitrary_mutable_transform() -> None:
+    rectangles = {"target": RectF(1, 2, 24, 24)}
+
+    with pytest.raises(ValueError, match="transform"):
+        InteractionGeometry(
+            visual=rectangles,  # type: ignore[arg-type]
+            pointer_hit=rectangles,  # type: ignore[arg-type]
+            touch_hit=rectangles,  # type: ignore[arg-type]
+            focus=rectangles,  # type: ignore[arg-type]
+            accessible_screen=rectangles,  # type: ignore[arg-type]
+            transform=object(),  # type: ignore[arg-type]
+            priority=("target",),
+        )
 
 
 @pytest.mark.parametrize(

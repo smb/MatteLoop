@@ -7,9 +7,9 @@ half-open: ``left <= x < right`` and ``top <= y < bottom``.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Context, Decimal, localcontext
 from fractions import Fraction
 from types import MappingProxyType
 from typing import Protocol, Self
@@ -17,9 +17,10 @@ from typing import Protocol, Self
 from PIL import Image
 
 from rembggui.core.errors import ErrorCode, ValidationError
-from rembggui.core.specs import FramingSpec
+from rembggui.core.specs import MAX_FINAL_DIMENSION, FramingSpec
 
 _ROTATIONS = frozenset({0, 90, 180, 270})
+_MAX_RGBA_ALLOCATION_BYTES = MAX_FINAL_DIMENSION * MAX_FINAL_DIMENSION * 4
 _CROP_HANDLES = (
     "north_west",
     "north",
@@ -171,6 +172,64 @@ class PixelBounds:
         ):
             raise ValueError("pixel dimensions must be integers")
         return cls(x, y, x + width, y + height)
+
+
+@dataclass(frozen=True)
+class FramingPlan:
+    """Validated immutable instructions for processing one RGBA frame at a time."""
+
+    source_size: tuple[int, int]
+    global_bounds: PixelBounds | None = None
+    padding: int = 0
+    stretch_x: Fraction | Decimal | float | int = Fraction(1)
+    output_size: tuple[int, int] = field(init=False)
+
+    def __post_init__(self) -> None:
+        source_size = _integer_size(self.source_size, "source canvas")
+        _validate_allocation_size(source_size, "source canvas allocation")
+        if not isinstance(self.padding, int) or isinstance(self.padding, bool):
+            raise ValidationError(
+                ErrorCode.INVALID_FRAMING,
+                "framing",
+                "padding must be a non-negative integer",
+            )
+        if self.padding < 0:
+            raise ValidationError(
+                ErrorCode.INVALID_FRAMING,
+                "framing",
+                "padding must be a non-negative integer",
+            )
+        stretch = _positive_fraction(self.stretch_x, "horizontal stretch")
+        if self.global_bounds is not None:
+            _validate_contained_bounds(self.global_bounds, source_size)
+            content_width = self.global_bounds.width
+            content_height = self.global_bounds.height
+        else:
+            content_width, content_height = source_size
+        padded_width = content_width + 2 * self.padding
+        padded_height = content_height + 2 * self.padding
+        output_width = _round_positive_fraction(padded_width * stretch)
+        output_size = FramingSpec().validate_final_dimensions(
+            output_width, padded_height
+        )
+        _validate_allocation_size(output_size, "framed output allocation")
+        object.__setattr__(self, "source_size", source_size)
+        object.__setattr__(self, "stretch_x", stretch)
+        object.__setattr__(self, "output_size", output_size)
+
+    @property
+    def content_bounds(self) -> PixelBounds:
+        if self.global_bounds is not None:
+            return self.global_bounds
+        return PixelBounds(0, 0, self.source_size[0], self.source_size[1])
+
+    @property
+    def padded_size(self) -> tuple[int, int]:
+        bounds = self.content_bounds
+        return (
+            bounds.width + 2 * self.padding,
+            bounds.height + 2 * self.padding,
+        )
 
 
 class CoordinateTransform(Protocol):
@@ -367,6 +426,8 @@ class TimelineGeometryState:
     dragged: str | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.screen_origin, PointF):
+            raise ValueError("screen_origin must be a frozen PointF")
         if (
             not isinstance(self.fps, int)
             or isinstance(self.fps, bool)
@@ -400,7 +461,15 @@ class FrozenRectMap(Mapping[str, RectF]):
     _mapping: Mapping[str, RectF]
 
     def __init__(self, values: Mapping[str, RectF]) -> None:
-        object.__setattr__(self, "_mapping", MappingProxyType(dict(values)))
+        if not isinstance(values, Mapping):
+            raise ValueError("rectangle collection must be a mapping")
+        copied = dict(values)
+        if any(
+            not isinstance(name, str) or not isinstance(rect, RectF)
+            for name, rect in copied.items()
+        ):
+            raise ValueError("rectangle mappings require string keys and RectF values")
+        object.__setattr__(self, "_mapping", MappingProxyType(copied))
 
     def __getitem__(self, key: str) -> RectF:
         return self._mapping[key]
@@ -425,6 +494,31 @@ class InteractionGeometry:
     priority: tuple[str, ...]
     focused: str | None = None
     dragged: str | None = None
+
+    def __post_init__(self) -> None:
+        for name in (
+            "visual",
+            "pointer_hit",
+            "touch_hit",
+            "focus",
+            "accessible_screen",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, Mapping):
+                raise ValueError(f"{name} must be a rectangle mapping")
+            object.__setattr__(self, name, FrozenRectMap(value))
+        if not isinstance(self.transform, (MediaTransform, _TimelineTransform)):
+            raise ValueError("transform must be a frozen core coordinate transform")
+        if isinstance(self.priority, str):
+            raise ValueError("priority must be a sequence of target names")
+        priority = tuple(self.priority)
+        if any(not isinstance(name, str) for name in priority):
+            raise ValueError("priority must contain only target names")
+        if self.focused is not None and not isinstance(self.focused, str):
+            raise ValueError("focused must be a target name or None")
+        if self.dragged is not None and not isinstance(self.dragged, str):
+            raise ValueError("dragged must be a target name or None")
+        object.__setattr__(self, "priority", priority)
 
     def source_to_widget(self, point: PointF) -> PointF:
         return self.transform.source_to_widget(point)
@@ -488,13 +582,13 @@ def build_crop_geometry(
     visual = FrozenRectMap(visual_values)
     pointer = FrozenRectMap(
         {
-            name: (rect if name == "crop" else rect.expanded_to_minimum(24, 24))
+            name: _effective_target(rect, viewport, 24)
             for name, rect in visual.items()
         }
     )
     touch = FrozenRectMap(
         {
-            name: (rect if name == "crop" else rect.expanded_to_minimum(44, 44))
+            name: _effective_target(rect, viewport, 44)
             for name, rect in visual.items()
         }
     )
@@ -525,12 +619,18 @@ class _TimelineTransform:
     inset: float = 20.0
 
     def __post_init__(self) -> None:
+        if not isinstance(self.viewport, SizeF):
+            raise ValueError("viewport must be a frozen SizeF")
+        if not isinstance(self.screen_origin, PointF):
+            raise ValueError("screen_origin must be a frozen PointF")
         duration = _finite(self.duration, "duration")
         dpr = _finite(self.dpr, "dpr")
-        if duration <= 0 or dpr <= 0 or self.viewport.width <= 2 * self.inset:
+        if duration <= 0 or dpr <= 0:
             raise ValueError("timeline transform dimensions must be positive")
+        inset = min(self.inset, self.viewport.width / 4)
         object.__setattr__(self, "duration", duration)
         object.__setattr__(self, "dpr", dpr)
+        object.__setattr__(self, "inset", inset)
 
     @property
     def width(self) -> float:
@@ -591,20 +691,14 @@ def build_timeline_geometry(
     )
     pointer = FrozenRectMap(
         {
-            "timeline": visual["timeline"],
-            "range": visual["range"],
-            "start_handle": visual["start_handle"].expanded_to_minimum(24, 44),
-            "end_handle": visual["end_handle"].expanded_to_minimum(24, 44),
-            "playhead": visual["playhead"].expanded_to_minimum(12, viewport.height),
+            name: _effective_target(rect, viewport, 24)
+            for name, rect in visual.items()
         }
     )
     touch = FrozenRectMap(
         {
-            "timeline": visual["timeline"],
-            "range": visual["range"],
-            "start_handle": visual["start_handle"].expanded_to_minimum(44, 44),
-            "end_handle": visual["end_handle"].expanded_to_minimum(44, 44),
-            "playhead": visual["playhead"].expanded_to_minimum(44, viewport.height),
+            name: _effective_target(rect, viewport, 44)
+            for name, rect in visual.items()
         }
     )
     return InteractionGeometry(
@@ -629,6 +723,7 @@ def apply_source_crop(image: Image.Image, bounds: PixelBounds) -> Image.Image:
     """Crop one RGBA frame using exact half-open oriented-source bounds."""
     _validate_rgba(image)
     _validate_contained_bounds(bounds, image.size)
+    _validate_allocation_size((bounds.width, bounds.height), "crop allocation")
     return image.crop((bounds.left, bounds.top, bounds.right, bounds.bottom))
 
 
@@ -637,11 +732,9 @@ def alpha_bounds(
 ) -> PixelBounds | None:
     """Return strict-threshold alpha bounds, or ``None`` for an empty mask."""
     _validate_rgba(image)
-    threshold = _percentage(threshold_percent)
-    cutoff = Decimal(255) * threshold / Decimal(100)
-    mask = image.getchannel("A").point(
-        [255 if Decimal(alpha) > cutoff else 0 for alpha in range(256)]
-    )
+    _validate_allocation_size(image.size, "alpha-mask allocation")
+    threshold = _percentage_fraction(threshold_percent)
+    mask = image.getchannel("A").point(_alpha_threshold_table(threshold))
     bounds = mask.getbbox()
     if bounds is None:
         return None
@@ -650,14 +743,34 @@ def alpha_bounds(
 
 
 def union_alpha_bounds(
-    frames: Sequence[Image.Image], threshold_percent: Decimal | float | int
+    frames: Iterable[Image.Image], threshold_percent: Decimal | float | int
 ) -> PixelBounds:
-    """Return one union bound for an equal-canvas frame range."""
-    images = _validated_frames(frames)
-    threshold = _percentage(threshold_percent)
+    """Incrementally return one union bound for an equal-canvas frame range."""
+    try:
+        iterator = iter(frames)
+    except TypeError:
+        raise ValidationError(
+            ErrorCode.INVALID_FRAMING,
+            "framing",
+            "framing requires an iterable of RGBA frames",
+        ) from None
+    threshold = _percentage_fraction(threshold_percent)
+    table = _alpha_threshold_table(threshold)
     union: PixelBounds | None = None
-    for image in images:
-        bounds = alpha_bounds(image, threshold)
+    expected_size: tuple[int, int] | None = None
+    for image in iterator:
+        _validate_rgba(image)
+        _validate_allocation_size(image.size, "alpha-union mask allocation")
+        if expected_size is None:
+            expected_size = image.size
+        elif image.size != expected_size:
+            raise ValidationError(
+                ErrorCode.INVALID_FRAMING,
+                "framing",
+                "all frames must have identical source canvas dimensions",
+            )
+        raw_bounds = image.getchannel("A").point(table).getbbox()
+        bounds = PixelBounds(*raw_bounds) if raw_bounds is not None else None
         if bounds is None:
             continue
         if union is None:
@@ -678,47 +791,39 @@ def union_alpha_bounds(
     return union
 
 
-def apply_framing(
-    frames: Sequence[Image.Image],
-    *,
-    global_bounds: PixelBounds | None,
-    padding: int,
-    stretch_x: Decimal | float | int,
-) -> tuple[Image.Image, ...]:
-    """Apply union crop, equal transparent padding, and horizontal stretch."""
-    images = _validated_frames(frames)
-    stretch = _positive_decimal(stretch_x, "horizontal stretch")
-    spec = FramingSpec(padding=padding, stretch_x=stretch)
-    source_width, source_height = images[0].size
-    if global_bounds is not None:
-        _validate_contained_bounds(global_bounds, images[0].size)
-        source_width, source_height = global_bounds.width, global_bounds.height
-    final_width, final_height = spec.dimensions_after_padding_and_stretch(
-        source_width, source_height
-    )
-    spec.validate_final_dimensions(final_width, final_height)
-
-    results: list[Image.Image] = []
-    for image in images:
-        working = (
-            apply_source_crop(image, global_bounds)
-            if global_bounds is not None
-            else image.copy()
+def apply_framing(image: Image.Image, plan: FramingPlan) -> Image.Image:
+    """Apply one preflighted crop/padding/stretch plan with one output allocation."""
+    _validate_rgba(image)
+    if not isinstance(plan, FramingPlan):
+        raise ValidationError(
+            ErrorCode.INVALID_FRAMING,
+            "framing",
+            "framing requires an immutable FramingPlan",
         )
-        if padding:
-            padded = Image.new(
-                "RGBA",
-                (working.width + 2 * padding, working.height + 2 * padding),
-                (0, 0, 0, 0),
-            )
-            padded.alpha_composite(working, (padding, padding))
-            working = padded
-        if working.size != (final_width, final_height):
-            working = working.resize(
-                (final_width, final_height), Image.Resampling.LANCZOS
-            )
-        results.append(working)
-    return tuple(results)
+    if image.size != plan.source_size:
+        raise ValidationError(
+            ErrorCode.INVALID_FRAMING,
+            "framing",
+            "frame does not match the plan source canvas",
+        )
+    bounds = plan.content_bounds
+    padded_width, _ = plan.padded_size
+    output_width, output_height = plan.output_size
+    scale_x = padded_width / output_width
+    return image.transform(
+        (output_width, output_height),
+        Image.Transform.AFFINE,
+        (
+            scale_x,
+            0,
+            bounds.left - plan.padding,
+            0,
+            1,
+            bounds.top - plan.padding,
+        ),
+        resample=Image.Resampling.BICUBIC,
+        fillcolor=(0, 0, 0, 0),
+    )
 
 
 def solve_proportional_scale(
@@ -766,15 +871,24 @@ def solve_proportional_scale(
             "auto-fit",
             "target and current byte counts must be positive integers",
         )
-    step = (
-        Decimal(target_bytes) * Decimal("0.94") / Decimal(current_bytes)
-    ).sqrt()
-    step = min(Decimal("0.97"), step)
-    minimum_scale = max(
-        Decimal(min_dimension) / Decimal(source_width),
-        Decimal(min_dimension) / Decimal(source_height),
+    current_fraction = Fraction(current_scale)
+    ratio = Fraction(target_bytes * 94, current_bytes * 100)
+    minimum_fraction = max(
+        Fraction(min_dimension, source_width),
+        Fraction(min_dimension, source_height),
     )
-    return max(minimum_scale, current_scale * step)
+    with localcontext(Context(prec=80)):
+        step = (
+            Decimal(ratio.numerator) / Decimal(ratio.denominator)
+        ).sqrt()
+        step = min(Decimal("0.97"), step)
+        current = Decimal(current_fraction.numerator) / Decimal(
+            current_fraction.denominator
+        )
+        minimum_scale = Decimal(minimum_fraction.numerator) / Decimal(
+            minimum_fraction.denominator
+        )
+        return max(minimum_scale, current * step)
 
 
 def _map_rect(rect: RectF, converter: Callable[[PointF], PointF]) -> RectF:
@@ -793,6 +907,15 @@ def _centered_rect(center: PointF, width: float, height: float) -> RectF:
     return RectF(center.x - width / 2, center.y - height / 2, width, height)
 
 
+def _effective_target(rect: RectF, viewport: SizeF, minimum: float) -> RectF:
+    width = min(viewport.width, max(rect.width, minimum))
+    height = min(viewport.height, max(rect.height, minimum))
+    center = rect.center()
+    x = min(max(center.x - width / 2, 0), viewport.width - width)
+    y = min(max(center.y - height / 2, 0), viewport.height - height)
+    return RectF(x, y, width, height)
+
+
 def _unique_names(values: Sequence[str | None]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(value for value in values if value is not None))
 
@@ -804,26 +927,6 @@ def _validate_rgba(image: Image.Image) -> None:
             "framing",
             "frames must be real Pillow RGBA images",
         )
-
-
-def _validated_frames(frames: Sequence[Image.Image]) -> tuple[Image.Image, ...]:
-    if not isinstance(frames, Sequence) or not frames:
-        raise ValidationError(
-            ErrorCode.INVALID_FRAMING,
-            "framing",
-            "framing requires at least one RGBA frame",
-        )
-    images = tuple(frames)
-    for image in images:
-        _validate_rgba(image)
-    expected = images[0].size
-    if any(image.size != expected for image in images[1:]):
-        raise ValidationError(
-            ErrorCode.INVALID_FRAMING,
-            "framing",
-            "all frames must have identical source canvas dimensions",
-        )
-    return images
 
 
 def _validate_contained_bounds(
@@ -843,46 +946,90 @@ def _validate_contained_bounds(
         )
 
 
-def _positive_decimal(value: Decimal | float | int, name: str) -> Decimal:
+def _validate_allocation_size(image_size: tuple[int, int], detail: str) -> None:
+    allocation_bytes = image_size[0] * image_size[1] * 4
+    if (
+        any(dimension > MAX_FINAL_DIMENSION for dimension in image_size)
+        or allocation_bytes > _MAX_RGBA_ALLOCATION_BYTES
+    ):
+        raise ValidationError(
+            ErrorCode.INVALID_FINAL_DIMENSIONS,
+            "framing",
+            f"{detail} dimensions must not exceed 16383 pixels",
+        )
+
+
+def _number_fraction(value: Fraction | Decimal | float | int, name: str) -> Fraction:
     if isinstance(value, bool):
         raise ValidationError(
-            ErrorCode.INVALID_FRAMING, "framing", f"{name} must be positive"
+            ErrorCode.INVALID_FRAMING, "framing", f"{name} must be finite"
         )
     try:
+        if isinstance(value, Fraction):
+            return value
         converted = value if isinstance(value, Decimal) else Decimal(str(value))
-    except (ValueError, TypeError):
+        if not converted.is_finite():
+            raise ValueError
+        return Fraction(converted)
+    except (ValueError, TypeError, ArithmeticError):
         raise ValidationError(
-            ErrorCode.INVALID_FRAMING, "framing", f"{name} must be positive"
+            ErrorCode.INVALID_FRAMING, "framing", f"{name} must be finite"
         ) from None
-    if not converted.is_finite() or converted <= 0:
+
+
+def _positive_fraction(
+    value: Fraction | Decimal | float | int, name: str
+) -> Fraction:
+    converted = _number_fraction(value, name)
+    if converted <= 0:
         raise ValidationError(
             ErrorCode.INVALID_FRAMING, "framing", f"{name} must be positive"
         )
     return converted
 
 
-def _percentage(value: Decimal | float | int) -> Decimal:
-    if isinstance(value, bool):
-        raise ValidationError(
-            ErrorCode.INVALID_FRAMING,
-            "framing",
-            "alpha threshold must be between 0 and 100 percent",
-        )
-    try:
-        converted = value if isinstance(value, Decimal) else Decimal(str(value))
-    except (ValueError, TypeError):
-        raise ValidationError(
-            ErrorCode.INVALID_FRAMING,
-            "framing",
-            "alpha threshold must be between 0 and 100 percent",
-        ) from None
-    if not converted.is_finite() or not Decimal(0) <= converted <= Decimal(100):
+def _percentage_fraction(value: Decimal | float | int) -> Fraction:
+    converted = _number_fraction(value, "alpha threshold")
+    if not Fraction(0) <= converted <= Fraction(100):
         raise ValidationError(
             ErrorCode.INVALID_FRAMING,
             "framing",
             "alpha threshold must be between 0 and 100 percent",
         )
     return converted
+
+
+def _alpha_threshold_table(threshold: Fraction) -> list[int]:
+    return [
+        255
+        if alpha * 100 * threshold.denominator > 255 * threshold.numerator
+        else 0
+        for alpha in range(256)
+    ]
+
+
+def _integer_size(value: object, name: str) -> tuple[int, int]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        raise ValidationError(
+            ErrorCode.INVALID_FRAMING, "framing", f"{name} must contain two integers"
+        )
+    copied = tuple(value)
+    if (
+        len(copied) != 2
+        or any(
+            not isinstance(item, int) or isinstance(item, bool) or item <= 0
+            for item in copied
+        )
+    ):
+        raise ValidationError(
+            ErrorCode.INVALID_FRAMING, "framing", f"{name} must contain two integers"
+        )
+    return copied[0], copied[1]
+
+
+def _round_positive_fraction(value: Fraction) -> int:
+    rounded = (2 * value.numerator + value.denominator) // (2 * value.denominator)
+    return rounded
 
 
 def _rational_time(value: Fraction | Decimal) -> Fraction:

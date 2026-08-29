@@ -3,6 +3,7 @@
 from rembggui.core.errors import AppError, ErrorCode, ValidationError
 from rembggui.core.geometry import (
     CropGeometryState,
+    FramingPlan,
     InteractionGeometry,
     MediaTransform,
     PixelBounds,
@@ -37,6 +38,7 @@ __all__ = [
     "EdgeMode",
     "ErrorCode",
     "FramingSpec",
+    "FramingPlan",
     "InteractionGeometry",
     "MediaTransform",
     "OutputSpec",
