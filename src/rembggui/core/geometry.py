@@ -803,7 +803,7 @@ def union_alpha_bounds(
 def apply_framing(image: Image.Image, plan: FramingPlan) -> Image.Image:
     """Apply one isolated, premultiplied crop/padding/stretch plan."""
     _validate_rgba(image)
-    if not isinstance(plan, FramingPlan):
+    if type(plan) is not FramingPlan:
         raise ValidationError(
             ErrorCode.INVALID_FRAMING,
             "framing",
@@ -833,12 +833,14 @@ def apply_framing(image: Image.Image, plan: FramingPlan) -> Image.Image:
         padded.paste(working, (plan.padding, plan.padding))
         del working
         working = padded
+        del padded
 
     # Pillow resize uses center-aligned sampling:
     # input_x = (output_x + 0.5) * padded_width / output_width - 0.5.
     resized = working.resize(plan.output_size, Image.Resampling.BICUBIC)
     del working
     result = resized.convert("RGBA")
+    del resized
     return result
 
 

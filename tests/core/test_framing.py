@@ -366,6 +366,98 @@ def test_framing_allocates_only_preflighted_working_and_output_canvases(
     assert resize_targets == [(162, 328)]
 
 
+def test_final_rgba_convert_releases_the_padded_predecessor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = rgba(128, 128)
+    plan = framing_plan(128, 128, padding=1, stretch_x=Decimal("1.5"))
+    padded_reference: weakref.ReferenceType[Image.Image] | None = None
+    live_full_image_counts: list[int] = []
+    original_new = Image.new
+    original_convert = Image.Image.convert
+
+    def observed_new(
+        mode: str,
+        size: tuple[int, int],
+        color: object = 0,
+    ) -> Image.Image:
+        nonlocal padded_reference
+        created = original_new(mode, size, color)
+        if mode == "RGBa" and size == (130, 130):
+            padded_reference = weakref.ref(created)
+        return created
+
+    def observed_convert(
+        image: Image.Image,
+        mode: str | None = None,
+        *args: object,
+        **kwargs: object,
+    ) -> Image.Image:
+        converted = original_convert(image, mode, *args, **kwargs)
+        if image.mode == "RGBa" and mode == "RGBA" and image.size == (195, 130):
+            gc.collect()
+            assert padded_reference is not None
+            live_full_image_counts.append(
+                1  # caller-owned source
+                + int(padded_reference() is not None)
+                + 1  # resized RGBa input
+                + 1  # converted RGBA result
+            )
+        return converted
+
+    monkeypatch.setattr(Image, "new", observed_new)
+    monkeypatch.setattr(Image.Image, "convert", observed_convert)
+
+    result = apply_framing(frame, plan)
+
+    assert result.size == (195, 130)
+    assert live_full_image_counts == [3]
+
+
+def test_apply_framing_rejects_plan_subclasses_before_property_or_pillow_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    property_accesses = 0
+    pillow_allocations = 0
+
+    class OversizedMutablePlan(FramingPlan):
+        @property
+        def content_bounds(self) -> PixelBounds:
+            nonlocal property_accesses
+            property_accesses += 1
+            return PixelBounds(0, 0, 128, 128)
+
+        @property
+        def padded_size(self) -> tuple[int, int]:
+            nonlocal property_accesses
+            property_accesses += 1
+            return (268_435_456, 2)
+
+    unsafe_plan = OversizedMutablePlan(
+        source_size=(128, 128),
+        padding=1,
+        stretch_x=Decimal("1.5"),
+    )
+    frame = rgba(128, 128)
+
+    def counted(*args: object, **kwargs: object) -> object:
+        nonlocal pillow_allocations
+        pillow_allocations += 1
+        raise AssertionError("Pillow allocation occurred before plan type validation")
+
+    monkeypatch.setattr(Image.Image, "crop", counted)
+    monkeypatch.setattr(Image, "new", counted)
+    monkeypatch.setattr(Image.Image, "resize", counted)
+    monkeypatch.setattr(Image.Image, "convert", counted)
+
+    with pytest.raises(ValidationError) as exc:
+        apply_framing(frame, unsafe_plan)
+
+    assert exc.value.code is ErrorCode.INVALID_FRAMING
+    assert property_accesses == 0
+    assert pillow_allocations == 0
+
+
 def test_invalid_plan_performs_no_pillow_allocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
