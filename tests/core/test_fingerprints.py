@@ -4,14 +4,15 @@ import hashlib
 import json
 import os
 import threading
-import time
 from dataclasses import replace
 from decimal import Decimal, localcontext
 from fractions import Fraction
 from pathlib import Path
+from typing import BinaryIO
 
 import pytest
 
+import rembggui.core.fingerprints as fingerprints_module
 from rembggui.core.errors import AppError, ErrorCode, ValidationError
 from rembggui.core.fingerprints import (
     complete_source_sha256,
@@ -122,24 +123,54 @@ def test_complete_hash_supports_an_empty_source(tmp_path: Path) -> None:
 
 def test_complete_hash_rejects_a_source_that_changes_during_streaming(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = tmp_path / "changing.mp4"
     source.write_bytes(b"x" * 1_000_000)
-    stop = threading.Event()
+    initial_stat = source.stat()
+    read_boundary_entered = threading.Event()
+    mutation_completed = threading.Event()
+    mutation_errors: list[BaseException] = []
+    original_update_digest = fingerprints_module._update_digest
 
     def mutate_metadata() -> None:
-        time.sleep(0.005)
-        while not stop.is_set():
-            os.utime(source, None)
+        if not read_boundary_entered.wait(timeout=1):
+            mutation_errors.append(
+                AssertionError("hashing never reached the read boundary")
+            )
+            return
+        os.utime(
+            source,
+            ns=(initial_stat.st_atime_ns, initial_stat.st_mtime_ns + 1_000_000_000),
+        )
+        mutation_completed.set()
+
+    def gated_update_digest(
+        source_file: BinaryIO, digest: object, chunk_size: int
+    ) -> int:
+        class ReadBoundary:
+            def read(self, size: int) -> bytes:
+                read_boundary_entered.set()
+                if not mutation_completed.wait(timeout=1):
+                    raise AssertionError("metadata mutation did not complete")
+                return source_file.read(size)
+
+        return original_update_digest(ReadBoundary(), digest, chunk_size)
+
+    monkeypatch.setattr(fingerprints_module, "_update_digest", gated_update_digest)
 
     writer = threading.Thread(target=mutate_metadata)
     writer.start()
     try:
         with pytest.raises(AppError) as exc:
-            complete_source_sha256(source, chunk_size=1)
+            complete_source_sha256(source, chunk_size=1_000_000)
     finally:
-        stop.set()
-        writer.join()
+        writer.join(timeout=1)
+
+    assert not writer.is_alive()
+    assert not mutation_errors
+    assert read_boundary_entered.is_set()
+    assert mutation_completed.is_set()
 
     assert exc.value.code is ErrorCode.SOURCE_CHANGED
     assert exc.value.retry_action == "reload-source"
