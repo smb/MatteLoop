@@ -24,6 +24,17 @@ class ErrorCode(StrEnum):
     SOURCE_CHANGED = "source_changed"
     CUTS_CHANGED_DURING_SNAPSHOT = "cuts_changed_during_snapshot"
     CLOUD_CONSENT_REQUIRED = "cloud_consent_required"
+    SOURCE_NOT_LOCAL = "source_not_local"
+    SOURCE_UNREADABLE = "source_unreadable"
+    SOURCE_NO_VIDEO = "source_no_video"
+    SOURCE_CORRUPT = "source_corrupt"
+    SOURCE_ZERO_DURATION = "source_zero_duration"
+    SOURCE_HDR_UNSUPPORTED = "source_hdr_unsupported"
+    SOURCE_DIMENSIONS_UNSUPPORTED = "source_dimensions_unsupported"
+    SOURCE_FPS_UNSUPPORTED = "source_fps_unsupported"
+    SOURCE_DURATION_UNSUPPORTED = "source_duration_unsupported"
+    INVALID_THUMBNAIL = "invalid_thumbnail"
+    JOB_CANCELLED = "job_cancelled"
 
 
 class AppError(Exception):
