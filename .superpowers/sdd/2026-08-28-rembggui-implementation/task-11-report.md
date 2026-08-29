@@ -137,6 +137,31 @@ Final review-fix focused GREEN, including the model-cache native handle suite:
 112 passed in 1.42s
 ```
 
+### Review fix round 4 RED/GREEN
+
+The fourth review found three remaining cleanup/ownership gaps. Focused tests
+proved that a bound-directory close failure replaced an active `AppError`, a
+rejected Windows child handle lost both its primary redirect diagnosis and its
+retryable owner when `CloseHandle` failed, a structured scratch cleanup
+`AppError` replaced `JOB_CANCELLED`, and native initial-journal failures bypassed
+stage cleanup. Both native journal error forms were exercised while a second
+structured cleanup error was injected after removal, proving the original
+failure stayed primary, the diagnostic note was retained, the stage was gone,
+and the previous promoted cut set remained byte-identical.
+
+```text
+.venv/bin/pytest -q tests/jobs/test_workspace.py -k \
+  'bound_directory_exit_preserves_primary or windows_open_child_preserves_redirect or snapshot_cleanup_app_error or native_initial_journal_failure'
+5 failed, 79 deselected in 0.34s
+```
+
+Final review-fix focused GREEN, including the model-cache native handle suite:
+
+```text
+.venv/bin/pytest -q tests/jobs/test_workspace.py tests/jobs/models/test_cache_fs.py
+117 passed in 2.07s
+```
+
 ## Architecture and safety decisions
 
 - `CutManifest`, `CutFrame`, `CutUnionMetadata`, workspace summaries, listings,
@@ -172,11 +197,15 @@ Final review-fix focused GREEN, including the model-cache native handle suite:
   to a bound parent. Windows directory enumeration consumes the bound handle,
   and directory creation uses a relative native create followed by strict parent
   durability and handle-relative cleanup on failure. Traversal and
-  symlink/junction/reparse redirection are rejected. Every exceptional bind path
-  closes all acquired descriptors/handles; multi-handle close attempts all
-  owners, retains any failed ownership for retry, and reports one structured
-  combined failure. Descriptor-to-file-object transfers close the descriptor
-  exactly once if `os.fdopen` fails.
+  symlink/junction/reparse redirection are rejected. Constructed bound-directory
+  owners attempt every Windows handle close, retain failed ownership for retry,
+  and report one structured combined failure. A rejected child handle whose
+  immediate close fails transfers to a cleanup-only list on its parent, so
+  parent-relative operations remain anchored to the parent while a later close
+  can retry the child. A close failure during context unwinding is added to the
+  active error as a diagnostic note instead of replacing it.
+  Descriptor-to-file-object transfers close the descriptor exactly once if
+  `os.fdopen` fails.
 - Local-filesystem admission is descriptor-bound: macOS uses native `fstatfs`
   `MNT_LOCAL`; Linux binds `st_dev` to bounded `/proc/self/mountinfo` parsing and
   admits only an explicit reviewed set of local, memory, image, and container
@@ -192,8 +221,11 @@ Final review-fix focused GREEN, including the model-cache native handle suite:
   `renameat2(RENAME_EXCHANGE)` on Linux), eliminating an absent-target window.
   Other platforms use an fsynced bounded journal plus old-directory backup; every
   observer recovers the candidate or restores the prior validated cache before
-  listing/opening it. Validation and injected rename/cleanup failures preserve
-  the previous valid cache.
+  listing/opening it. Validation, journal, rename, and cleanup failures preserve
+  the previous valid cache. Initial journal failures from `AppError`, native
+  cache safety/close errors, or `OSError` all run local stage cleanup before
+  structured propagation; a cleanup failure is attached without replacing the
+  journal failure.
 - External edit detection rescans the entire namespace and every frame's
   readability, dimensions, metadata, and hash. Valid content or metadata changes
   atomically update frame records, set `edited`, invalidate union metadata, and
@@ -236,14 +268,16 @@ failure. The pre-existing `CUTS_CHANGED_DURING_SNAPSHOT` and `JOB_CANCELLED`
 codes remain the snapshot race and cancellation contracts. Every public
 filesystem boundary maps shared native cache safety/close failures and raw OS
 errors into these `AppError` contracts, including exceptions raised after a
-Windows iterator has begun. Existing `AppError` codes pass through unchanged;
-in particular, a cleanup failure is attached as diagnostic context and cannot
-replace an active cancellation.
+Windows iterator has begun. The boundary decorator passes an existing
+`AppError` through unchanged. Bound-directory context cleanup, staged-cut
+cleanup, and scratch-snapshot cleanup attach their own structured/native/OS
+failures as diagnostic notes when another `AppError` is already active; they do
+not replace its code, including `JOB_CANCELLED`.
 
 ## Verification
 
-- Focused Task 11 plus native handle suite: `112 passed in 1.42s`.
-- Permitted full suite: `801 passed in 45.33s`.
+- Focused Task 11 plus native handle suite: `117 passed in 2.07s`.
+- Permitted full suite: `806 passed in 46.24s`.
 - `.venv/bin/ruff check .` — passed.
 - `.venv/bin/mypy src` — passed for 28 source files.
 - Ruff format check over Task 11 Python files — passed.

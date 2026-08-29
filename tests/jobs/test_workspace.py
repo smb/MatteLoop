@@ -582,6 +582,101 @@ def test_windows_close_attempts_every_handle_and_retains_failed_ownership(
     assert bound._windows_handles == ()
 
 
+def test_bound_directory_exit_preserves_primary_app_error_when_close_fails(
+    tmp_path: Path,
+) -> None:
+    class FakeApi:
+        def __init__(self) -> None:
+            self.attempts: list[int] = []
+            self.fail = True
+
+        def close_handle(self, handle: int) -> None:
+            self.attempts.append(handle)
+            if self.fail:
+                raise OSError("injected context close failure")
+
+    api = FakeApi()
+    bound = workspace_module._BoundDirectory(
+        tmp_path, None, windows_handles=(91,), windows_api=api
+    )
+    primary = AppError(
+        ErrorCode.JOB_CANCELLED,
+        "cut-snapshot",
+        "error.job.cancelled",
+        "snapshot cancellation must remain primary",
+        "dismiss",
+    )
+
+    with pytest.raises(AppError) as exc:
+        with bound:
+            raise primary
+
+    assert exc.value is primary
+    assert any(
+        "bound-directory close failure" in note
+        and "injected context close failure" in note
+        for note in getattr(primary, "__notes__", ())
+    )
+    assert bound._windows_handles == (91,)
+
+    api.fail = False
+    bound.close()
+    assert api.attempts == [91, 91]
+    assert bound._windows_handles == ()
+
+
+def test_windows_open_child_preserves_redirect_error_and_retains_failed_close(
+    tmp_path: Path,
+) -> None:
+    from rembggui.jobs.models import cache_fs
+
+    class FakeApi:
+        def __init__(self) -> None:
+            self.attempts: list[int] = []
+            self.fail = {92}
+
+        def open_child_directory(
+            self, _parent: int, name: str, **_kwargs: object
+        ) -> int:
+            assert name == "redirected"
+            return 92
+
+        def file_attributes(self, handle: int) -> int:
+            assert handle == 92
+            return (
+                cache_fs._FILE_ATTRIBUTE_DIRECTORY
+                | cache_fs._FILE_ATTRIBUTE_REPARSE_POINT
+            )
+
+        def close_handle(self, handle: int) -> None:
+            self.attempts.append(handle)
+            if handle in self.fail:
+                raise OSError("injected child close failure")
+
+    api = FakeApi()
+    parent = workspace_module._BoundDirectory(
+        tmp_path, None, windows_handles=(90,), windows_api=api
+    )
+
+    with pytest.raises(AppError) as exc:
+        parent.open_child("redirected")
+
+    assert exc.value.code is ErrorCode.CUT_WORKSPACE_UNSAFE
+    assert "redirected" in exc.value.technical_detail
+    assert any(
+        "child-handle cleanup failure" in note
+        and "injected child close failure" in note
+        for note in getattr(exc.value, "__notes__", ())
+    )
+    assert parent._windows_cleanup_handles == (92,)
+
+    api.fail.clear()
+    parent.close()
+    assert api.attempts == [92, 92, 90]
+    assert parent._windows_cleanup_handles == ()
+    assert parent._windows_handles == ()
+
+
 def test_create_staging_maps_native_reparse_mkdir_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1295,6 +1390,48 @@ def test_snapshot_cleanup_safety_failure_does_not_replace_cancellation(
     assert any("cleanup" in note for note in getattr(exc.value, "__notes__", ()))
 
 
+def test_snapshot_cleanup_app_error_does_not_replace_cancellation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cuts = _promoted(tmp_path)
+    scratch = cuts.scratch_root / "cancelled-structured-cleanup-failure"
+    checks = 0
+
+    def cancel_after_scratch_creation() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks >= 3
+
+    cleanup_error = AppError(
+        ErrorCode.CUT_WORKSPACE_UNSAFE,
+        "cut-workspace",
+        "error.cuts.workspace-unsafe",
+        "structured scratch cleanup failure",
+        "choose-local-output",
+    )
+
+    def fail_structured_cleanup(_path: Path) -> None:
+        raise cleanup_error
+
+    monkeypatch.setattr(workspace_module, "_remove_tree", fail_structured_cleanup)
+
+    with pytest.raises(AppError) as exc:
+        snapshot_for_rebuild(
+            cuts,
+            scratch,
+            cancelled=cancel_after_scratch_creation,
+            prefer_reflink=False,
+        )
+
+    assert exc.value.code is ErrorCode.JOB_CANCELLED
+    assert "snapshot was cancelled" in exc.value.technical_detail
+    assert any(
+        "additional scratch cleanup failure" in note
+        and "structured scratch cleanup failure" in note
+        for note in getattr(exc.value, "__notes__", ())
+    )
+
+
 def test_read_promoted_cut_returns_independent_tracked_rgba_images(
     tmp_path: Path,
 ) -> None:
@@ -1580,3 +1717,51 @@ def test_initial_journal_failure_is_structured_and_cleans_stage(
     assert exc.value.code is ErrorCode.CUT_PROMOTION_FAILED
     assert not stage.path.exists()
     assert validate_cut_set(old).frame_count == 3
+
+
+@pytest.mark.parametrize(
+    "native_error",
+    [
+        UnsafeCacheError("native journal target was redirected"),
+        BoundDirectoryCloseError(OSError("native journal close failed"), None),
+    ],
+    ids=["unsafe-cache", "bound-directory-close"],
+)
+def test_native_initial_journal_failure_cleans_stage_and_keeps_primary_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    native_error: BaseException,
+) -> None:
+    old = _promoted(tmp_path)
+    before = validate_cut_set(old).to_json_bytes()
+    stage, manifest = _completed_staging(tmp_path, job_id="replacement", image_offset=8)
+    original_remove = workspace_module._remove_tree
+
+    def fail_journal(*_args: object, **_kwargs: object) -> None:
+        raise native_error
+
+    def remove_then_report_failure(path: Path) -> None:
+        original_remove(path)
+        raise AppError(
+            ErrorCode.CUT_WORKSPACE_UNSAFE,
+            "cut-workspace",
+            "error.cuts.workspace-unsafe",
+            "structured post-removal cleanup failure",
+            "choose-local-output",
+        )
+
+    monkeypatch.setattr(workspace_module, "_write_journal", fail_journal)
+    monkeypatch.setattr(workspace_module, "_remove_tree", remove_then_report_failure)
+
+    with pytest.raises(AppError) as exc:
+        promote_cut_set(stage, manifest)
+
+    assert exc.value.code is ErrorCode.CUT_WORKSPACE_UNSAFE
+    assert str(native_error) in exc.value.technical_detail
+    assert any(
+        "additional staged-cut cleanup failure" in note
+        and "structured post-removal cleanup failure" in note
+        for note in getattr(exc.value, "__notes__", ())
+    )
+    assert not stage.path.exists()
+    assert validate_cut_set(old).to_json_bytes() == before

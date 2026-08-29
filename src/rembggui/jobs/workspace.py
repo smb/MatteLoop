@@ -91,6 +91,7 @@ type CancellationCheck = Callable[[], bool]
 type _BoundaryKind = Literal[
     "unsafe", "set", "stage", "promotion", "snapshot", "delete"
 ]
+type _FilesystemFailure = OSError | UnsafeCacheError | BoundDirectoryCloseError
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -109,13 +110,21 @@ def _filesystem_boundary(
             except AppError:
                 raise
             except (UnsafeCacheError, BoundDirectoryCloseError) as error:
-                raise _unsafe_error(f"{operation}: {error}") from error
+                raise _structured_filesystem_failure(kind, operation, error) from error
             except OSError as error:
-                raise _boundary_error(kind, f"{operation}: {error}") from error
+                raise _structured_filesystem_failure(kind, operation, error) from error
 
         return wrapped
 
     return decorate
+
+
+def _structured_filesystem_failure(
+    kind: _BoundaryKind, operation: str, error: _FilesystemFailure
+) -> AppError:
+    if isinstance(error, (UnsafeCacheError, BoundDirectoryCloseError)):
+        return _unsafe_error(f"{operation}: {error}")
+    return _boundary_error(kind, f"{operation}: {error}")
 
 
 @dataclass(frozen=True, slots=True, init=False, eq=False)
@@ -805,12 +814,14 @@ def promote_cut_set(
             _write_manifest_atomic(workspace.path, manifest)
         candidate = validate_cut_set(workspace)
     except AppError as error:
-        try:
-            if workspace.path.exists():
-                _remove_tree(workspace.path)
-        except (OSError, UnsafeCacheError, BoundDirectoryCloseError) as cleanup_error:
-            error.add_note(f"additional staged-cut cleanup failure: {cleanup_error}")
+        _cleanup_staged_cut(workspace.path, error)
         raise
+    except (OSError, UnsafeCacheError, BoundDirectoryCloseError) as error:
+        failure = _structured_filesystem_failure(
+            "promotion", "cannot validate staged cut workspace", error
+        )
+        _cleanup_staged_cut(workspace.path, failure)
+        raise failure from error
     target = workspace.cuts_root / workspace.cache_key
     marker = workspace.cuts_root / f".replace-{workspace.cache_key}.json"
     token = uuid.uuid4().hex
@@ -850,33 +861,13 @@ def promote_cut_set(
             try:
                 _write_journal(marker, journal)
             except AppError as error:
-                try:
-                    if workspace.path.exists():
-                        _remove_tree(workspace.path)
-                except (
-                    OSError,
-                    UnsafeCacheError,
-                    BoundDirectoryCloseError,
-                ) as cleanup_error:
-                    error.add_note(
-                        f"additional staged-cut cleanup failure: {cleanup_error}"
-                    )
+                _cleanup_staged_cut(workspace.path, error)
                 raise
-            except OSError as error:
-                failure = _promotion_error(
-                    f"cannot create cut promotion journal: {error}"
+            except (OSError, UnsafeCacheError, BoundDirectoryCloseError) as error:
+                failure = _structured_filesystem_failure(
+                    "promotion", "cannot create cut promotion journal", error
                 )
-                try:
-                    if workspace.path.exists():
-                        _remove_tree(workspace.path)
-                except (
-                    OSError,
-                    UnsafeCacheError,
-                    BoundDirectoryCloseError,
-                ) as cleanup_error:
-                    failure.add_note(
-                        f"additional staged-cut cleanup failure: {cleanup_error}"
-                    )
+                _cleanup_staged_cut(workspace.path, failure)
                 raise failure from error
             old_location: Path | None = None
             try:
@@ -1537,7 +1528,13 @@ def _try_reflink(
 
 
 class _BoundDirectory:
-    __slots__ = ("_windows_api", "_windows_handles", "descriptor", "path")
+    __slots__ = (
+        "_windows_api",
+        "_windows_cleanup_handles",
+        "_windows_handles",
+        "descriptor",
+        "path",
+    )
 
     def __init__(
         self,
@@ -1550,6 +1547,7 @@ class _BoundDirectory:
         self.path = path
         self.descriptor = descriptor
         self._windows_handles = windows_handles
+        self._windows_cleanup_handles: tuple[int, ...] = ()
         self._windows_api = windows_api
 
     @classmethod
@@ -1676,11 +1674,10 @@ class _BoundDirectory:
     ) -> None:
         try:
             self.close()
-        except AppError as error:
+        except BaseException as error:
             if exc_value is not None:
-                error.add_note(
-                    f"bound-directory close failed while handling: {exc_value}"
-                )
+                exc_value.add_note(f"additional bound-directory close failure: {error}")
+                return
             raise
 
     def close(self) -> None:
@@ -1693,6 +1690,17 @@ class _BoundDirectory:
                 failures.append(error)
             else:
                 self.descriptor = None
+        cleanup_handles = self._windows_cleanup_handles
+        failed_cleanup_handles: set[int] = set()
+        for handle in reversed(cleanup_handles):
+            try:
+                self._windows_api.close_handle(handle)
+            except OSError as error:
+                failures.append(error)
+                failed_cleanup_handles.add(handle)
+        self._windows_cleanup_handles = tuple(
+            handle for handle in cleanup_handles if handle in failed_cleanup_handles
+        )
         handles = self._windows_handles
         failed_handles: set[int] = set()
         for handle in reversed(handles):
@@ -1794,8 +1802,14 @@ class _BoundDirectory:
                     windows_handles=(handle,),
                     windows_api=self._windows_api,
                 )
-            except BaseException:
-                self._windows_api.close_handle(handle)
+            except BaseException as error:
+                try:
+                    self._windows_api.close_handle(handle)
+                except BaseException as cleanup_error:
+                    self._windows_cleanup_handles += (handle,)
+                    error.add_note(
+                        f"additional child-handle cleanup failure: {cleanup_error}"
+                    )
                 raise
         return _BoundDirectory.open(self.path / name)
 
@@ -2514,8 +2528,26 @@ def _cleanup_snapshot(path: Path, primary: AppError) -> None:
         return
     try:
         _remove_tree(path)
-    except (OSError, UnsafeCacheError, BoundDirectoryCloseError) as cleanup_error:
+    except (
+        AppError,
+        OSError,
+        UnsafeCacheError,
+        BoundDirectoryCloseError,
+    ) as cleanup_error:
         primary.add_note(f"additional scratch cleanup failure: {cleanup_error}")
+
+
+def _cleanup_staged_cut(path: Path, primary: AppError) -> None:
+    try:
+        if path.exists():
+            _remove_tree(path)
+    except (
+        AppError,
+        OSError,
+        UnsafeCacheError,
+        BoundDirectoryCloseError,
+    ) as cleanup_error:
+        primary.add_note(f"additional staged-cut cleanup failure: {cleanup_error}")
 
 
 def _parse_png_header(header: bytes, filename: str) -> tuple[int, int]:
