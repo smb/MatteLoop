@@ -20,16 +20,22 @@ spawn a replacement.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import multiprocessing
+import os
+import stat
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as package_version
 from multiprocessing.connection import Connection
 from multiprocessing.context import BaseContext
 from multiprocessing.process import BaseProcess
 from multiprocessing.shared_memory import SharedMemory
+from pathlib import Path
 from threading import Lock, RLock, get_ident
 from typing import Any, NoReturn
 
@@ -1036,16 +1042,258 @@ def _send_child(connection: Connection, message: ChildMessage) -> bool:
 
 
 def _create_rembg_session(model_spec: dict[str, object]) -> object:
-    from rembg import new_session  # type: ignore[import-untyped]
+    from rembggui.jobs.models.catalog import ModelCatalog
 
-    model_id = model_spec.get("upstream_id", model_spec.get("model_id"))
-    if type(model_id) is not str or not model_id:
-        raise ValueError("local model launch payload has no upstream model ID")
-    return new_session(model_id)
+    verified = _validate_verified_launch_payload(
+        model_spec, catalog=ModelCatalog.load_resource()
+    )
+    session = _instantiate_verified_rembg_session(
+        verified.model_id,
+        verified.artifact_path,
+        verified.rembg_version,
+    )
+    _verify_child_artifact(
+        verified.artifact_path,
+        expected_size=verified.size_bytes,
+        expected_sha256=verified.sha256,
+    )
+    return session
+
+
+@dataclass(frozen=True, slots=True)
+class _VerifiedModelLaunch:
+    model_id: str
+    artifact_path: Path
+    rembg_version: str
+    size_bytes: int
+    sha256: str
+
+
+def _validate_verified_launch_payload(
+    model_spec: object, *, catalog: object
+) -> _VerifiedModelLaunch:
+    from rembggui.jobs.models.catalog import ExecutionClass, ModelCatalog
+
+    expected_keys = {
+        "schema_version",
+        "model_id",
+        "upstream_id",
+        "rembg_version",
+        "model_home",
+        "runtime_filename",
+        "sha256",
+        "size_bytes",
+    }
+    if type(catalog) is not ModelCatalog:
+        raise _model_preparation_error("child model catalog is not authoritative")
+    if type(model_spec) is not dict or set(model_spec) != expected_keys:
+        raise _model_preparation_error(
+            "child model launch payload has missing or unknown fields"
+        )
+    schema_version = model_spec.get("schema_version")
+    model_id = model_spec.get("model_id")
+    upstream_id = model_spec.get("upstream_id")
+    rembg_version = model_spec.get("rembg_version")
+    model_home = model_spec.get("model_home")
+    runtime_filename = model_spec.get("runtime_filename")
+    sha256 = model_spec.get("sha256")
+    size_bytes = model_spec.get("size_bytes")
+    if type(schema_version) is not int or schema_version != 1:
+        raise _model_preparation_error("child model launch schema is invalid")
+    if type(model_id) is not str:
+        raise _model_preparation_error("child model ID is invalid")
+    try:
+        spec = catalog.get(model_id)
+    except AppError as error:
+        raise _model_preparation_error(
+            "child model ID is not a pinned built-in"
+        ) from error
+    artifact = spec.artifact
+    if spec.execution_class is not ExecutionClass.LOCAL or artifact is None:
+        raise _model_preparation_error("child launch requires a local built-in model")
+    if (
+        upstream_id != spec.upstream_id
+        or rembg_version != catalog.rembg_version
+        or runtime_filename != artifact.runtime_filename
+        or sha256 != artifact.sha256
+        or type(size_bytes) is not int
+        or size_bytes != artifact.size_bytes
+    ):
+        raise _model_preparation_error(
+            "child model launch payload does not match the pinned manifest"
+        )
+    if type(model_home) is not str or not model_home:
+        raise _model_preparation_error("child model home is invalid")
+    home = Path(model_home)
+    if (
+        not home.is_absolute()
+        or home.name != spec.id
+        or home.parent.name != catalog.rembg_version
+    ):
+        raise _model_preparation_error(
+            "child model home is outside the version/model cache namespace"
+        )
+    try:
+        version_info = home.parent.lstat()
+        home_info = home.lstat()
+    except OSError as error:
+        raise _model_cache_error(
+            f"child model namespace cannot be inspected: {type(error).__name__}"
+        ) from error
+    if (
+        stat.S_ISLNK(version_info.st_mode)
+        or not stat.S_ISDIR(version_info.st_mode)
+        or stat.S_ISLNK(home_info.st_mode)
+        or not stat.S_ISDIR(home_info.st_mode)
+    ):
+        raise _model_cache_error("child model namespace contains a symbolic link")
+    artifact_path = home / artifact.runtime_filename
+    if artifact_path.resolve(strict=False).parent != home.resolve(strict=True):
+        raise _model_cache_error("child model artifact escapes its cache namespace")
+    _verify_child_artifact(
+        artifact_path,
+        expected_size=artifact.size_bytes,
+        expected_sha256=artifact.sha256,
+    )
+    return _VerifiedModelLaunch(
+        spec.id,
+        artifact_path,
+        catalog.rembg_version,
+        artifact.size_bytes,
+        artifact.sha256,
+    )
+
+
+def _verify_child_artifact(
+    path: Path, *, expected_size: int, expected_sha256: str
+) -> None:
+    try:
+        before = path.lstat()
+    except OSError as error:
+        raise _model_cache_error(
+            f"verified model artifact cannot be inspected: {type(error).__name__}"
+        ) from error
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_size != expected_size
+    ):
+        raise _model_cache_error(
+            "verified model artifact is not a size-matched regular file"
+        )
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise _model_cache_error(
+            f"verified model artifact cannot be opened: {type(error).__name__}"
+        ) from error
+    digest = hashlib.sha256()
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_dev != before.st_dev
+            or opened.st_ino != before.st_ino
+            or opened.st_size != expected_size
+        ):
+            raise _model_cache_error("verified model artifact changed before hashing")
+        while True:
+            chunk = os.read(descriptor, 256 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    except AppError:
+        raise
+    except OSError as error:
+        raise _model_cache_error(
+            f"verified model artifact cannot be hashed: {type(error).__name__}"
+        ) from error
+    finally:
+        os.close(descriptor)
+    try:
+        after = path.lstat()
+    except OSError as error:
+        raise _model_cache_error(
+            f"verified model artifact disappeared after hashing: {type(error).__name__}"
+        ) from error
+    if (
+        after.st_dev != opened.st_dev
+        or after.st_ino != opened.st_ino
+        or after.st_size != expected_size
+        or digest.hexdigest() != expected_sha256
+    ):
+        raise _model_preparation_error(
+            "verified model artifact failed the child SHA-256 proof"
+        )
+
+
+def _instantiate_verified_rembg_session(
+    model_id: str, artifact_path: Path, rembg_version: str
+) -> object:
+    """Instantiate a pinned built-in while overriding all download behavior."""
+    import onnxruntime as ort  # type: ignore[import-untyped]
+    from rembg.sessions import sessions_class  # type: ignore[import-untyped]
+
+    try:
+        installed_version = package_version("rembg")
+    except PackageNotFoundError as error:
+        raise _model_preparation_error(
+            "pinned rembg runtime is not installed"
+        ) from error
+    if installed_version != rembg_version:
+        raise _model_preparation_error(
+            "installed rembg runtime does not match the verified model namespace"
+        )
+    session_class: Any | None = None
+    for candidate in sessions_class:
+        if candidate.name() == model_id:
+            session_class = candidate
+            break
+    if session_class is None:
+        raise _model_preparation_error("verified built-in rembg session is unavailable")
+
+    def verified_artifact(_cls: object, *_args: object, **_kwargs: object) -> Path:
+        return artifact_path
+
+    verified_class = type(
+        f"Verified_{session_class.__name__}",
+        (session_class,),
+        {"download_models": classmethod(verified_artifact)},  # type: ignore[arg-type]
+    )
+    session_options = ort.SessionOptions()
+    threads = os.getenv("OMP_NUM_THREADS")
+    if threads is not None:
+        thread_count = int(threads)
+        session_options.inter_op_num_threads = thread_count
+        session_options.intra_op_num_threads = thread_count
+    return verified_class(model_id, session_options)
+
+
+def _model_preparation_error(detail: str) -> AppError:
+    return AppError(
+        ErrorCode.MODEL_PREPARATION_INVALID,
+        "model-session",
+        "error.model.preparation-invalid",
+        detail,
+        "retry-model-preparation",
+    )
+
+
+def _model_cache_error(detail: str) -> AppError:
+    return AppError(
+        ErrorCode.MODEL_CACHE_UNSAFE,
+        "model-cache",
+        "error.model.cache-unsafe",
+        detail,
+        "reacquire-model",
+    )
 
 
 def _run_rembg(source: Uint8Frame, session: object) -> Uint8Frame:
-    from rembg import remove
+    from rembg import remove  # type: ignore[import-untyped]
 
     result = np.asarray(remove(source, session=session))
     if result.dtype != np.dtype(np.uint8):

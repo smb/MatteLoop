@@ -1,0 +1,387 @@
+"""Strict, immutable model catalog loaded from the pinned release manifest."""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass
+from enum import StrEnum
+from pathlib import Path
+from types import MappingProxyType
+from typing import NoReturn
+from urllib.parse import unquote, urlsplit
+
+from rembggui.core.errors import AppError, ErrorCode
+
+_SCHEMA_VERSION = 1
+_PINNED_REMBG_VERSION = "2.0.72"
+_DEFAULT_ID = "birefnet-portrait"
+_APPROVED_IDS = frozenset(
+    {
+        "u2net",
+        "u2netp",
+        "u2net_human_seg",
+        "u2net_cloth_seg",
+        "silueta",
+        "isnet-general-use",
+        "isnet-anime",
+        "sam",
+        "birefnet-general",
+        "birefnet-general-lite",
+        "birefnet-portrait",
+        "birefnet-dis",
+        "birefnet-hrsod",
+        "birefnet-cod",
+        "birefnet-massive",
+        "bria-rmbg",
+        "withoutbg",
+    }
+)
+_LOCAL_IDS = _APPROVED_IDS - {"sam", "withoutbg"}
+_ROOT_FIELDS = {"schema_version", "rembg_version", "default_id", "models"}
+_MODEL_FIELDS = {
+    "id",
+    "display_name",
+    "upstream_id",
+    "purpose",
+    "execution_class",
+    "artifact",
+    "required_inputs",
+    "edge_modes",
+    "supports_render",
+    "license_note",
+    "privacy_note",
+    "warning",
+    "max_upload_bytes",
+}
+_ARTIFACT_FIELDS = {
+    "url",
+    "runtime_filename",
+    "size_bytes",
+    "sha256",
+    "upstream_checksum",
+}
+_ID_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
+_FILENAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\.onnx\Z")
+_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
+_UPSTREAM_CHECKSUM_PATTERN = re.compile(r"(?:md5:[0-9a-f]{32}|sha256:[0-9a-f]{64})\Z")
+_EDGE_MODES = frozenset({"standard", "decontaminate", "alpha_matting"})
+_RELEASE_PATH_PREFIX = "/danielgatis/rembg/releases/download/v0.0.0/"
+
+
+class ExecutionClass(StrEnum):
+    LOCAL = "local"
+    SAM_PREVIEW = "sam_preview"
+    CLOUD_WITHOUTBG = "cloud_withoutbg"
+
+
+@dataclass(frozen=True, slots=True)
+class ModelArtifact:
+    url: str
+    runtime_filename: str
+    size_bytes: int
+    sha256: str
+    upstream_checksum: str
+
+
+@dataclass(frozen=True, slots=True)
+class ModelSpec:
+    id: str
+    display_name: str
+    upstream_id: str
+    purpose: str
+    execution_class: ExecutionClass
+    artifact: ModelArtifact | None
+    required_inputs: tuple[str, ...]
+    edge_modes: tuple[str, ...]
+    supports_render: bool
+    license_note: str
+    privacy_note: str
+    warning: str
+    max_upload_bytes: int | None
+
+
+class ModelCatalog:
+    """The only source of model IDs and artifact trust metadata."""
+
+    __slots__ = ("default_id", "ids", "rembg_version", "specs")
+
+    def __init__(
+        self,
+        *,
+        rembg_version: str,
+        default_id: str,
+        specs: tuple[ModelSpec, ...],
+    ) -> None:
+        by_id = {spec.id: spec for spec in specs}
+        self.rembg_version = rembg_version
+        self.default_id = default_id
+        self.ids = tuple(spec.id for spec in specs)
+        self.specs = MappingProxyType(by_id)
+
+    @staticmethod
+    def resource_path() -> Path:
+        return Path(__file__).resolve().parents[4] / "resources" / "model-manifest.json"
+
+    @classmethod
+    def load_resource(cls) -> ModelCatalog:
+        path = cls.resource_path()
+        try:
+            raw = path.read_bytes()
+        except OSError as error:
+            raise _manifest_error(
+                f"pinned model manifest could not be read: {type(error).__name__}"
+            ) from error
+        return cls.from_bytes(raw)
+
+    @classmethod
+    def from_bytes(cls, raw: bytes) -> ModelCatalog:
+        if type(raw) is not bytes or not 0 < len(raw) <= 256 * 1024:
+            raise _manifest_error("model manifest has an invalid byte length")
+        try:
+            payload = json.loads(
+                raw.decode("utf-8", errors="strict"),
+                object_pairs_hook=_unique_object,
+                parse_constant=lambda token: _reject_constant(token),
+            )
+        except AppError:
+            raise
+        except (
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            RecursionError,
+            ValueError,
+        ) as error:
+            raise _manifest_error("model manifest is not valid strict JSON") from error
+        if type(payload) is not dict:
+            raise _manifest_error("model manifest root must be an object")
+        _exact_keys(payload, _ROOT_FIELDS, "manifest root")
+        if _strict_int(payload, "schema_version", minimum=1) != _SCHEMA_VERSION:
+            raise _manifest_error("unsupported model manifest schema version")
+        if _strict_string(payload, "rembg_version") != _PINNED_REMBG_VERSION:
+            raise _manifest_error("model manifest rembg version is not the app pin")
+        if _strict_string(payload, "default_id") != _DEFAULT_ID:
+            raise _manifest_error("model manifest default is not the approved default")
+        model_payloads = payload["models"]
+        if type(model_payloads) is not list or len(model_payloads) != len(
+            _APPROVED_IDS
+        ):
+            raise _manifest_error("model manifest must contain exactly 17 entries")
+        specs = tuple(_parse_model(item) for item in model_payloads)
+        ids = [spec.id for spec in specs]
+        if len(set(ids)) != len(ids) or set(ids) != _APPROVED_IDS:
+            raise _manifest_error(
+                "model manifest IDs are duplicate, missing, or unknown"
+            )
+        return cls(
+            rembg_version=_PINNED_REMBG_VERSION,
+            default_id=_DEFAULT_ID,
+            specs=specs,
+        )
+
+    def get(self, model_id: str) -> ModelSpec:
+        if type(model_id) is not str:
+            raise _model_not_found("model ID must be a string")
+        spec = self.specs.get(model_id)
+        if spec is None:
+            raise _model_not_found(f"model ID {model_id!r} is not approved")
+        return spec
+
+
+def _parse_model(value: object) -> ModelSpec:
+    if type(value) is not dict:
+        raise _manifest_error("each model entry must be an object")
+    _exact_keys(value, _MODEL_FIELDS, "model entry")
+    model_id = _strict_string(value, "id")
+    if _ID_PATTERN.fullmatch(model_id) is None or model_id not in _APPROVED_IDS:
+        raise _manifest_error("model entry has an unknown or malformed ID")
+    upstream_id = _strict_string(value, "upstream_id")
+    if upstream_id != model_id:
+        raise _manifest_error("model upstream ID must match the approved public ID")
+    try:
+        execution_class = ExecutionClass(_strict_string(value, "execution_class"))
+    except ValueError as error:
+        raise _manifest_error("model execution class is invalid") from error
+    artifact_value = value["artifact"]
+    artifact = (
+        None if artifact_value is None else _parse_artifact(artifact_value, model_id)
+    )
+    required_inputs = _string_tuple(value, "required_inputs", allowed=None)
+    edge_modes = _string_tuple(value, "edge_modes", allowed=_EDGE_MODES)
+    if not edge_modes or len(set(edge_modes)) != len(edge_modes):
+        raise _manifest_error("model edge modes must be unique and non-empty")
+    supports_render = value["supports_render"]
+    if type(supports_render) is not bool:
+        raise _manifest_error("model supports_render must be a boolean")
+    max_upload = value["max_upload_bytes"]
+    if max_upload is not None and (
+        type(max_upload) is not int or max_upload <= 0 or max_upload > 100 * 1024 * 1024
+    ):
+        raise _manifest_error("model upload limit must be a bounded positive integer")
+    spec = ModelSpec(
+        id=model_id,
+        display_name=_strict_string(value, "display_name"),
+        upstream_id=upstream_id,
+        purpose=_strict_string(value, "purpose"),
+        execution_class=execution_class,
+        artifact=artifact,
+        required_inputs=required_inputs,
+        edge_modes=edge_modes,
+        supports_render=supports_render,
+        license_note=_strict_string(value, "license_note"),
+        privacy_note=_strict_string(value, "privacy_note"),
+        warning=_strict_string(value, "warning", allow_empty=True),
+        max_upload_bytes=max_upload,
+    )
+    _validate_model_invariants(spec)
+    return spec
+
+
+def _parse_artifact(value: object, model_id: str) -> ModelArtifact:
+    if type(value) is not dict:
+        raise _manifest_error("model artifact must be an object or null")
+    _exact_keys(value, _ARTIFACT_FIELDS, "model artifact")
+    url = _strict_string(value, "url")
+    split = urlsplit(url)
+    if (
+        split.scheme != "https"
+        or split.hostname != "github.com"
+        or split.username is not None
+        or split.password is not None
+        or split.port is not None
+        or split.query
+        or split.fragment
+        or not split.path.startswith(_RELEASE_PATH_PREFIX)
+        or unquote(split.path) != split.path
+        or "\\" in split.path
+        or not split.path.endswith(".onnx")
+        or "/" in split.path[len(_RELEASE_PATH_PREFIX) :]
+    ):
+        raise _manifest_error("model artifact URL is outside the pinned HTTPS release")
+    runtime_filename = _strict_string(value, "runtime_filename")
+    if (
+        _FILENAME_PATTERN.fullmatch(runtime_filename) is None
+        or runtime_filename != f"{model_id}.onnx"
+    ):
+        raise _manifest_error("model artifact runtime filename is unsafe or mismatched")
+    size_bytes = _strict_int(value, "size_bytes", minimum=1)
+    if size_bytes > 2 * 1024 * 1024 * 1024:
+        raise _manifest_error("model artifact exceeds the supported size bound")
+    sha256 = _strict_string(value, "sha256")
+    if _SHA256_PATTERN.fullmatch(sha256) is None:
+        raise _manifest_error("model artifact SHA-256 is malformed")
+    upstream_checksum = _strict_string(value, "upstream_checksum")
+    if _UPSTREAM_CHECKSUM_PATTERN.fullmatch(upstream_checksum) is None:
+        raise _manifest_error(
+            "model artifact upstream checksum provenance is malformed"
+        )
+    return ModelArtifact(
+        url=url,
+        runtime_filename=runtime_filename,
+        size_bytes=size_bytes,
+        sha256=sha256,
+        upstream_checksum=upstream_checksum,
+    )
+
+
+def _validate_model_invariants(spec: ModelSpec) -> None:
+    if spec.id in _LOCAL_IDS:
+        if (
+            spec.execution_class is not ExecutionClass.LOCAL
+            or spec.artifact is None
+            or spec.required_inputs
+            or not spec.supports_render
+            or spec.max_upload_bytes is not None
+        ):
+            raise _manifest_error("local model capability invariants are invalid")
+        return
+    if spec.id == "sam":
+        if (
+            spec.execution_class is not ExecutionClass.SAM_PREVIEW
+            or spec.artifact is not None
+            or spec.required_inputs != ("positive_point",)
+            or spec.supports_render
+            or spec.max_upload_bytes is not None
+        ):
+            raise _manifest_error("SAM preview capability invariants are invalid")
+        return
+    if (
+        spec.execution_class is not ExecutionClass.CLOUD_WITHOUTBG
+        or spec.artifact is not None
+        or spec.required_inputs != ("session_token", "per_job_consent")
+        or not spec.supports_render
+        or spec.max_upload_bytes != 20 * 1024 * 1024
+    ):
+        raise _manifest_error("withoutBG cloud capability invariants are invalid")
+
+
+def _string_tuple(
+    payload: dict[str, object], key: str, *, allowed: frozenset[str] | None
+) -> tuple[str, ...]:
+    value = payload[key]
+    if type(value) is not list or len(value) > 16:
+        raise _manifest_error(f"{key} must be a bounded array")
+    result: list[str] = []
+    for item in value:
+        if type(item) is not str or not item or len(item) > 64:
+            raise _manifest_error(f"{key} must contain bounded non-empty strings")
+        if allowed is not None and item not in allowed:
+            raise _manifest_error(f"{key} contains an unsupported value")
+        result.append(item)
+    if len(set(result)) != len(result):
+        raise _manifest_error(f"{key} values must be unique")
+    return tuple(result)
+
+
+def _strict_string(
+    payload: dict[str, object], key: str, *, allow_empty: bool = False
+) -> str:
+    value = payload.get(key)
+    if type(value) is not str or len(value) > 2048 or (not allow_empty and not value):
+        raise _manifest_error(f"{key} must be a bounded string")
+    return value
+
+
+def _strict_int(payload: dict[str, object], key: str, *, minimum: int) -> int:
+    value = payload.get(key)
+    if type(value) is not int or value < minimum:
+        raise _manifest_error(f"{key} must be an integer of at least {minimum}")
+    return value
+
+
+def _exact_keys(payload: dict[str, object], expected: set[str], label: str) -> None:
+    if set(payload) != expected:
+        raise _manifest_error(f"{label} has missing or unknown fields")
+
+
+def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _manifest_error("model manifest contains duplicate object keys")
+        result[key] = value
+    return result
+
+
+def _reject_constant(token: str) -> NoReturn:
+    raise _manifest_error(f"model manifest contains invalid JSON constant {token}")
+
+
+def _manifest_error(detail: str) -> AppError:
+    return AppError(
+        ErrorCode.MODEL_MANIFEST_INVALID,
+        "model-manifest",
+        "error.model.manifest-invalid",
+        detail,
+        "reinstall-application",
+    )
+
+
+def _model_not_found(detail: str) -> AppError:
+    return AppError(
+        ErrorCode.MODEL_NOT_FOUND,
+        "model-selection",
+        "error.model.not-found",
+        detail,
+        "choose-approved-model",
+    )

@@ -1,0 +1,312 @@
+from __future__ import annotations
+
+import json
+from dataclasses import FrozenInstanceError
+
+import pytest
+
+from rembggui.core.errors import AppError, ErrorCode
+from rembggui.jobs.models.catalog import ExecutionClass, ModelCatalog
+
+APPROVED_IDS = {
+    "u2net",
+    "u2netp",
+    "u2net_human_seg",
+    "u2net_cloth_seg",
+    "silueta",
+    "isnet-general-use",
+    "isnet-anime",
+    "sam",
+    "birefnet-general",
+    "birefnet-general-lite",
+    "birefnet-portrait",
+    "birefnet-dis",
+    "birefnet-hrsod",
+    "birefnet-cod",
+    "birefnet-massive",
+    "bria-rmbg",
+    "withoutbg",
+}
+
+
+def _manifest() -> dict[str, object]:
+    return json.loads(ModelCatalog.resource_path().read_text(encoding="utf-8"))
+
+
+def _load(payload: object) -> ModelCatalog:
+    return ModelCatalog.from_bytes(json.dumps(payload).encode())
+
+
+def _model(payload: dict[str, object], model_id: str) -> dict[str, object]:
+    models = payload["models"]
+    assert isinstance(models, list)
+    return next(
+        item for item in models if isinstance(item, dict) and item.get("id") == model_id
+    )
+
+
+def test_manifest_contains_exact_approved_catalog_and_default() -> None:
+    catalog = ModelCatalog.load_resource()
+
+    assert catalog.rembg_version == "2.0.72"
+    assert catalog.default_id == "birefnet-portrait"
+    assert set(catalog.ids) == APPROVED_IDS
+    assert len(catalog.ids) == len(APPROVED_IDS)
+
+
+def test_local_catalog_metadata_is_pinned_and_deeply_immutable() -> None:
+    catalog = ModelCatalog.load_resource()
+    portrait = catalog.get("birefnet-portrait")
+
+    assert portrait.execution_class is ExecutionClass.LOCAL
+    assert portrait.upstream_id == "birefnet-portrait"
+    assert portrait.supports_render is True
+    assert portrait.required_inputs == ()
+    assert portrait.artifact is not None
+    assert portrait.artifact.runtime_filename == "birefnet-portrait.onnx"
+    assert portrait.artifact.size_bytes == 972_666_916
+    assert portrait.artifact.sha256 == (
+        "1ba1c8ff5a7bbfadc8d8d13fb11d7be793f91f23d9d466549e37a854f6668f99"
+    )
+    assert portrait.artifact.upstream_checksum == (
+        "md5:c3a64a6abf20250d090cd055f12a3b67"
+    )
+    with pytest.raises(FrozenInstanceError):
+        portrait.purpose = "changed"  # type: ignore[misc]
+    with pytest.raises(TypeError):
+        catalog.specs[portrait.id] = portrait  # type: ignore[index]
+
+
+def test_special_models_are_capability_routed_without_local_artifacts() -> None:
+    catalog = ModelCatalog.load_resource()
+    sam = catalog.get("sam")
+    cloud = catalog.get("withoutbg")
+
+    assert sam.execution_class is ExecutionClass.SAM_PREVIEW
+    assert sam.artifact is None
+    assert sam.required_inputs == ("positive_point",)
+    assert sam.supports_render is False
+    assert cloud.execution_class is ExecutionClass.CLOUD_WITHOUTBG
+    assert cloud.artifact is None
+    assert cloud.max_upload_bytes == 20 * 1024 * 1024
+    assert cloud.required_inputs == ("session_token", "per_job_consent")
+    assert "never persisted" in cloud.privacy_note.lower()
+
+
+def test_bria_exposes_download_license_and_commercial_warning() -> None:
+    bria = ModelCatalog.load_resource().get("bria-rmbg")
+
+    assert bria.artifact is not None
+    assert bria.artifact.size_bytes == 1_024_331_469
+    assert "license" in bria.license_note.lower()
+    assert "commercial" in bria.warning.lower()
+
+
+def test_every_local_artifact_matches_the_app_pinned_release_index() -> None:
+    expected = {
+        "u2net": (
+            "u2net.onnx",
+            175_997_641,
+            "8d10d2f3bb75ae3b6d527c77944fc5e7dcd94b29809d47a739a7a728a912b491",
+            "md5:60024c5c889badc19c04ad937298a77b",
+        ),
+        "u2netp": (
+            "u2netp.onnx",
+            4_574_861,
+            "309c8469258dda742793dce0ebea8e6dd393174f89934733ecc8b14c76f4ddd8",
+            "md5:8e83ca70e441ab06c318d82300c84806",
+        ),
+        "u2net_human_seg": (
+            "u2net_human_seg.onnx",
+            175_997_641,
+            "01eb6a29a5c4d8edb30b56adad9bb3a2a0535338e480724a213e0acfd2d1c73c",
+            "md5:c09ddc2e0104f800e3e1bb4652583d1f",
+        ),
+        "u2net_cloth_seg": (
+            "u2net_cloth_seg.onnx",
+            176_194_565,
+            "6d2cbc27bfbdc989e1fd325656d65902ecc6a3ccbe94b2d3655ec114efcb128e",
+            "md5:2434d1f3cb744e0e49386c906e5a08bb",
+        ),
+        "silueta": (
+            "silueta.onnx",
+            44_173_029,
+            "75da6c8d2f8096ec743d071951be73b4a8bc7b3e51d9a6625d63644f90ffeedb",
+            "md5:55e59e0d8062d2f5d013f4725ee84782",
+        ),
+        "isnet-general-use": (
+            "isnet-general-use.onnx",
+            178_648_008,
+            "60920e99c45464f2ba57bee2ad08c919a52bbf852739e96947fbb4358c0d964a",
+            "md5:fc16ebd8b0c10d971d3513d564d01e29",
+        ),
+        "isnet-anime": (
+            "isnet-anime.onnx",
+            176_069_933,
+            "f15622d853e8260172812b657053460e20806f04b9e05147d49af7bed31a6e99",
+            "md5:6f184e756bb3bd901c8849220a83e38e",
+        ),
+        "birefnet-general": (
+            "BiRefNet-general-epoch_244.onnx",
+            972_666_916,
+            "58f621f00f5d756097615970a88a791584600dcf7c45b18a0a6267535a1ebd3c",
+            "md5:7a35a0141cbbc80de11d9c9a28f52697",
+        ),
+        "birefnet-general-lite": (
+            "BiRefNet-general-bb_swin_v1_tiny-epoch_232.onnx",
+            224_005_088,
+            "5600024376f572a557870a5eb0afb1e5961636bef4e1e22132025467d0f03333",
+            "md5:4fab47adc4ff364be1713e97b7e66334",
+        ),
+        "birefnet-portrait": (
+            "BiRefNet-portrait-epoch_150.onnx",
+            972_666_916,
+            "1ba1c8ff5a7bbfadc8d8d13fb11d7be793f91f23d9d466549e37a854f6668f99",
+            "md5:c3a64a6abf20250d090cd055f12a3b67",
+        ),
+        "birefnet-dis": (
+            "BiRefNet-DIS-epoch_590.onnx",
+            972_666_916,
+            "6470117bac6f8d82a3f62921056f52d0f5c4d36d1d832096331d5ea38a03acb5",
+            "md5:2d4d44102b446f33a4ebb2e56c051f2b",
+        ),
+        "birefnet-hrsod": (
+            "BiRefNet-HRSOD_DHU-epoch_115.onnx",
+            972_666_916,
+            "4f5837663194fb88f603b76782eae05a3c29f5749872ca1bfb636bd26e7f6bfc",
+            "md5:c017ade5de8a50ff0fd74d790d268dda",
+        ),
+        "birefnet-cod": (
+            "BiRefNet-COD-epoch_125.onnx",
+            972_666_916,
+            "91ec48f566db475cf6e4caa7e9cd997f352edfcc372372f437e2fbefc1557b13",
+            "md5:f6d0d21ca89d287f17e7afe9f5fd3b45",
+        ),
+        "birefnet-massive": (
+            "BiRefNet-massive-TR_DIS5K_TR_TEs-epoch_420.onnx",
+            972_666_916,
+            "a94814cac438a31f95287811882628644a04b22d313ef3071d2ba904b5f627b8",
+            "md5:33e726a2136a3d59eb0fdf613e31e3e9",
+        ),
+        "bria-rmbg": (
+            "bria-rmbg-2.0.onnx",
+            1_024_331_469,
+            "5b486f08200f513f460da46dd701db5fbb47d79b4be4b708a19444bcd4e79958",
+            "sha256:5b486f08200f513f460da46dd701db5fbb47d79b4be4b708a19444bcd4e79958",
+        ),
+    }
+    catalog = ModelCatalog.load_resource()
+
+    assert set(expected) == {
+        model_id
+        for model_id in catalog.ids
+        if catalog.get(model_id).execution_class is ExecutionClass.LOCAL
+    }
+    for model_id, (url_name, size, sha256, upstream_checksum) in expected.items():
+        artifact = catalog.get(model_id).artifact
+        assert artifact is not None
+        assert artifact.url.rsplit("/", 1)[1] == url_name
+        assert artifact.size_bytes == size
+        assert artifact.sha256 == sha256
+        assert artifact.upstream_checksum == upstream_checksum
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b'{"schema_version":1,"schema_version":1}',
+        b'{"schema_version":NaN}',
+        b"[]",
+        b"\xff",
+    ],
+)
+def test_manifest_rejects_duplicate_nonfinite_nonobject_and_non_utf8_json(
+    raw: bytes,
+) -> None:
+    with pytest.raises(AppError) as exc:
+        ModelCatalog.from_bytes(raw)
+    assert exc.value.code is ErrorCode.MODEL_MANIFEST_INVALID
+
+
+@pytest.mark.parametrize(
+    ("mutation", "detail"),
+    [
+        (lambda root: root.update({"unknown": True}), "unknown root field"),
+        (lambda root: root.update({"schema_version": True}), "boolean integer"),
+        (lambda root: root.update({"default_id": "u2net"}), "wrong default"),
+        (lambda root: root.update({"rembg_version": "2.0.71"}), "wrong pin"),
+        (
+            lambda root: _model(root, "u2net").update({"id": "custom"}),
+            "unknown model ID",
+        ),
+        (
+            lambda root: _model(root, "u2net").update({"extra": "field"}),
+            "unknown model field",
+        ),
+        (
+            lambda root: _model(root, "u2net")["artifact"].update(  # type: ignore[union-attr]
+                {"url": "http://github.com/model.onnx"}
+            ),
+            "non-HTTPS URL",
+        ),
+        (
+            lambda root: _model(root, "u2net")["artifact"].update(  # type: ignore[union-attr]
+                {"url": "https://evil.example/u2net.onnx"}
+            ),
+            "untrusted host",
+        ),
+        (
+            lambda root: _model(root, "u2net")["artifact"].update(  # type: ignore[union-attr]
+                {
+                    "url": "https://github.com/danielgatis/rembg/releases/"
+                    "download/v0.0.0/nested\\u2net.onnx"
+                }
+            ),
+            "backslash path ambiguity",
+        ),
+        (
+            lambda root: _model(root, "u2net")["artifact"].update(  # type: ignore[union-attr]
+                {"runtime_filename": "../u2net.onnx"}
+            ),
+            "unsafe filename",
+        ),
+        (
+            lambda root: _model(root, "u2net")["artifact"].update(  # type: ignore[union-attr]
+                {"sha256": "0" * 63}
+            ),
+            "invalid sha256",
+        ),
+        (
+            lambda root: _model(root, "u2net")["artifact"].update(  # type: ignore[union-attr]
+                {"size_bytes": 0}
+            ),
+            "invalid size",
+        ),
+        (
+            lambda root: _model(root, "sam").update({"execution_class": "local"}),
+            "SAM local invariant",
+        ),
+        (
+            lambda root: _model(root, "withoutbg").update({"max_upload_bytes": None}),
+            "cloud upload invariant",
+        ),
+    ],
+)
+def test_manifest_strictly_rejects_hostile_schema_mutations(
+    mutation: object, detail: str
+) -> None:
+    payload = _manifest()
+    assert callable(mutation)
+    mutation(payload)
+
+    with pytest.raises(AppError) as exc:
+        _load(payload)
+    assert exc.value.code is ErrorCode.MODEL_MANIFEST_INVALID, detail
+
+
+def test_catalog_rejects_unknown_lookup_and_does_not_offer_custom_ids() -> None:
+    catalog = ModelCatalog.load_resource()
+
+    with pytest.raises(AppError) as exc:
+        catalog.get("u2net_custom")
+    assert exc.value.code is ErrorCode.MODEL_NOT_FOUND

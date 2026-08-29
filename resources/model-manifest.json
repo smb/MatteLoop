@@ -1,0 +1,352 @@
+{
+  "schema_version": 1,
+  "rembg_version": "2.0.72",
+  "default_id": "birefnet-portrait",
+  "models": [
+    {
+      "id": "u2net",
+      "display_name": "U²-Net",
+      "upstream_id": "u2net",
+      "purpose": "General-purpose foreground extraction.",
+      "execution_class": "local",
+      "artifact": {
+        "url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx",
+        "runtime_filename": "u2net.onnx",
+        "size_bytes": 175997641,
+        "sha256": "8d10d2f3bb75ae3b6d527c77944fc5e7dcd94b29809d47a739a7a728a912b491",
+        "upstream_checksum": "md5:60024c5c889badc19c04ad937298a77b"
+      },
+      "required_inputs": [],
+      "edge_modes": ["standard", "decontaminate", "alpha_matting"],
+      "supports_render": true,
+      "license_note": "Model terms are provided by the upstream U²-Net project; review them before redistribution.",
+      "privacy_note": "Runs locally after the verified model download.",
+      "warning": "",
+      "max_upload_bytes": null
+    },
+    {
+      "id": "u2netp",
+      "display_name": "U²-Net P",
+      "upstream_id": "u2netp",
+      "purpose": "Small, faster general-purpose foreground extraction.",
+      "execution_class": "local",
+      "artifact": {
+        "url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx",
+        "runtime_filename": "u2netp.onnx",
+        "size_bytes": 4574861,
+        "sha256": "309c8469258dda742793dce0ebea8e6dd393174f89934733ecc8b14c76f4ddd8",
+        "upstream_checksum": "md5:8e83ca70e441ab06c318d82300c84806"
+      },
+      "required_inputs": [],
+      "edge_modes": ["standard", "decontaminate", "alpha_matting"],
+      "supports_render": true,
+      "license_note": "Model terms are provided by the upstream U²-Net project; review them before redistribution.",
+      "privacy_note": "Runs locally after the verified model download.",
+      "warning": "Lower resource use can trade away fine edge detail.",
+      "max_upload_bytes": null
+    },
+    {
+      "id": "u2net_human_seg",
+      "display_name": "U²-Net Human Segmentation",
+      "upstream_id": "u2net_human_seg",
+      "purpose": "Human-focused foreground extraction.",
+      "execution_class": "local",
+      "artifact": {
+        "url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net_human_seg.onnx",
+        "runtime_filename": "u2net_human_seg.onnx",
+        "size_bytes": 175997641,
+        "sha256": "01eb6a29a5c4d8edb30b56adad9bb3a2a0535338e480724a213e0acfd2d1c73c",
+        "upstream_checksum": "md5:c09ddc2e0104f800e3e1bb4652583d1f"
+      },
+      "required_inputs": [],
+      "edge_modes": ["standard", "decontaminate", "alpha_matting"],
+      "supports_render": true,
+      "license_note": "Model terms are provided by the upstream U²-Net project; review them before redistribution.",
+      "privacy_note": "Runs locally after the verified model download.",
+      "warning": "",
+      "max_upload_bytes": null
+    },
+    {
+      "id": "u2net_cloth_seg",
+      "display_name": "U²-Net Cloth Segmentation",
+      "upstream_id": "u2net_cloth_seg",
+      "purpose": "Clothing-focused segmentation.",
+      "execution_class": "local",
+      "artifact": {
+        "url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net_cloth_seg.onnx",
+        "runtime_filename": "u2net_cloth_seg.onnx",
+        "size_bytes": 176194565,
+        "sha256": "6d2cbc27bfbdc989e1fd325656d65902ecc6a3ccbe94b2d3655ec114efcb128e",
+        "upstream_checksum": "md5:2434d1f3cb744e0e49386c906e5a08bb"
+      },
+      "required_inputs": [],
+      "edge_modes": ["standard", "decontaminate", "alpha_matting"],
+      "supports_render": true,
+      "license_note": "Model terms are provided by the upstream U²-Net project; review them before redistribution.",
+      "privacy_note": "Runs locally after the verified model download.",
+      "warning": "Produces clothing-class masks; preview the selected class behavior before rendering.",
+      "max_upload_bytes": null
+    },
+    {
+      "id": "silueta",
+      "display_name": "Silueta",
+      "upstream_id": "silueta",
+      "purpose": "Compact general-purpose foreground extraction.",
+      "execution_class": "local",
+      "artifact": {
+        "url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/silueta.onnx",
+        "runtime_filename": "silueta.onnx",
+        "size_bytes": 44173029,
+        "sha256": "75da6c8d2f8096ec743d071951be73b4a8bc7b3e51d9a6625d63644f90ffeedb",
+        "upstream_checksum": "md5:55e59e0d8062d2f5d013f4725ee84782"
+      },
+      "required_inputs": [],
+      "edge_modes": ["standard", "decontaminate", "alpha_matting"],
+      "supports_render": true,
+      "license_note": "Review the Silueta model's upstream terms before redistribution.",
+      "privacy_note": "Runs locally after the verified model download.",
+      "warning": "",
+      "max_upload_bytes": null
+    },
+    {
+      "id": "isnet-general-use",
+      "display_name": "IS-Net General Use",
+      "upstream_id": "isnet-general-use",
+      "purpose": "General salient-object segmentation.",
+      "execution_class": "local",
+      "artifact": {
+        "url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/isnet-general-use.onnx",
+        "runtime_filename": "isnet-general-use.onnx",
+        "size_bytes": 178648008,
+        "sha256": "60920e99c45464f2ba57bee2ad08c919a52bbf852739e96947fbb4358c0d964a",
+        "upstream_checksum": "md5:fc16ebd8b0c10d971d3513d564d01e29"
+      },
+      "required_inputs": [],
+      "edge_modes": ["standard", "decontaminate", "alpha_matting"],
+      "supports_render": true,
+      "license_note": "Review the IS-Net model's upstream terms before redistribution.",
+      "privacy_note": "Runs locally after the verified model download.",
+      "warning": "",
+      "max_upload_bytes": null
+    },
+    {
+      "id": "isnet-anime",
+      "display_name": "IS-Net Anime",
+      "upstream_id": "isnet-anime",
+      "purpose": "Anime and illustration foreground extraction.",
+      "execution_class": "local",
+      "artifact": {
+        "url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/isnet-anime.onnx",
+        "runtime_filename": "isnet-anime.onnx",
+        "size_bytes": 176069933,
+        "sha256": "f15622d853e8260172812b657053460e20806f04b9e05147d49af7bed31a6e99",
+        "upstream_checksum": "md5:6f184e756bb3bd901c8849220a83e38e"
+      },
+      "required_inputs": [],
+      "edge_modes": ["standard", "decontaminate", "alpha_matting"],
+      "supports_render": true,
+      "license_note": "Review the IS-Net Anime model's upstream terms before redistribution.",
+      "privacy_note": "Runs locally after the verified model download.",
+      "warning": "Optimized for illustrated rather than photographic subjects.",
+      "max_upload_bytes": null
+    },
+    {
+      "id": "sam",
+      "display_name": "Segment Anything (SAM)",
+      "upstream_id": "sam",
+      "purpose": "Point-prompted extraction for a selected preview frame.",
+      "execution_class": "sam_preview",
+      "artifact": null,
+      "required_inputs": ["positive_point"],
+      "edge_modes": ["standard"],
+      "supports_render": false,
+      "license_note": "SAM model acquisition and prompt adapter are capability-routed in V1.1; review Meta's model terms before use.",
+      "privacy_note": "The planned SAM adapter runs locally; Task 9 does not acquire or start it.",
+      "warning": "Preview only: static point prompts do not track a moving subject.",
+      "max_upload_bytes": null
+    },
+    {
+      "id": "birefnet-general",
+      "display_name": "BiRefNet General",
+      "upstream_id": "birefnet-general",
+      "purpose": "High-quality general foreground extraction.",
+      "execution_class": "local",
+      "artifact": {
+        "url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/BiRefNet-general-epoch_244.onnx",
+        "runtime_filename": "birefnet-general.onnx",
+        "size_bytes": 972666916,
+        "sha256": "58f621f00f5d756097615970a88a791584600dcf7c45b18a0a6267535a1ebd3c",
+        "upstream_checksum": "md5:7a35a0141cbbc80de11d9c9a28f52697"
+      },
+      "required_inputs": [],
+      "edge_modes": ["standard", "decontaminate", "alpha_matting"],
+      "supports_render": true,
+      "license_note": "Review the BiRefNet model's upstream terms before redistribution or commercial use.",
+      "privacy_note": "Runs locally after the verified model download.",
+      "warning": "Large model download and memory footprint.",
+      "max_upload_bytes": null
+    },
+    {
+      "id": "birefnet-general-lite",
+      "display_name": "BiRefNet General Lite",
+      "upstream_id": "birefnet-general-lite",
+      "purpose": "Smaller BiRefNet general foreground extraction.",
+      "execution_class": "local",
+      "artifact": {
+        "url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/BiRefNet-general-bb_swin_v1_tiny-epoch_232.onnx",
+        "runtime_filename": "birefnet-general-lite.onnx",
+        "size_bytes": 224005088,
+        "sha256": "5600024376f572a557870a5eb0afb1e5961636bef4e1e22132025467d0f03333",
+        "upstream_checksum": "md5:4fab47adc4ff364be1713e97b7e66334"
+      },
+      "required_inputs": [],
+      "edge_modes": ["standard", "decontaminate", "alpha_matting"],
+      "supports_render": true,
+      "license_note": "Review the BiRefNet model's upstream terms before redistribution or commercial use.",
+      "privacy_note": "Runs locally after the verified model download.",
+      "warning": "Smaller than full BiRefNet models with a possible quality trade-off.",
+      "max_upload_bytes": null
+    },
+    {
+      "id": "birefnet-portrait",
+      "display_name": "BiRefNet Portrait",
+      "upstream_id": "birefnet-portrait",
+      "purpose": "High-quality portrait and hair foreground extraction.",
+      "execution_class": "local",
+      "artifact": {
+        "url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/BiRefNet-portrait-epoch_150.onnx",
+        "runtime_filename": "birefnet-portrait.onnx",
+        "size_bytes": 972666916,
+        "sha256": "1ba1c8ff5a7bbfadc8d8d13fb11d7be793f91f23d9d466549e37a854f6668f99",
+        "upstream_checksum": "md5:c3a64a6abf20250d090cd055f12a3b67"
+      },
+      "required_inputs": [],
+      "edge_modes": ["standard", "decontaminate", "alpha_matting"],
+      "supports_render": true,
+      "license_note": "Review the BiRefNet model's upstream terms before redistribution or commercial use.",
+      "privacy_note": "Runs locally after the verified model download.",
+      "warning": "Large model download and memory footprint.",
+      "max_upload_bytes": null
+    },
+    {
+      "id": "birefnet-dis",
+      "display_name": "BiRefNet DIS",
+      "upstream_id": "birefnet-dis",
+      "purpose": "Dichotomous image segmentation.",
+      "execution_class": "local",
+      "artifact": {
+        "url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/BiRefNet-DIS-epoch_590.onnx",
+        "runtime_filename": "birefnet-dis.onnx",
+        "size_bytes": 972666916,
+        "sha256": "6470117bac6f8d82a3f62921056f52d0f5c4d36d1d832096331d5ea38a03acb5",
+        "upstream_checksum": "md5:2d4d44102b446f33a4ebb2e56c051f2b"
+      },
+      "required_inputs": [],
+      "edge_modes": ["standard", "decontaminate", "alpha_matting"],
+      "supports_render": true,
+      "license_note": "Review the BiRefNet model's upstream terms before redistribution or commercial use.",
+      "privacy_note": "Runs locally after the verified model download.",
+      "warning": "Large model download and memory footprint.",
+      "max_upload_bytes": null
+    },
+    {
+      "id": "birefnet-hrsod",
+      "display_name": "BiRefNet HRSOD",
+      "upstream_id": "birefnet-hrsod",
+      "purpose": "High-resolution salient-object detection.",
+      "execution_class": "local",
+      "artifact": {
+        "url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/BiRefNet-HRSOD_DHU-epoch_115.onnx",
+        "runtime_filename": "birefnet-hrsod.onnx",
+        "size_bytes": 972666916,
+        "sha256": "4f5837663194fb88f603b76782eae05a3c29f5749872ca1bfb636bd26e7f6bfc",
+        "upstream_checksum": "md5:c017ade5de8a50ff0fd74d790d268dda"
+      },
+      "required_inputs": [],
+      "edge_modes": ["standard", "decontaminate", "alpha_matting"],
+      "supports_render": true,
+      "license_note": "Review the BiRefNet model's upstream terms before redistribution or commercial use.",
+      "privacy_note": "Runs locally after the verified model download.",
+      "warning": "Large model download and memory footprint.",
+      "max_upload_bytes": null
+    },
+    {
+      "id": "birefnet-cod",
+      "display_name": "BiRefNet COD",
+      "upstream_id": "birefnet-cod",
+      "purpose": "Camouflaged-object detection.",
+      "execution_class": "local",
+      "artifact": {
+        "url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/BiRefNet-COD-epoch_125.onnx",
+        "runtime_filename": "birefnet-cod.onnx",
+        "size_bytes": 972666916,
+        "sha256": "91ec48f566db475cf6e4caa7e9cd997f352edfcc372372f437e2fbefc1557b13",
+        "upstream_checksum": "md5:f6d0d21ca89d287f17e7afe9f5fd3b45"
+      },
+      "required_inputs": [],
+      "edge_modes": ["standard", "decontaminate", "alpha_matting"],
+      "supports_render": true,
+      "license_note": "Review the BiRefNet model's upstream terms before redistribution or commercial use.",
+      "privacy_note": "Runs locally after the verified model download.",
+      "warning": "Large model download and memory footprint.",
+      "max_upload_bytes": null
+    },
+    {
+      "id": "birefnet-massive",
+      "display_name": "BiRefNet Massive",
+      "upstream_id": "birefnet-massive",
+      "purpose": "Broad high-capacity foreground extraction.",
+      "execution_class": "local",
+      "artifact": {
+        "url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/BiRefNet-massive-TR_DIS5K_TR_TEs-epoch_420.onnx",
+        "runtime_filename": "birefnet-massive.onnx",
+        "size_bytes": 972666916,
+        "sha256": "a94814cac438a31f95287811882628644a04b22d313ef3071d2ba904b5f627b8",
+        "upstream_checksum": "md5:33e726a2136a3d59eb0fdf613e31e3e9"
+      },
+      "required_inputs": [],
+      "edge_modes": ["standard", "decontaminate", "alpha_matting"],
+      "supports_render": true,
+      "license_note": "Review the BiRefNet model's upstream terms before redistribution or commercial use.",
+      "privacy_note": "Runs locally after the verified model download.",
+      "warning": "Large model download and memory footprint.",
+      "max_upload_bytes": null
+    },
+    {
+      "id": "bria-rmbg",
+      "display_name": "BRIA RMBG 2.0",
+      "upstream_id": "bria-rmbg",
+      "purpose": "High-quality general background removal.",
+      "execution_class": "local",
+      "artifact": {
+        "url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/bria-rmbg-2.0.onnx",
+        "runtime_filename": "bria-rmbg.onnx",
+        "size_bytes": 1024331469,
+        "sha256": "5b486f08200f513f460da46dd701db5fbb47d79b4be4b708a19444bcd4e79958",
+        "upstream_checksum": "sha256:5b486f08200f513f460da46dd701db5fbb47d79b4be4b708a19444bcd4e79958"
+      },
+      "required_inputs": [],
+      "edge_modes": ["standard", "decontaminate", "alpha_matting"],
+      "supports_render": true,
+      "license_note": "BRIA RMBG 2.0 has model-specific license terms; commercial use requires checking and satisfying BRIA's current license.",
+      "privacy_note": "Runs locally after the verified model download.",
+      "warning": "Approximately 1.024 GB download; review the BRIA license and commercial-use terms before use.",
+      "max_upload_bytes": null
+    },
+    {
+      "id": "withoutbg",
+      "display_name": "withoutBG Cloud",
+      "upstream_id": "withoutbg",
+      "purpose": "Consent-gated cloud background removal.",
+      "execution_class": "cloud_withoutbg",
+      "artifact": null,
+      "required_inputs": ["session_token", "per_job_consent"],
+      "edge_modes": ["standard"],
+      "supports_render": true,
+      "license_note": "Use is subject to the withoutBG provider's current service terms.",
+      "privacy_note": "Frames leave this device only after per-job consent. The session token is held in memory, never persisted, and never logged.",
+      "warning": "Cloud processing uploads frames; each encoded upload is limited to 20 MiB.",
+      "max_upload_bytes": 20971520
+    }
+  ]
+}
