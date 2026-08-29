@@ -74,6 +74,7 @@ WORKSPACE_WARNING_BYTES: Final = 20 * 1024**3
 ABANDONED_SCRATCH_AGE_NS: Final = 24 * 60 * 60 * 1_000_000_000
 COPY_CHUNK_BYTES: Final = 1024 * 1024
 MAX_MOUNTINFO_BYTES: Final = 4 * 1024 * 1024
+MAX_DEFERRED_BOUND_DIRECTORY_CLOSES = 128
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _CACHE_KEY_RE = re.compile(r"[0-9a-f]{64}\Z")
@@ -829,97 +830,119 @@ def promote_cut_set(
     lock = _promotion_lock(str(target))
     with lock:
         _recover_promotion(workspace.cuts_root, workspace.cache_key)
-        with _BoundDirectory.open(workspace.cuts_root) as cuts_bound:
-            previous_hash: str | None = None
-            try:
-                target_info = cuts_bound.lstat(target.name)
-            except FileNotFoundError:
-                target_exists = False
-            else:
-                if stat.S_ISLNK(target_info.st_mode) or not stat.S_ISDIR(
-                    target_info.st_mode
-                ):
-                    raise _unsafe_error(
-                        f"workspace entry {target.name!r} is redirected"
-                    )
-                target_exists = True
-            if target_exists:
-                previous, _identity = _read_manifest(target)
-                previous_hash = hashlib.sha256(previous.to_json_bytes()).hexdigest()
-            journal: dict[str, object] = {
-                "backup_name": backup.name,
-                "cache_key": workspace.cache_key,
-                "candidate_manifest_sha256": hashlib.sha256(
-                    candidate.to_json_bytes()
-                ).hexdigest(),
-                "phase": "prepared",
-                "previous_manifest_sha256": previous_hash,
-                "stage_name": workspace.path.name,
-                "used_exchange": False,
-                "version": 1,
-            }
-            try:
-                _write_journal(marker, journal)
-            except AppError as error:
-                _cleanup_staged_cut(workspace.path, error)
-                raise
-            except (OSError, UnsafeCacheError, BoundDirectoryCloseError) as error:
-                failure = _structured_filesystem_failure(
-                    "promotion", "cannot create cut promotion journal", error
-                )
-                _cleanup_staged_cut(workspace.path, failure)
-                raise failure from error
-            old_location: Path | None = None
-            try:
+        cuts_bound: _BoundDirectory | None = None
+        try:
+            with _BoundDirectory.open(workspace.cuts_root) as opened_cuts_bound:
+                cuts_bound = opened_cuts_bound
+                previous_hash: str | None = None
+                try:
+                    target_info = cuts_bound.lstat(target.name)
+                except FileNotFoundError:
+                    target_exists = False
+                else:
+                    if stat.S_ISLNK(target_info.st_mode) or not stat.S_ISDIR(
+                        target_info.st_mode
+                    ):
+                        raise _unsafe_error(
+                            f"workspace entry {target.name!r} is redirected"
+                        )
+                    target_exists = True
                 if target_exists:
-                    exchanged = _atomic_directory_exchange(workspace.path, target)
-                    if exchanged:
-                        old_location = workspace.path
-                        journal["phase"] = "new-active"
-                        journal["used_exchange"] = True
-                        _write_journal(marker, journal)
+                    with cuts_bound.open_child(target.name) as previous_bound:
+                        previous, _identity = _read_bound_manifest(previous_bound)
+                    previous_hash = hashlib.sha256(previous.to_json_bytes()).hexdigest()
+                journal: dict[str, object] = {
+                    "backup_name": backup.name,
+                    "cache_key": workspace.cache_key,
+                    "candidate_manifest_sha256": hashlib.sha256(
+                        candidate.to_json_bytes()
+                    ).hexdigest(),
+                    "phase": "prepared",
+                    "previous_manifest_sha256": previous_hash,
+                    "stage_name": workspace.path.name,
+                    "used_exchange": False,
+                    "version": 1,
+                }
+                try:
+                    _write_journal(marker, journal, bound=cuts_bound)
+                except AppError as error:
+                    _cleanup_staged_cut(workspace.path, error, parent=cuts_bound)
+                    raise
+                except (
+                    OSError,
+                    UnsafeCacheError,
+                    BoundDirectoryCloseError,
+                ) as error:
+                    failure = _structured_filesystem_failure(
+                        "promotion", "cannot create cut promotion journal", error
+                    )
+                    _cleanup_staged_cut(
+                        workspace.path,
+                        failure,
+                        parent=cuts_bound,
+                    )
+                    raise failure from error
+                old_location: Path | None = None
+                try:
+                    if target_exists:
+                        exchanged = (
+                            False
+                            if cuts_bound.descriptor is None
+                            else _atomic_directory_exchange(workspace.path, target)
+                        )
+                        if exchanged:
+                            old_location = workspace.path
+                            journal["phase"] = "new-active"
+                            journal["used_exchange"] = True
+                            _write_journal(marker, journal, bound=cuts_bound)
+                        else:
+                            cuts_bound.replace_directory(target.name, backup.name)
+                            old_location = backup
+                            journal["phase"] = "old-moved"
+                            _write_journal(marker, journal, bound=cuts_bound)
+                            cuts_bound.replace_directory(
+                                workspace.path.name, target.name
+                            )
+                            journal["phase"] = "new-active"
+                            _write_journal(marker, journal, bound=cuts_bound)
                     else:
-                        cuts_bound.replace_directory(target.name, backup.name)
-                        old_location = backup
-                        journal["phase"] = "old-moved"
-                        _write_journal(marker, journal)
                         cuts_bound.replace_directory(workspace.path.name, target.name)
                         journal["phase"] = "new-active"
-                        _write_journal(marker, journal)
-                else:
-                    cuts_bound.replace_directory(workspace.path.name, target.name)
-                    journal["phase"] = "new-active"
-                    _write_journal(marker, journal)
-                # Do not call ``open`` while this operation owns the journal: open()
-                # performs crash recovery for observers and would correctly consume
-                # the still-live marker before this transaction has finished.
-                promoted = CutWorkspace(
-                    workspace.output_directory,
-                    workspace.workspace_root,
-                    workspace.cuts_root,
-                    workspace.scratch_root,
-                    workspace.cache_key,
-                    target,
-                    WorkspaceLifecycle.PROMOTED,
-                )
-                validated = validate_cut_set(promoted)
-                if validated.to_json_bytes() != candidate.to_json_bytes():
-                    raise _promotion_error(
-                        "promoted manifest changed during replacement"
+                        _write_journal(marker, journal, bound=cuts_bound)
+                    promoted = CutWorkspace(
+                        workspace.output_directory,
+                        workspace.workspace_root,
+                        workspace.cuts_root,
+                        workspace.scratch_root,
+                        workspace.cache_key,
+                        target,
+                        WorkspaceLifecycle.PROMOTED,
                     )
-                cuts_bound.fsync()
-                if old_location is not None and old_location.exists():
-                    _remove_tree(old_location)
-                _unlink_regular(marker)
-                cuts_bound.fsync()
-                return promoted
-            except AppError:
-                raise
-            except OSError as error:
-                raise _promotion_error(
-                    f"atomic cut promotion failed: {error}"
-                ) from error
-            finally:
+                    with cuts_bound.open_child(target.name) as promoted_bound:
+                        validated = _validate_bound_cut_set(
+                            promoted_bound, workspace.cache_key
+                        )
+                    if validated.to_json_bytes() != candidate.to_json_bytes():
+                        raise _promotion_error(
+                            "promoted manifest changed during replacement"
+                        )
+                    cuts_bound.fsync()
+                    if old_location is not None:
+                        try:
+                            _remove_bound_tree(cuts_bound, old_location.name)
+                        except FileNotFoundError:
+                            pass
+                    _unlink_bound_regular(cuts_bound, marker.name)
+                    cuts_bound.fsync()
+                    return promoted
+                except AppError:
+                    raise
+                except OSError as error:
+                    raise _promotion_error(
+                        f"atomic cut promotion failed: {error}"
+                    ) from error
+        finally:
+            if cuts_bound is None or not cuts_bound.owns_resources():
                 try:
                     _recover_promotion(workspace.cuts_root, workspace.cache_key)
                 except AppError:
@@ -948,6 +971,19 @@ def validate_cut_set(workspace: CutWorkspace) -> CutManifest:
             raise
         except OSError as error:
             raise _set_error(f"cannot validate cut workspace: {error}") from error
+
+
+def _validate_bound_cut_set(bound: _BoundDirectory, cache_key: str) -> CutManifest:
+    manifest, manifest_identity = _read_bound_manifest(bound)
+    if manifest.cache_key != cache_key:
+        raise _set_error("manifest cache key does not match workspace")
+    _scan_bound_cut_set(
+        bound,
+        manifest,
+        manifest_identity,
+        compare_recorded=True,
+    )
+    return manifest
 
 
 @_filesystem_boundary("set", "cannot detect external cut edits")
@@ -1268,31 +1304,51 @@ def _scan_cut_set(
     *,
     compare_recorded: bool,
 ) -> tuple[tuple[CutFrame, ...], tuple[tuple[int, int, int, int, int], ...]]:
-    expected_names = {MANIFEST_FILENAME, *(frame.filename for frame in manifest.frames)}
     try:
         with _BoundDirectory.open(path) as bound:
-            actual_names: set[str] = set()
-            for name, info in bound.iter_entries():
-                if len(actual_names) > MAX_FRAME_COUNT + 1:
-                    raise _set_error("cut directory entry count exceeds the bound")
-                actual_names.add(name)
-                if stat.S_ISLNK(info.st_mode):
-                    raise _unsafe_error(f"cut entry {name!r} is a symbolic link")
-                if not stat.S_ISREG(info.st_mode):
-                    raise _set_error(f"cut entry {name!r} is not a regular file")
-            if actual_names != expected_names:
-                missing = sorted(expected_names - actual_names)
-                unexpected = sorted(actual_names - expected_names)
-                detail = "cut frame names/count are not sequential"
-                if missing:
-                    detail += f"; missing {missing[0]!r}"
-                if unexpected:
-                    detail += f"; unexpected {unexpected[0]!r}"
-                raise _set_error(detail)
-            current_manifest = bound.lstat(MANIFEST_FILENAME)
-            if _stat_identity(current_manifest) != manifest_identity:
-                raise _set_error("manifest changed during cut validation")
-            bound.assert_still_named()
+            return _scan_bound_cut_set(
+                bound,
+                manifest,
+                manifest_identity,
+                compare_recorded=compare_recorded,
+            )
+    except AppError:
+        raise
+    except OSError as error:
+        raise _set_error(f"cannot inspect cut directory: {error}") from error
+
+
+def _scan_bound_cut_set(
+    bound: _BoundDirectory,
+    manifest: CutManifest,
+    manifest_identity: tuple[int, int, int, int, int],
+    *,
+    compare_recorded: bool,
+) -> tuple[tuple[CutFrame, ...], tuple[tuple[int, int, int, int, int], ...]]:
+    expected_names = {MANIFEST_FILENAME, *(frame.filename for frame in manifest.frames)}
+    try:
+        actual_names: set[str] = set()
+        for name, info in bound.iter_entries():
+            if len(actual_names) > MAX_FRAME_COUNT + 1:
+                raise _set_error("cut directory entry count exceeds the bound")
+            actual_names.add(name)
+            if stat.S_ISLNK(info.st_mode):
+                raise _unsafe_error(f"cut entry {name!r} is a symbolic link")
+            if not stat.S_ISREG(info.st_mode):
+                raise _set_error(f"cut entry {name!r} is not a regular file")
+        if actual_names != expected_names:
+            missing = sorted(expected_names - actual_names)
+            unexpected = sorted(actual_names - expected_names)
+            detail = "cut frame names/count are not sequential"
+            if missing:
+                detail += f"; missing {missing[0]!r}"
+            if unexpected:
+                detail += f"; unexpected {unexpected[0]!r}"
+            raise _set_error(detail)
+        current_manifest = bound.lstat(MANIFEST_FILENAME)
+        if _stat_identity(current_manifest) != manifest_identity:
+            raise _set_error("manifest changed during cut validation")
+        bound.assert_still_named()
     except AppError:
         raise
     except OSError as error:
@@ -1300,8 +1356,8 @@ def _scan_cut_set(
     frames: list[CutFrame] = []
     identities: list[tuple[int, int, int, int, int]] = []
     for expected in manifest.frames:
-        frame, identity = _inspect_frame(
-            path,
+        frame, identity = _inspect_bound_frame(
+            bound,
             expected,
             compare_recorded=compare_recorded,
             load_pixels=True,
@@ -1311,11 +1367,10 @@ def _scan_cut_set(
         frames.append(frame)
         identities.append(identity)
     try:
-        with _BoundDirectory.open(path) as bound:
-            after_manifest = bound.lstat(MANIFEST_FILENAME)
-            if _stat_identity(after_manifest) != manifest_identity:
-                raise _set_error("manifest changed during frame validation")
-            bound.assert_still_named()
+        after_manifest = bound.lstat(MANIFEST_FILENAME)
+        if _stat_identity(after_manifest) != manifest_identity:
+            raise _set_error("manifest changed during frame validation")
+        bound.assert_still_named()
     except AppError:
         raise
     except OSError as error:
@@ -1332,38 +1387,58 @@ def _inspect_frame(
 ) -> tuple[CutFrame, tuple[int, int, int, int, int]]:
     try:
         with _BoundDirectory.open(directory) as bound:
-            descriptor = bound.open_read(expected.filename)
-            with _fdopen_owned(descriptor, "rb") as source:
-                before = os.fstat(source.fileno())
-                if not stat.S_ISREG(before.st_mode):
-                    raise _unsafe_error(f"frame {expected.filename} is not regular")
-                if not 1 <= before.st_size <= MAX_FRAME_FILE_BYTES:
+            return _inspect_bound_frame(
+                bound,
+                expected,
+                compare_recorded=compare_recorded,
+                load_pixels=load_pixels,
+            )
+    except AppError:
+        raise
+    except (OSError, UnidentifiedImageError, SyntaxError, ValueError) as error:
+        raise _set_error(
+            f"frame {expected.filename} is not a readable PNG: {error}"
+        ) from error
+
+
+def _inspect_bound_frame(
+    bound: _BoundDirectory,
+    expected: CutFrame,
+    *,
+    compare_recorded: bool,
+    load_pixels: bool,
+) -> tuple[CutFrame, tuple[int, int, int, int, int]]:
+    try:
+        descriptor = bound.open_read(expected.filename)
+        with _fdopen_owned(descriptor, "rb") as source:
+            before = os.fstat(source.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise _unsafe_error(f"frame {expected.filename} is not regular")
+            if not 1 <= before.st_size <= MAX_FRAME_FILE_BYTES:
+                raise _set_error(f"frame {expected.filename} has an invalid byte size")
+            header = source.read(33)
+            width, height = _parse_png_header(header, expected.filename)
+            _validate_dimensions(width, height)
+            source.seek(0)
+            with Image.open(source) as image:
+                if (
+                    image.format != "PNG"
+                    or image.mode != "RGBA"
+                    or image.size != (width, height)
+                    or getattr(image, "n_frames", 1) != 1
+                ):
                     raise _set_error(
-                        f"frame {expected.filename} has an invalid byte size"
+                        f"frame {expected.filename} must be one exact RGBA PNG"
                     )
-                header = source.read(33)
-                width, height = _parse_png_header(header, expected.filename)
-                _validate_dimensions(width, height)
-                source.seek(0)
-                with Image.open(source) as image:
-                    if (
-                        image.format != "PNG"
-                        or image.mode != "RGBA"
-                        or image.size != (width, height)
-                        or getattr(image, "n_frames", 1) != 1
-                    ):
-                        raise _set_error(
-                            f"frame {expected.filename} must be one exact RGBA PNG"
-                        )
-                    if load_pixels:
-                        image.load()
-                    else:
-                        image.verify()
-                source.seek(0)
-                digest = _hash_file(source)
-                after = os.fstat(source.fileno())
-            named = bound.lstat(expected.filename)
-            bound.assert_still_named()
+                if load_pixels:
+                    image.load()
+                else:
+                    image.verify()
+            source.seek(0)
+            digest = _hash_file(source)
+            after = os.fstat(source.fileno())
+        named = bound.lstat(expected.filename)
+        bound.assert_still_named()
     except AppError:
         raise
     except (OSError, UnidentifiedImageError, SyntaxError, ValueError) as error:
@@ -1666,6 +1741,13 @@ class _BoundDirectory:
     def __enter__(self) -> Self:
         return self
 
+    def owns_resources(self) -> bool:
+        return bool(
+            self.descriptor is not None
+            or self._windows_handles
+            or self._windows_cleanup_handles
+        )
+
     def __exit__(
         self,
         exc_type: type[BaseException] | None,
@@ -1675,6 +1757,10 @@ class _BoundDirectory:
         try:
             self.close()
         except BaseException as error:
+            if self._windows_handles or self._windows_cleanup_handles:
+                _retain_deferred_bound_directory_close(
+                    self, exc_value if exc_value is not None else error
+                )
             if exc_value is not None:
                 exc_value.add_note(f"additional bound-directory close failure: {error}")
                 return
@@ -1715,6 +1801,7 @@ class _BoundDirectory:
         if failures:
             detail = "; ".join(str(error) for error in failures)
             raise _unsafe_error(f"cannot close bound workspace resources: {detail}")
+        _forget_deferred_bound_directory_close(self)
 
     def assert_still_named(self) -> None:
         if self._windows_handles:
@@ -2156,17 +2243,28 @@ def _linux_mountinfo_is_local(encoded: bytes, major_minor: str) -> bool:
 def _read_manifest(path: Path) -> tuple[CutManifest, tuple[int, int, int, int, int]]:
     try:
         with _BoundDirectory.open(path) as bound:
-            descriptor = bound.open_read(MANIFEST_FILENAME)
-            with _fdopen_owned(descriptor, "rb") as source:
-                before = os.fstat(source.fileno())
-                if not stat.S_ISREG(before.st_mode):
-                    raise _unsafe_error("manifest is not a regular file")
-                if not 1 <= before.st_size <= MAX_MANIFEST_BYTES:
-                    raise _manifest_error("manifest exceeds the bounded byte limit")
-                encoded = source.read(MAX_MANIFEST_BYTES + 1)
-                after = os.fstat(source.fileno())
-            named = bound.lstat(MANIFEST_FILENAME)
-            bound.assert_still_named()
+            return _read_bound_manifest(bound)
+    except AppError:
+        raise
+    except OSError as error:
+        raise _manifest_error(f"cannot read manifest: {error}") from error
+
+
+def _read_bound_manifest(
+    bound: _BoundDirectory,
+) -> tuple[CutManifest, tuple[int, int, int, int, int]]:
+    try:
+        descriptor = bound.open_read(MANIFEST_FILENAME)
+        with _fdopen_owned(descriptor, "rb") as source:
+            before = os.fstat(source.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise _unsafe_error("manifest is not a regular file")
+            if not 1 <= before.st_size <= MAX_MANIFEST_BYTES:
+                raise _manifest_error("manifest exceeds the bounded byte limit")
+            encoded = source.read(MAX_MANIFEST_BYTES + 1)
+            after = os.fstat(source.fileno())
+        named = bound.lstat(MANIFEST_FILENAME)
+        bound.assert_still_named()
     except AppError:
         raise
     except OSError as error:
@@ -2223,27 +2321,42 @@ def _write_manifest_atomic(
         raise _manifest_error(f"cannot atomically write manifest: {error}") from error
 
 
-def _write_journal(path: Path, payload: Mapping[str, object]) -> None:
+def _write_journal(
+    path: Path,
+    payload: Mapping[str, object],
+    *,
+    bound: _BoundDirectory | None = None,
+) -> None:
     encoded = _canonical_json(dict(payload)) + b"\n"
     if len(encoded) > 16 * 1024:
         raise _promotion_error("promotion journal exceeds its byte bound")
-    temporary = f".{path.name}-{uuid.uuid4().hex}.tmp"
-    with _BoundDirectory.open(path.parent) as bound:
+    if bound is not None:
+        if not _same_lexical_path(bound.path, path.parent):
+            raise _unsafe_error("promotion journal bound to the wrong directory")
+        _write_bound_journal(bound, path.name, encoded)
+        return
+    with _BoundDirectory.open(path.parent) as opened_bound:
+        _write_bound_journal(opened_bound, path.name, encoded)
+
+
+def _write_bound_journal(bound: _BoundDirectory, name: str, encoded: bytes) -> None:
+    _validate_component(name)
+    temporary = f".{name}-{uuid.uuid4().hex}.tmp"
+    try:
+        output = bound.open_new(temporary)
         try:
-            output = bound.open_new(temporary)
-            try:
-                output.write(encoded)
-                output.flush()
-                os.fsync(output.fileno())
-            finally:
-                output.close()
-            bound.replace(temporary, path.name)
-            bound.fsync()
+            output.write(encoded)
+            output.flush()
+            os.fsync(output.fileno())
         finally:
-            try:
-                bound.unlink(temporary)
-            except FileNotFoundError:
-                pass
+            output.close()
+        bound.replace(temporary, name)
+        bound.fsync()
+    finally:
+        try:
+            bound.unlink(temporary)
+        except FileNotFoundError:
+            pass
 
 
 def _recover_all_promotions(cuts_root: Path) -> None:
@@ -2466,16 +2579,21 @@ def _remove_tree(path: Path) -> None:
     if path.parent == path or not path.name:
         raise OSError("refusing to remove an unbounded path")
     with _BoundDirectory.open(path.parent) as parent:
-        info = parent.lstat(path.name)
-        if stat.S_ISLNK(info.st_mode):
-            parent.unlink(path.name)
-            return
-        if not stat.S_ISDIR(info.st_mode):
-            raise OSError("tree target is not a directory")
-        with parent.open_child(path.name) as child:
-            _remove_bound_contents(child, [0])
-        parent.rmdir(path.name)
-        parent.fsync()
+        _remove_bound_tree(parent, path.name)
+
+
+def _remove_bound_tree(parent: _BoundDirectory, name: str) -> None:
+    _validate_component(name)
+    info = parent.lstat(name)
+    if stat.S_ISLNK(info.st_mode):
+        parent.unlink(name)
+        return
+    if not stat.S_ISDIR(info.st_mode):
+        raise OSError("tree target is not a directory")
+    with parent.open_child(name) as child:
+        _remove_bound_contents(child, [0])
+    parent.rmdir(name)
+    parent.fsync()
 
 
 def _remove_bound_contents(bound: _BoundDirectory, removed: list[int]) -> None:
@@ -2537,9 +2655,21 @@ def _cleanup_snapshot(path: Path, primary: AppError) -> None:
         primary.add_note(f"additional scratch cleanup failure: {cleanup_error}")
 
 
-def _cleanup_staged_cut(path: Path, primary: AppError) -> None:
+def _cleanup_staged_cut(
+    path: Path,
+    primary: AppError,
+    *,
+    parent: _BoundDirectory | None = None,
+) -> None:
     try:
-        if path.exists():
+        if parent is not None:
+            if not _same_lexical_path(parent.path, path.parent):
+                raise _unsafe_error("staged-cut cleanup bound to the wrong directory")
+            try:
+                _remove_bound_tree(parent, path.name)
+            except FileNotFoundError:
+                pass
+        elif path.exists():
             _remove_tree(path)
     except (
         AppError,
@@ -2895,10 +3025,15 @@ def _entry_exists_no_follow(path: Path) -> bool:
 
 def _unlink_regular(path: Path) -> None:
     with _BoundDirectory.open(path.parent) as bound:
-        info = bound.lstat(path.name)
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-            raise OSError("refusing to unlink a non-regular workspace entry")
-        bound.unlink(path.name)
+        _unlink_bound_regular(bound, path.name)
+
+
+def _unlink_bound_regular(bound: _BoundDirectory, name: str) -> None:
+    _validate_component(name)
+    info = bound.lstat(name)
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise OSError("refusing to unlink a non-regular workspace entry")
+    bound.unlink(name)
 
 
 def _fsync_fd(descriptor: int) -> None:
@@ -2922,11 +3057,96 @@ def _same_lexical_path(left: Path, right: Path) -> bool:
 
 _promotion_locks_guard = Lock()
 _promotion_locks: dict[str, RLock] = {}
+_deferred_bound_directory_closes_guard = RLock()
+_deferred_bound_directory_closes: list[_BoundDirectory] = []
+_ATTACHED_BOUND_DIRECTORY_CLOSES = "_rembggui_bound_directory_close_owners"
 
 
 def _promotion_lock(key: str) -> RLock:
     with _promotion_locks_guard:
         return _promotion_locks.setdefault(key, RLock())
+
+
+def _retain_deferred_bound_directory_close(
+    owner: _BoundDirectory, primary: BaseException
+) -> None:
+    with _deferred_bound_directory_closes_guard:
+        if owner in _deferred_bound_directory_closes:
+            return
+        if len(_deferred_bound_directory_closes) < max(
+            0, MAX_DEFERRED_BOUND_DIRECTORY_CLOSES
+        ):
+            _deferred_bound_directory_closes.append(owner)
+            return
+        attached = list(getattr(primary, _ATTACHED_BOUND_DIRECTORY_CLOSES, ()))
+        if owner not in attached:
+            attached.append(owner)
+            setattr(primary, _ATTACHED_BOUND_DIRECTORY_CLOSES, tuple(attached))
+        primary.add_note(
+            "deferred-close registry capacity was exhausted; "
+            "the retry owner remains attached to this primary error"
+        )
+
+
+def _forget_deferred_bound_directory_close(owner: _BoundDirectory) -> None:
+    with _deferred_bound_directory_closes_guard:
+        try:
+            _deferred_bound_directory_closes.remove(owner)
+        except ValueError:
+            pass
+
+
+def _pending_deferred_bound_directory_closes() -> int:
+    with _deferred_bound_directory_closes_guard:
+        return len(_deferred_bound_directory_closes)
+
+
+def _drain_deferred_bound_directory_closes() -> int:
+    closed = 0
+    failures: list[AppError] = []
+    with _deferred_bound_directory_closes_guard:
+        for owner in tuple(_deferred_bound_directory_closes):
+            try:
+                owner.close()
+            except AppError as error:
+                failures.append(error)
+            else:
+                closed += 1
+    if failures:
+        failure = _unsafe_error(
+            f"{len(failures)} deferred bound-directory close owner(s) remain"
+        )
+        for close_failure in failures:
+            failure.add_note(f"additional deferred close failure: {close_failure}")
+        raise failure
+    return closed
+
+
+def _drain_attached_bound_directory_closes(primary: BaseException) -> int:
+    closed = 0
+    failures: list[tuple[_BoundDirectory, AppError]] = []
+    with _deferred_bound_directory_closes_guard:
+        owners = tuple(getattr(primary, _ATTACHED_BOUND_DIRECTORY_CLOSES, ()))
+        for owner in owners:
+            try:
+                owner.close()
+            except AppError as error:
+                failures.append((owner, error))
+            else:
+                closed += 1
+        setattr(
+            primary,
+            _ATTACHED_BOUND_DIRECTORY_CLOSES,
+            tuple(owner for owner, _error in failures),
+        )
+    if failures:
+        failure = _unsafe_error(
+            f"{len(failures)} primary-attached close owner(s) remain"
+        )
+        for _owner, close_failure in failures:
+            failure.add_note(f"additional attached close failure: {close_failure}")
+        raise failure
+    return closed
 
 
 def _raise_if_cancelled(cancelled: CancellationCheck) -> None:

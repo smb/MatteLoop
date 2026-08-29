@@ -123,6 +123,150 @@ def _rewrite_frame(path: Path, color: tuple[int, int, int, int]) -> None:
     os.replace(temporary, path)
 
 
+class _ExclusiveWindowsCutsApi:
+    def __init__(
+        self,
+        cuts_root: Path,
+        *,
+        reject_descendant_rebinds: bool,
+        fail_journal_replace: bool = False,
+    ) -> None:
+        self.cuts_root = cuts_root
+        self.reject_descendant_rebinds = reject_descendant_rebinds
+        self.fail_journal_replace = fail_journal_replace
+        self.handle_paths: dict[int, Path] = {}
+        self.root_handles: set[int] = set()
+        self.next_handle = 200
+        self.sharing_violations: list[Path] = []
+
+    @property
+    def root_is_bound(self) -> bool:
+        return bool(self.root_handles)
+
+    def bind_root(self) -> int:
+        if self.root_is_bound:
+            self.sharing_violations.append(self.cuts_root)
+            raise OSError(32, "synthetic Windows sharing violation")
+        return self._new_handle(self.cuts_root, root=True)
+
+    def reject_path_rebind(self, path: Path) -> None:
+        if not self.root_is_bound:
+            return
+        if path == self.cuts_root or (
+            self.reject_descendant_rebinds and self.cuts_root in path.parents
+        ):
+            self.sharing_violations.append(path)
+            raise OSError(32, "synthetic Windows sharing violation")
+
+    def _new_handle(self, path: Path, *, root: bool = False) -> int:
+        handle = self.next_handle
+        self.next_handle += 1
+        self.handle_paths[handle] = path
+        if root:
+            self.root_handles.add(handle)
+        return handle
+
+    def open_child_directory(
+        self, parent: int, name: str, *, create: bool, **_kwargs: object
+    ) -> int:
+        assert create is False
+        path = self.handle_paths[parent] / name
+        if not path.is_dir():
+            raise FileNotFoundError(path)
+        return self._new_handle(path)
+
+    def file_attributes(self, handle: int) -> int:
+        from rembggui.jobs.models import cache_fs
+
+        path = self.handle_paths[handle]
+        attributes = cache_fs._FILE_ATTRIBUTE_DIRECTORY if path.is_dir() else 0
+        if path.is_symlink():
+            attributes |= cache_fs._FILE_ATTRIBUTE_REPARSE_POINT
+        return attributes
+
+    def close_handle(self, handle: int) -> None:
+        self.root_handles.discard(handle)
+        del self.handle_paths[handle]
+
+    def lstat_at(self, handle: int, name: str) -> os.stat_result:
+        return (self.handle_paths[handle] / name).lstat()
+
+    def open_read_at(self, handle: int, name: str) -> int:
+        return os.open(self.handle_paths[handle] / name, os.O_RDONLY)
+
+    def open_new_read_write_at(self, handle: int, name: str) -> int:
+        return os.open(
+            self.handle_paths[handle] / name,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+
+    def replace_at(self, handle: int, source: str, destination: str) -> None:
+        if self.fail_journal_replace and destination.startswith(".replace-"):
+            raise OSError("injected handle-relative journal failure")
+        root = self.handle_paths[handle]
+        os.replace(root / source, root / destination)
+
+    def replace_directory_at(self, handle: int, source: str, destination: str) -> None:
+        root = self.handle_paths[handle]
+        os.replace(root / source, root / destination)
+
+    def unlink_at(self, handle: int, name: str, *, require_regular: bool) -> None:
+        path = self.handle_paths[handle] / name
+        if require_regular and not path.is_file():
+            raise OSError("refusing to unlink a non-regular entry")
+        path.unlink()
+
+    def rmdir_at(self, handle: int, name: str) -> None:
+        os.rmdir(self.handle_paths[handle] / name)
+
+    def iter_entries_at(self, handle: int, *, max_entries: int) -> object:
+        entries = tuple(self.handle_paths[handle].iterdir())
+        assert len(entries) <= max_entries
+        return iter((entry.name, entry.lstat()) for entry in entries)
+
+    def flush_directory_strict(self, _handle: int) -> None:
+        pass
+
+    def assert_directory_handle(self, handle: int) -> None:
+        path = self.handle_paths[handle]
+        if path.is_symlink() or not path.is_dir():
+            raise UnsafeCacheError("bound test directory was redirected")
+
+
+def _install_exclusive_windows_cuts_api(
+    monkeypatch: pytest.MonkeyPatch,
+    cuts_root: Path,
+    *,
+    reject_descendant_rebinds: bool,
+    fail_journal_replace: bool = False,
+) -> _ExclusiveWindowsCutsApi:
+    api = _ExclusiveWindowsCutsApi(
+        cuts_root,
+        reject_descendant_rebinds=reject_descendant_rebinds,
+        fail_journal_replace=fail_journal_replace,
+    )
+    original_open = workspace_module._BoundDirectory.open
+
+    def injected_open(
+        cls: type[workspace_module._BoundDirectory], path: Path
+    ) -> workspace_module._BoundDirectory:
+        api.reject_path_rebind(path)
+        if path == cuts_root:
+            return cls(
+                path,
+                None,
+                windows_handles=(api.bind_root(),),
+                windows_api=api,
+            )
+        return original_open(path)
+
+    monkeypatch.setattr(
+        workspace_module._BoundDirectory, "open", classmethod(injected_open)
+    )
+    return api
+
+
 def test_manifest_is_deeply_immutable_strict_and_deterministic(tmp_path: Path) -> None:
     staged, manifest = _completed_staging(tmp_path)
 
@@ -625,6 +769,106 @@ def test_bound_directory_exit_preserves_primary_app_error_when_close_fails(
     assert bound._windows_handles == ()
 
 
+def test_inline_context_retains_persistent_close_for_later_drain(
+    tmp_path: Path,
+) -> None:
+    class FakeApi:
+        def __init__(self) -> None:
+            self.attempts: list[int] = []
+            self.fail = True
+
+        def close_handle(self, handle: int) -> None:
+            self.attempts.append(handle)
+            if self.fail:
+                raise OSError("persistent inline close failure")
+
+    assert workspace_module._pending_deferred_bound_directory_closes() == 0
+    api = FakeApi()
+    primary = AppError(
+        ErrorCode.JOB_CANCELLED,
+        "cut-snapshot",
+        "error.job.cancelled",
+        "inline cancellation must remain primary",
+        "dismiss",
+    )
+
+    with pytest.raises(AppError) as exc:
+        with workspace_module._BoundDirectory(
+            tmp_path, None, windows_handles=(93,), windows_api=api
+        ):
+            raise primary
+
+    assert exc.value is primary
+    primary.__traceback__ = None
+    gc.collect()
+    assert api.attempts == [93]
+    assert workspace_module._pending_deferred_bound_directory_closes() == 1
+
+    with pytest.raises(AppError) as drain_error:
+        workspace_module._drain_deferred_bound_directory_closes()
+    assert drain_error.value.code is ErrorCode.CUT_WORKSPACE_UNSAFE
+    assert api.attempts == [93, 93]
+    assert workspace_module._pending_deferred_bound_directory_closes() == 1
+
+    api.fail = False
+    assert workspace_module._drain_deferred_bound_directory_closes() == 1
+    assert api.attempts == [93, 93, 93]
+    assert workspace_module._pending_deferred_bound_directory_closes() == 0
+
+
+def test_deferred_close_registry_is_bounded_and_overflow_stays_with_primary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class FakeApi:
+        def __init__(self) -> None:
+            self.attempts: list[int] = []
+            self.fail = True
+
+        def close_handle(self, handle: int) -> None:
+            self.attempts.append(handle)
+            if self.fail:
+                raise OSError(f"persistent close failure for {handle}")
+
+    assert workspace_module._pending_deferred_bound_directory_closes() == 0
+    monkeypatch.setattr(workspace_module, "MAX_DEFERRED_BOUND_DIRECTORY_CLOSES", 1)
+    first_api = FakeApi()
+    second_api = FakeApi()
+    primaries = [
+        AppError(
+            ErrorCode.JOB_CANCELLED,
+            "cut-snapshot",
+            "error.job.cancelled",
+            f"bounded cancellation {index}",
+            "dismiss",
+        )
+        for index in range(2)
+    ]
+
+    for handle, api, primary in zip((94, 95), (first_api, second_api), primaries):
+        with pytest.raises(AppError) as exc:
+            with workspace_module._BoundDirectory(
+                tmp_path, None, windows_handles=(handle,), windows_api=api
+            ):
+                raise primary
+        assert exc.value is primary
+        primary.__traceback__ = None
+
+    gc.collect()
+    assert workspace_module._pending_deferred_bound_directory_closes() == 1
+    assert any(
+        "deferred-close registry capacity" in note
+        for note in getattr(primaries[1], "__notes__", ())
+    )
+
+    first_api.fail = False
+    second_api.fail = False
+    assert workspace_module._drain_deferred_bound_directory_closes() == 1
+    assert workspace_module._drain_attached_bound_directory_closes(primaries[1]) == 1
+    assert first_api.attempts == [94, 94]
+    assert second_api.attempts == [95, 95]
+    assert workspace_module._pending_deferred_bound_directory_closes() == 0
+
+
 def test_windows_open_child_preserves_redirect_error_and_retains_failed_close(
     tmp_path: Path,
 ) -> None:
@@ -976,6 +1220,47 @@ def test_invalid_replacement_preserves_previous_valid_cache(tmp_path: Path) -> N
     assert validate_cut_set(old).to_json_bytes() == before
 
 
+def test_windows_promotion_reuses_exclusive_cuts_binding(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    old = _promoted(tmp_path, job_id="old")
+    replacement, manifest = _completed_staging(tmp_path, job_id="new", image_offset=10)
+    api = _install_exclusive_windows_cuts_api(
+        monkeypatch,
+        old.cuts_root,
+        reject_descendant_rebinds=True,
+    )
+
+    promoted = promote_cut_set(replacement, manifest)
+
+    assert promoted.read_promoted_cut(0).tobytes() == _image(10).tobytes()
+    assert not replacement.path.exists()
+    assert api.sharing_violations == []
+
+
+def test_windows_journal_failure_cleans_stage_through_exclusive_cuts_binding(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    old = _promoted(tmp_path, job_id="old")
+    before = validate_cut_set(old).to_json_bytes()
+    replacement, manifest = _completed_staging(tmp_path, job_id="new", image_offset=10)
+    api = _install_exclusive_windows_cuts_api(
+        monkeypatch,
+        old.cuts_root,
+        reject_descendant_rebinds=False,
+        fail_journal_replace=True,
+    )
+
+    with pytest.raises(AppError) as exc:
+        promote_cut_set(replacement, manifest)
+
+    assert exc.value.code is ErrorCode.CUT_PROMOTION_FAILED
+    assert "journal" in exc.value.technical_detail
+    assert not replacement.path.exists()
+    assert validate_cut_set(old).to_json_bytes() == before
+    assert api.sharing_violations == []
+
+
 def test_failed_atomic_exchange_rolls_back_to_previous_cache(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1093,22 +1378,22 @@ def test_recovery_finishes_cleanup_after_promoted_exchange_crash(
     old_bytes = old.read_promoted_cut(0).tobytes()
     replacement, manifest = _completed_staging(tmp_path, job_id="new", image_offset=10)
     replacement_bytes = _image(10).tobytes()
-    original_cleanup = workspace_module._remove_tree
+    original_cleanup = workspace_module._remove_bound_tree
     crashed = False
 
-    def crash_once(path: Path) -> None:
+    def crash_once(parent: workspace_module._BoundDirectory, name: str) -> None:
         nonlocal crashed
-        if not crashed and path.name.startswith(".stage-"):
+        if not crashed and name.startswith(".stage-"):
             crashed = True
             raise OSError("injected post-exchange crash")
-        original_cleanup(path)
+        original_cleanup(parent, name)
 
-    monkeypatch.setattr(workspace_module, "_remove_tree", crash_once)
+    monkeypatch.setattr(workspace_module, "_remove_bound_tree", crash_once)
     with pytest.raises(AppError) as exc:
         promote_cut_set(replacement, manifest)
     assert exc.value.code is ErrorCode.CUT_PROMOTION_FAILED
 
-    monkeypatch.setattr(workspace_module, "_remove_tree", original_cleanup)
+    monkeypatch.setattr(workspace_module, "_remove_bound_tree", original_cleanup)
     inventory = list_workspaces(tmp_path)
     assert len(inventory) == 1
     recovered = inventory[0].workspace
@@ -1735,13 +2020,15 @@ def test_native_initial_journal_failure_cleans_stage_and_keeps_primary_error(
     old = _promoted(tmp_path)
     before = validate_cut_set(old).to_json_bytes()
     stage, manifest = _completed_staging(tmp_path, job_id="replacement", image_offset=8)
-    original_remove = workspace_module._remove_tree
+    original_remove = workspace_module._remove_bound_tree
 
     def fail_journal(*_args: object, **_kwargs: object) -> None:
         raise native_error
 
-    def remove_then_report_failure(path: Path) -> None:
-        original_remove(path)
+    def remove_then_report_failure(
+        parent: workspace_module._BoundDirectory, name: str
+    ) -> None:
+        original_remove(parent, name)
         raise AppError(
             ErrorCode.CUT_WORKSPACE_UNSAFE,
             "cut-workspace",
@@ -1751,7 +2038,9 @@ def test_native_initial_journal_failure_cleans_stage_and_keeps_primary_error(
         )
 
     monkeypatch.setattr(workspace_module, "_write_journal", fail_journal)
-    monkeypatch.setattr(workspace_module, "_remove_tree", remove_then_report_failure)
+    monkeypatch.setattr(
+        workspace_module, "_remove_bound_tree", remove_then_report_failure
+    )
 
     with pytest.raises(AppError) as exc:
         promote_cut_set(stage, manifest)

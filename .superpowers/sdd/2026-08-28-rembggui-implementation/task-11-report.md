@@ -162,6 +162,35 @@ Final review-fix focused GREEN, including the model-cache native handle suite:
 117 passed in 2.07s
 ```
 
+### Review fix round 5 RED/GREEN
+
+The fifth review found two Windows lifecycle gaps. The focused RED modeled
+Windows' bidirectional share checks and proved that promotion reopened the
+write-bound `cuts` directory for journal and cleanup work, so an ordinary
+promotion could fail with a sharing violation and a journal failure could leave
+its stage behind. It also dropped the last strong reference to an inline
+bound-directory context after a persistent `CloseHandle` failure, proving that
+the failed handle had no external retry owner.
+
+```text
+.venv/bin/pytest -q tests/jobs/test_workspace.py -k \
+  'inline_context_retains_persistent or deferred_close_registry_is_bounded or windows_promotion_reuses_exclusive or windows_journal_failure_cleans_stage'
+4 failed, 84 deselected in 0.44s
+```
+
+The GREEN tests force the exclusive Windows binding for a normal replacement
+and for initial-journal failure, verify zero competing path rebinds, complete
+stage removal, and byte-identical retention of the old valid cut. Persistent
+close failure remains externally reachable across traceback removal and garbage
+collection; explicit drains report a structured failure while the handle still
+cannot close, and release it after the injected transient condition clears. A
+capacity test proves the registry bound and its explicit overflow ownership.
+
+```text
+.venv/bin/pytest -q tests/jobs/test_workspace.py tests/jobs/models/test_cache_fs.py
+121 passed in 1.37s
+```
+
 ## Architecture and safety decisions
 
 - `CutManifest`, `CutFrame`, `CutUnionMetadata`, workspace summaries, listings,
@@ -203,7 +232,13 @@ Final review-fix focused GREEN, including the model-cache native handle suite:
   immediate close fails transfers to a cleanup-only list on its parent, so
   parent-relative operations remain anchored to the parent while a later close
   can retry the child. A close failure during context unwinding is added to the
-  active error as a diagnostic note instead of replacing it.
+  active error as a diagnostic note instead of replacing it. Inline contexts
+  with unclosed Windows handles enter a lock-protected external retry registry
+  capped at 128 owners. Explicit drain retries every registered owner and reports
+  one structured failure while any remain; at capacity, the new owner is
+  attached to the raised/active exception with a diagnostic note so the global
+  registry cannot grow without bound and the caller can explicitly drain that
+  exception-owned overflow. There is no background retry worker.
   Descriptor-to-file-object transfers close the descriptor exactly once if
   `os.fdopen` fails.
 - Local-filesystem admission is descriptor-bound: macOS uses native `fstatfs`
@@ -221,11 +256,15 @@ Final review-fix focused GREEN, including the model-cache native handle suite:
   `renameat2(RENAME_EXCHANGE)` on Linux), eliminating an absent-target window.
   Other platforms use an fsynced bounded journal plus old-directory backup; every
   observer recovers the candidate or restores the prior validated cache before
-  listing/opening it. Validation, journal, rename, and cleanup failures preserve
-  the previous valid cache. Initial journal failures from `AppError`, native
-  cache safety/close errors, or `OSError` all run local stage cleanup before
-  structured propagation; a cleanup failure is attached without replacing the
-  journal failure.
+  listing/opening it. While promotion owns the write-bound `cuts` directory,
+  journal updates, child validation, rename, stage cleanup, backup cleanup, and
+  marker removal all reuse that same handle-relative parent; recovery may reopen
+  the directory only after the binding has closed. If that close retains native
+  resources for retry, recovery is deferred instead of competing with the live
+  handle. Validation, journal, rename, and cleanup failures preserve the previous
+  valid cache. Initial journal failures from `AppError`, native cache safety/close
+  errors, or `OSError` all run local stage cleanup before structured propagation;
+  a cleanup failure is attached without replacing the journal failure.
 - External edit detection rescans the entire namespace and every frame's
   readability, dimensions, metadata, and hash. Valid content or metadata changes
   atomically update frame records, set `edited`, invalidate union metadata, and
@@ -276,8 +315,8 @@ not replace its code, including `JOB_CANCELLED`.
 
 ## Verification
 
-- Focused Task 11 plus native handle suite: `117 passed in 2.07s`.
-- Permitted full suite: `806 passed in 46.24s`.
+- Focused Task 11 plus native handle suite: `121 passed in 1.37s`.
+- Permitted full suite: `810 passed in 45.82s`.
 - `.venv/bin/ruff check .` — passed.
 - `.venv/bin/mypy src` — passed for 28 source files.
 - Ruff format check over Task 11 Python files — passed.
