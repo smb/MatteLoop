@@ -1,6 +1,23 @@
 """Pure, spawn-safe domain contracts for rembgGUI."""
 
 from rembggui.core.errors import AppError, ErrorCode, ValidationError
+from rembggui.core.geometry import (
+    CropGeometryState,
+    InteractionGeometry,
+    MediaTransform,
+    PixelBounds,
+    PointF,
+    RectF,
+    SizeF,
+    TimelineGeometryState,
+    alpha_bounds,
+    apply_framing,
+    apply_source_crop,
+    build_crop_geometry,
+    build_timeline_geometry,
+    solve_proportional_scale,
+    union_alpha_bounds,
+)
 from rembggui.core.specs import (
     CollisionPolicy,
     CropSpec,
@@ -15,13 +32,28 @@ from rembggui.core.specs import (
 __all__ = [
     "AppError",
     "CollisionPolicy",
+    "CropGeometryState",
     "CropSpec",
     "EdgeMode",
     "ErrorCode",
     "FramingSpec",
+    "InteractionGeometry",
+    "MediaTransform",
     "OutputSpec",
+    "PixelBounds",
+    "PointF",
+    "RectF",
     "RenderRequest",
     "SamplingSpec",
     "SegmentationSpec",
+    "SizeF",
+    "TimelineGeometryState",
     "ValidationError",
+    "alpha_bounds",
+    "apply_framing",
+    "apply_source_crop",
+    "build_crop_geometry",
+    "build_timeline_geometry",
+    "solve_proportional_scale",
+    "union_alpha_bounds",
 ]
