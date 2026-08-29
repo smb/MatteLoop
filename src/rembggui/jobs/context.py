@@ -7,7 +7,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from threading import Lock, RLock
+from threading import Lock
 from types import TracebackType
 
 from rembggui.core.errors import AppError, ErrorCode
@@ -36,7 +36,7 @@ class CancellationState:
     """Thread-safe cooperative cancellation state with one-way transitions."""
 
     def __init__(self) -> None:
-        self._lock = RLock()
+        self._lock = Lock()
         self._requested = False
         self._acknowledged = False
 
@@ -75,7 +75,8 @@ class JobContext:
         workspace: Path,
         progress_sink: Callable[[ProgressEvent], None],
         cancellation: CancellationState,
-        terminal_sink: Callable[[JobContext], None],
+        *,
+        _terminal_sink: Callable[[JobContext], None] | None = None,
     ) -> None:
         if not isinstance(job_id, str) or not job_id:
             raise ValueError("job_id must be a non-empty string")
@@ -88,7 +89,7 @@ class JobContext:
         self.workspace = workspace
         self.progress_sink = progress_sink
         self.cancellation = cancellation
-        self._terminal_sink = terminal_sink
+        self._terminal_sink = _terminal_sink
         self._lock = Lock()
         self._terminal_state = JobTerminalState.RUNNING
 
@@ -126,7 +127,7 @@ class JobContext:
                 JobTerminalState.CANCEL_PENDING,
             }:
                 raise RuntimeError("terminal jobs cannot report progress")
-            self.progress_sink(event)
+        self.progress_sink(event)
         return event
 
     def request_cancel(self) -> bool:
@@ -151,7 +152,8 @@ class JobContext:
             if not self.cancellation._acknowledge():
                 return False
             self._terminal_state = JobTerminalState.CANCELLED
-        self._terminal_sink(self)
+        if self._terminal_sink is not None:
+            self._terminal_sink(self)
         return True
 
     def complete(self) -> bool:
@@ -165,7 +167,8 @@ class JobContext:
             if self._terminal_state is not JobTerminalState.RUNNING:
                 return False
             self._terminal_state = state
-        self._terminal_sink(self)
+        if self._terminal_sink is not None:
+            self._terminal_sink(self)
         return True
 
 
@@ -232,7 +235,7 @@ class ExclusiveJobScheduler:
                 cancellation=(
                     cancellation if cancellation is not None else CancellationState()
                 ),
-                terminal_sink=self._release,
+                _terminal_sink=self._release,
             )
             self._active = context
         return _JobLease(context)

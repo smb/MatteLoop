@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Event, Thread
 
 import pytest
 
@@ -9,6 +10,7 @@ from rembggui.core.state import JobKind
 from rembggui.jobs.context import (
     CancellationState,
     ExclusiveJobScheduler,
+    JobContext,
     JobTerminalState,
     ProgressEvent,
 )
@@ -97,3 +99,46 @@ def test_exception_marks_non_cancelled_context_failed(tmp_path: Path) -> None:
             raise RuntimeError("boom")
     assert context.terminal_state is JobTerminalState.FAILED
     assert scheduler.active is None
+
+
+def test_job_context_supports_the_public_five_argument_constructor(
+    tmp_path: Path,
+) -> None:
+    context = JobContext(
+        "direct",
+        JobKind.PREVIEW,
+        tmp_path,
+        lambda _event: None,
+        CancellationState(),
+    )
+    assert context.job_id == "direct"
+    assert context.complete()
+    assert context.terminal_state is JobTerminalState.SUCCEEDED
+
+
+def test_progress_sink_is_reentrant_and_runs_outside_context_lock(
+    tmp_path: Path,
+) -> None:
+    callback_finished = Event()
+    holder: list[JobContext] = []
+
+    def sink(_event: ProgressEvent) -> None:
+        context = holder[0]
+        assert context.terminal_state is JobTerminalState.RUNNING
+        assert context.request_cancel()
+        callback_finished.set()
+
+    context = JobContext(
+        "direct",
+        JobKind.RENDER,
+        tmp_path,
+        sink,
+        CancellationState(),
+    )
+    holder.append(context)
+    thread = Thread(target=lambda: context.progress("segment", 0))
+    thread.start()
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    assert callback_finished.is_set()
+    assert context.terminal_state is JobTerminalState.CANCEL_PENDING
