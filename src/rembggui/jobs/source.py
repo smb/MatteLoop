@@ -21,6 +21,7 @@ from av.video.reformatter import ColorRange, Colorspace, VideoReformatter
 from PIL import Image
 
 from rembggui.core.errors import AppError, ErrorCode
+from rembggui.core.rgba import RgbaOwnershipTracker
 from rembggui.core.specs import is_local_path_syntax
 
 MAX_SOURCE_WIDTH = 3840
@@ -248,6 +249,7 @@ def decode_frame(
     is_cancelled: CancelCheck | None = None,
     expected_revision: SourceRevision | None = None,
     validation_proof: SourceValidationProof | None = None,
+    rgba_ownership_tracker: RgbaOwnershipTracker | None = None,
 ) -> DecodedFrame:
     """Decode the frame whose half-open presentation interval owns ``timestamp``.
 
@@ -322,20 +324,41 @@ def decode_frame(
                 validation_proof,
             )
             actual_pts = _frame_timestamp(candidate) - presentation_origin
-            image = _normalized_image(
-                candidate,
-                stream,
-                metadata_frame,
-                expected_rotation=(
-                    validation_proof.rotation if validation_proof is not None else None
-                ),
-                expected_pixel_aspect=(
-                    validation_proof.pixel_aspect
-                    if validation_proof is not None
-                    else None
-                ),
+            expected_rotation = (
+                validation_proof.rotation if validation_proof is not None else None
             )
-            return DecodedFrame(image, timestamp, actual_pts, request_id, revision)
+            expected_pixel_aspect = (
+                validation_proof.pixel_aspect if validation_proof is not None else None
+            )
+            if rgba_ownership_tracker is None:
+                image = _normalized_image(
+                    candidate,
+                    stream,
+                    metadata_frame,
+                    expected_rotation=expected_rotation,
+                    expected_pixel_aspect=expected_pixel_aspect,
+                )
+            else:
+                image = _normalized_image(
+                    candidate,
+                    stream,
+                    metadata_frame,
+                    expected_rotation=expected_rotation,
+                    expected_pixel_aspect=expected_pixel_aspect,
+                    rgba_ownership_tracker=rgba_ownership_tracker,
+                )
+                rgba_ownership_tracker.register(
+                    image,
+                    known_full_resolution_rgba=True,
+                )
+            decoded = DecodedFrame(
+                image,
+                timestamp,
+                actual_pts,
+                request_id,
+                revision,
+            )
+            return decoded
     except AppError:
         raise
     except (OSError, ValueError, av.FFmpegError) as error:
@@ -1361,7 +1384,10 @@ def _normalized_image(
     *,
     expected_rotation: int | None = None,
     expected_pixel_aspect: Fraction | None = None,
+    rgba_ownership_tracker: RgbaOwnershipTracker | None = None,
 ) -> Image.Image:
+    pillow_intermediate: Image.Image | None = None
+    image: Image.Image | None = None
     try:
         profile = _color_profile(stream, frame)
         _validate_frame_color(stream, frame)
@@ -1385,9 +1411,38 @@ def _normalized_image(
                 ),
                 dst_color_range=ColorRange.JPEG,
             )
-        image = converted.to_image().convert("RGBA")
+        converted_owner = None
+        if rgba_ownership_tracker is not None:
+            converted_owner = rgba_ownership_tracker.track_nonweak(converted)
+            converted = converted_owner.value
+        pillow_intermediate = converted.to_image()
+        if rgba_ownership_tracker is not None:
+            rgba_ownership_tracker.register(
+                pillow_intermediate,
+                known_full_resolution_rgba=True,
+            )
+        image = pillow_intermediate.convert("RGBA")
+        if rgba_ownership_tracker is not None:
+            rgba_ownership_tracker.register(
+                image,
+                known_full_resolution_rgba=True,
+            )
+        pillow_intermediate.close()
+        pillow_intermediate = None
+        converted = None
+        converted_owner = None
+        if rgba_ownership_tracker is not None:
+            _ = rgba_ownership_tracker.current
         if profile.transfer in {1, 6}:
-            image = _convert_bt709_transfer_to_srgb(image)
+            transfer_image = _convert_bt709_transfer_to_srgb(image)
+            if rgba_ownership_tracker is not None:
+                rgba_ownership_tracker.register(
+                    transfer_image,
+                    known_full_resolution_rgba=True,
+                )
+            image.close()
+            image = transfer_image
+            del transfer_image
         rotation, pixel_aspect = _orientation(
             stream,
             frame,
@@ -1399,17 +1454,40 @@ def _normalized_image(
             display_width = max(
                 1, _round_fraction(Fraction(image.width) * pixel_aspect)
             )
-            image = image.resize(
+            resized = image.resize(
                 (display_width, image.height), Image.Resampling.LANCZOS
             )
+            if rgba_ownership_tracker is not None:
+                rgba_ownership_tracker.register(
+                    resized,
+                    known_full_resolution_rgba=True,
+                )
+            image.close()
+            image = resized
+            del resized
         transpose = {
             90: Image.Transpose.ROTATE_90,
             180: Image.Transpose.ROTATE_180,
             270: Image.Transpose.ROTATE_270,
         }.get(rotation)
         if transpose is not None:
-            image = image.transpose(transpose)
-        return cast(Image.Image, image)
+            transposed = image.transpose(transpose)
+            if rgba_ownership_tracker is not None:
+                rgba_ownership_tracker.register(
+                    transposed,
+                    known_full_resolution_rgba=True,
+                )
+            image.close()
+            image = transposed
+            del transposed
+        if rgba_ownership_tracker is not None:
+            rgba_ownership_tracker.register(
+                image,
+                known_full_resolution_rgba=True,
+            )
+        result = image
+        image = None
+        return result
     except (
         OSError,
         TypeError,
@@ -1424,6 +1502,11 @@ def _normalized_image(
             f"frame could not be normalized to sRGB RGBA: {error}",
             "convert-source-to-8bit-srgb",
         ) from error
+    finally:
+        if pillow_intermediate is not None:
+            pillow_intermediate.close()
+        if image is not None:
+            image.close()
 
 
 def _convert_bt709_transfer_to_srgb(image: Image.Image) -> Image.Image:

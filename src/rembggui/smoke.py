@@ -215,6 +215,7 @@ def _decode_smoke_video(path: Path, tracker: RgbaOwnershipTracker) -> bool:
         1,
         expected_revision=source_info.revision,
         validation_proof=source_info.validation_proof,
+        rgba_ownership_tracker=tracker,
     )
     tracker.register(decoded.image)
     try:

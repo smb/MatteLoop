@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import json
 import os
 import struct
@@ -11,7 +12,9 @@ import av
 import pytest
 from PIL import Image
 
+import rembggui.jobs.source as source_module
 from rembggui.core.errors import AppError, ErrorCode
+from rembggui.core.rgba import RgbaOwnershipHandle, RgbaOwnershipTracker
 from rembggui.jobs.source import (
     MAX_TIMELINE_DECODED_FRAMES,
     DecodedFrame,
@@ -170,6 +173,67 @@ def test_vfr_decode_selects_frame_owning_half_open_interval(
     pixel = decoded.image.getpixel((0, 0))
     assert pixel[3] == 255
     assert max(range(3), key=pixel.__getitem__) == dominant_channel
+
+
+def test_decode_tracker_keeps_only_returned_image_live(tmp_path) -> None:
+    path = make_video(tmp_path / "tracked.mp4", _solid_frames(), Fraction(2))
+    tracker = RgbaOwnershipTracker((16, 8))
+
+    decoded = decode_frame(
+        path,
+        Fraction(0),
+        request_id=9,
+        rgba_ownership_tracker=tracker,
+    )
+    gc.collect()
+
+    assert tracker.peak == 3
+    assert tracker.current == 1
+    decoded.image.close()
+    gc.collect()
+    assert tracker.current == 1
+    del decoded
+    gc.collect()
+    assert tracker.current == 0
+
+
+def test_decode_tracker_observes_externally_retained_real_reformatted_frame(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = make_video(tmp_path / "retained-rgba.mp4", _solid_frames(), Fraction(2))
+    tracker = RgbaOwnershipTracker((16, 8))
+    retained: list[av.VideoFrame] = []
+    real_reformatter_type = source_module.VideoReformatter
+
+    class RetainingReformatter:
+        def __init__(self) -> None:
+            self._real = real_reformatter_type()
+
+        def reformat(self, *args: object, **kwargs: object) -> av.VideoFrame:
+            reformatted = self._real.reformat(*args, **kwargs)
+            retained.append(reformatted)
+            return reformatted
+
+    monkeypatch.setattr(source_module, "VideoReformatter", RetainingReformatter)
+
+    decoded = decode_frame(
+        path,
+        Fraction(0),
+        request_id=10,
+        rgba_ownership_tracker=tracker,
+    )
+    gc.collect()
+
+    assert retained[0].format.name == "rgba"
+    assert tracker.peak == 3
+    assert tracker.current == 2
+    decoded.image.close()
+    del decoded
+    gc.collect()
+    assert tracker.current == 1
+    retained.clear()
+    gc.collect()
+    assert tracker.current == 0
 
 
 def test_decode_rejects_negative_public_timestamps(tmp_path):
@@ -843,6 +907,56 @@ def test_bt709_transfer_is_converted_to_srgb_with_deterministic_lut():
         140,
         255,
     )
+
+
+def test_tracker_covers_rgb_transfer_sar_and_rotation_owner_lifetimes() -> None:
+    frame = av.VideoFrame.from_image(Image.new("RGB", (4, 2), (128, 128, 128)))
+    stream = _color_stream(matrix=0, transfer=1)
+    stream.sample_aspect_ratio = Fraction(2)
+    stream.codec_context.sample_aspect_ratio = Fraction(2)
+    stream.metadata = {"rotate": "-90"}
+
+    class RetainingTracker(RgbaOwnershipTracker):
+        def __init__(self) -> None:
+            super().__init__((4, 2))
+            self.retained: list[object] = []
+
+        def register[OwnerT](
+            self,
+            owner: OwnerT,
+            *,
+            known_full_resolution_rgba: bool = False,
+        ) -> OwnerT:
+            self.retained.append(owner)
+            return super().register(
+                owner,
+                known_full_resolution_rgba=known_full_resolution_rgba,
+            )
+
+        def track_nonweak[OwnerT](self, owner: OwnerT) -> RgbaOwnershipHandle[OwnerT]:
+            self.retained.append(owner)
+            return super().track_nonweak(owner)
+
+    tracker = RetainingTracker()
+    image = _normalized_image(
+        frame,
+        stream,
+        frame,
+        rgba_ownership_tracker=tracker,
+    )
+
+    assert image.size == (2, 8)
+    assert tracker.peak == 6
+    assert tracker.current == 6
+    tracker.retained.clear()
+    gc.collect()
+    assert tracker.current == 1
+    image.close()
+    gc.collect()
+    assert tracker.current == 1
+    del image
+    gc.collect()
+    assert tracker.current == 0
 
 
 @pytest.mark.parametrize("primaries", [8, 12, 22])
