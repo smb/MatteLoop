@@ -113,12 +113,41 @@ Final review-fix focused GREEN:
 100 passed in 1.72s
 ```
 
+### Review fix round 3 RED/GREEN
+
+The third review identified two remaining trust-boundary gaps. The focused RED
+proved that `CutManifest` accepted a mutable `FrozenJsonMap` subclass, that the
+map's public constructor retained caller-owned nested lists and dictionaries,
+and that native Windows safety, enumeration, rename, removal, and close failures
+escaped public Task 11 APIs as `UnsafeCacheError`, `BoundDirectoryCloseError`,
+or raw `OSError`. All eleven initial tests failed at those exact boundaries. A
+twelfth RED then proved that a native scratch-cleanup failure could replace an
+already-raised `JOB_CANCELLED` error.
+
+```text
+.venv/bin/pytest -q tests/jobs/test_workspace.py -k \
+  'frozen_json_subclasses or constructor_recursively or maps_native or maps_bound_directory'
+11 failed, 67 deselected
+```
+
+Final review-fix focused GREEN, including the model-cache native handle suite:
+
+```text
+.venv/bin/pytest -q tests/jobs/models/test_cache_fs.py tests/jobs/test_workspace.py
+112 passed in 1.42s
+```
+
 ## Architecture and safety decisions
 
 - `CutManifest`, `CutFrame`, `CutUnionMetadata`, workspace summaries, listings,
   and cleanup results are frozen. Cache-key JSON is recursively frozen through
   a frozen, slotted `FrozenJsonMap` whose only stored collection is an immutable
-  tuple; nested mutation and ordinary slot reassignment/deletion are impossible.
+  tuple. Its public constructor recursively canonicalizes and detaches every
+  nested object, and manifests accept only the exact map type, never subclasses.
+  Manifest-owned strings, frame records, union metadata, arrays, integers, and
+  booleans are likewise exact immutable values. Nested mutation, mutable subclass
+  injection, and ordinary slot reassignment/deletion cannot make serialized
+  inputs diverge from the authoritative cache key.
 - Manifest JSON is UTF-8, canonical, sorted, compact, newline-terminated,
   deterministic, versioned, duplicate-key rejecting, non-finite rejecting,
   exact-key strict, and atomically fsync/replace persisted. Parsing is capped at
@@ -204,12 +233,17 @@ Final review-fix focused GREEN:
 Task 11 adds stable codes for invalid manifests/sets, staging, promotion,
 snapshot I/O, unsafe workspace namespaces, pinned deletion, and deletion
 failure. The pre-existing `CUTS_CHANGED_DURING_SNAPSHOT` and `JOB_CANCELLED`
-codes remain the snapshot race and cancellation contracts.
+codes remain the snapshot race and cancellation contracts. Every public
+filesystem boundary maps shared native cache safety/close failures and raw OS
+errors into these `AppError` contracts, including exceptions raised after a
+Windows iterator has begun. Existing `AppError` codes pass through unchanged;
+in particular, a cleanup failure is attached as diagnostic context and cannot
+replace an active cancellation.
 
 ## Verification
 
-- Focused Task 11 plus native handle suite: `100 passed in 1.72s`.
-- Permitted full suite: `789 passed in 48.62s`.
+- Focused Task 11 plus native handle suite: `112 passed in 1.42s`.
+- Permitted full suite: `801 passed in 45.33s`.
 - `.venv/bin/ruff check .` — passed.
 - `.venv/bin/mypy src` — passed for 28 source files.
 - Ruff format check over Task 11 Python files — passed.

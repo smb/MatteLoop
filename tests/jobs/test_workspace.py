@@ -26,6 +26,7 @@ from rembggui.core.specs import (
     SegmentationSpec,
 )
 from rembggui.jobs import workspace as workspace_module
+from rembggui.jobs.models.cache_fs import BoundDirectoryCloseError, UnsafeCacheError
 from rembggui.jobs.workspace import (
     MANIFEST_FILENAME,
     MAX_MANIFEST_BYTES,
@@ -169,6 +170,73 @@ def test_manifest_frozen_json_rejects_slot_reassignment_and_deletion(
         del frozen._items  # type: ignore[misc]
 
     assert CutManifest.cache_key_for(frozen) == original_key
+
+
+def test_manifest_rejects_frozen_json_subclasses_with_mutable_state(
+    tmp_path: Path,
+) -> None:
+    _staged, manifest = _completed_staging(tmp_path)
+
+    class MutableFrozenJsonMap(workspace_module.FrozenJsonMap):
+        __slots__ = ("mutable_state",)
+
+        def __init__(self, original: workspace_module.FrozenJsonMap) -> None:
+            super().__init__(tuple(original.items()))
+            object.__setattr__(self, "mutable_state", {"mode": "standard"})
+
+    supplied = MutableFrozenJsonMap(manifest.cache_key_inputs)
+
+    with pytest.raises(AppError) as exc:
+        CutManifest(
+            cache_key=manifest.cache_key,
+            cache_key_inputs=supplied,
+            source_path=manifest.source_path,
+            source_size_bytes=manifest.source_size_bytes,
+            source_mtime_ns=manifest.source_mtime_ns,
+            width=manifest.width,
+            height=manifest.height,
+            frames=manifest.frames,
+            union_metadata=manifest.union_metadata,
+            edited=manifest.edited,
+            pinned=manifest.pinned,
+            created_at_ns=manifest.created_at_ns,
+            last_used_at_ns=manifest.last_used_at_ns,
+        )
+
+    assert exc.value.code is ErrorCode.CUT_MANIFEST_INVALID
+    supplied.mutable_state["mode"] = "mutated-after-validation"
+    assert manifest.cache_key_inputs is not supplied
+
+
+def test_frozen_json_constructor_recursively_detaches_mutable_nested_state() -> None:
+    nested_list: list[object] = [{"value": "initial"}]
+    frozen = workspace_module.FrozenJsonMap((("nested", nested_list),))
+    before = repr(frozen)
+
+    nested_list[0] = {"value": "changed"}
+    nested_list.append({"value": "extra"})
+
+    assert repr(frozen) == before
+    assert frozen["nested"] == (
+        workspace_module.FrozenJsonMap((("value", "initial"),)),
+    )
+    with pytest.raises(TypeError):
+        frozen["nested"][0]["value"] = "mutated"  # type: ignore[index,union-attr]
+
+    inputs = _cache_inputs()
+    mutable_model = inputs["model"]
+    assert isinstance(mutable_model, dict)
+    frozen_inputs = workspace_module.FrozenJsonMap(tuple(inputs.items()))
+    before_key = CutManifest.cache_key_for(frozen_inputs)
+    before_json = json.dumps(workspace_module._thaw_json(frozen_inputs), sort_keys=True)
+
+    mutable_model["id"] = "changed-after-freeze"
+
+    assert CutManifest.cache_key_for(frozen_inputs) == before_key
+    assert (
+        json.dumps(workspace_module._thaw_json(frozen_inputs), sort_keys=True)
+        == before_json
+    )
 
 
 def test_manifest_rejects_non_authoritative_cache_key_inputs() -> None:
@@ -512,6 +580,237 @@ def test_windows_close_attempts_every_handle_and_retains_failed_ownership(
     bound.close()
     assert api.attempts == [3, 2, 1, 3, 1]
     assert bound._windows_handles == ()
+
+
+def test_create_staging_maps_native_reparse_mkdir_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _output, _root, cuts, _scratch = workspace_module._workspace_layout(
+        tmp_path, create=True
+    )
+    original_open = workspace_module._BoundDirectory.open
+
+    class FakeApi:
+        def lstat_at(self, _handle: int, _name: str) -> os.stat_result:
+            raise FileNotFoundError
+
+        def mkdir_at(self, _handle: int, _name: str, *, exist_ok: bool) -> None:
+            assert exist_ok is False
+            raise UnsafeCacheError("native mkdir target became a reparse point")
+
+        def close_handle(self, _handle: int) -> None:
+            pass
+
+    api = FakeApi()
+
+    def injected_open(
+        cls: type[workspace_module._BoundDirectory], path: Path
+    ) -> workspace_module._BoundDirectory:
+        if path == cuts:
+            return cls(path, None, windows_handles=(71,), windows_api=api)
+        return original_open(path)
+
+    monkeypatch.setattr(
+        workspace_module._BoundDirectory, "open", classmethod(injected_open)
+    )
+
+    with pytest.raises(AppError) as exc:
+        CutWorkspace.create_staging(tmp_path, "a" * 64, "native-failure")
+
+    assert exc.value.code is ErrorCode.CUT_WORKSPACE_UNSAFE
+
+
+@pytest.mark.parametrize(
+    ("native_error", "expected_code"),
+    [
+        (
+            UnsafeCacheError("native enumeration was redirected"),
+            ErrorCode.CUT_WORKSPACE_UNSAFE,
+        ),
+        (OSError("native enumeration failed"), ErrorCode.CUT_WORKSPACE_UNSAFE),
+    ],
+)
+def test_listing_maps_native_iterator_failures_raised_during_iteration(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    native_error: BaseException,
+    expected_code: ErrorCode,
+) -> None:
+    _output, _root, cuts, _scratch = workspace_module._workspace_layout(
+        tmp_path, create=True
+    )
+    original_open = workspace_module._BoundDirectory.open
+
+    class FakeApi:
+        def iter_entries_at(self, _handle: int, *, max_entries: int) -> object:
+            assert max_entries > 0
+            if False:  # pragma: no cover - makes this an iterator boundary
+                yield "unreachable"
+            raise native_error
+
+        def close_handle(self, _handle: int) -> None:
+            pass
+
+    api = FakeApi()
+
+    def injected_open(
+        cls: type[workspace_module._BoundDirectory], path: Path
+    ) -> workspace_module._BoundDirectory:
+        if path == cuts:
+            return cls(path, None, windows_handles=(72,), windows_api=api)
+        return original_open(path)
+
+    monkeypatch.setattr(
+        workspace_module._BoundDirectory, "open", classmethod(injected_open)
+    )
+
+    with pytest.raises(AppError) as exc:
+        list_workspaces(tmp_path)
+
+    assert exc.value.code is expected_code
+
+
+@pytest.mark.parametrize(
+    ("native_error", "expected_code"),
+    [
+        (
+            UnsafeCacheError("scratch enumeration was redirected"),
+            ErrorCode.CUT_WORKSPACE_UNSAFE,
+        ),
+        (OSError("scratch enumeration failed"), ErrorCode.CUT_SNAPSHOT_FAILED),
+    ],
+)
+def test_abandoned_cleanup_maps_native_iterator_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    native_error: BaseException,
+    expected_code: ErrorCode,
+) -> None:
+    _output, _root, _cuts, scratch = workspace_module._workspace_layout(
+        tmp_path, create=True
+    )
+    original_open = workspace_module._BoundDirectory.open
+
+    class FakeApi:
+        def iter_entries_at(self, _handle: int, *, max_entries: int) -> object:
+            assert max_entries > 0
+            if False:  # pragma: no cover - makes this an iterator boundary
+                yield "unreachable"
+            raise native_error
+
+        def close_handle(self, _handle: int) -> None:
+            pass
+
+    api = FakeApi()
+
+    def injected_open(
+        cls: type[workspace_module._BoundDirectory], path: Path
+    ) -> workspace_module._BoundDirectory:
+        if path == scratch:
+            return cls(path, None, windows_handles=(73,), windows_api=api)
+        return original_open(path)
+
+    monkeypatch.setattr(
+        workspace_module._BoundDirectory, "open", classmethod(injected_open)
+    )
+
+    with pytest.raises(AppError) as exc:
+        cleanup_abandoned_scratch(tmp_path, now_ns=time.time_ns())
+
+    assert exc.value.code is expected_code
+
+
+def test_immediate_cleanup_maps_native_lstat_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _output, _root, _cuts, scratch = workspace_module._workspace_layout(
+        tmp_path, create=True
+    )
+    original_open = workspace_module._BoundDirectory.open
+
+    class FakeApi:
+        def lstat_at(self, _handle: int, _name: str) -> os.stat_result:
+            raise UnsafeCacheError("scratch lookup crossed a reparse point")
+
+        def close_handle(self, _handle: int) -> None:
+            pass
+
+    api = FakeApi()
+
+    def injected_open(
+        cls: type[workspace_module._BoundDirectory], path: Path
+    ) -> workspace_module._BoundDirectory:
+        if path == scratch:
+            return cls(path, None, windows_handles=(74,), windows_api=api)
+        return original_open(path)
+
+    monkeypatch.setattr(
+        workspace_module._BoundDirectory, "open", classmethod(injected_open)
+    )
+
+    with pytest.raises(AppError) as exc:
+        cleanup_scratch(tmp_path, "job-native")
+
+    assert exc.value.code is ErrorCode.CUT_WORKSPACE_UNSAFE
+
+
+def test_promotion_maps_native_rename_safety_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staged, manifest = _completed_staging(tmp_path)
+
+    def fail_native_rename(
+        _bound: workspace_module._BoundDirectory,
+        _source: str,
+        _destination: str,
+    ) -> None:
+        raise UnsafeCacheError("native rename target was redirected")
+
+    monkeypatch.setattr(
+        workspace_module._BoundDirectory, "replace_directory", fail_native_rename
+    )
+
+    with pytest.raises(AppError) as exc:
+        promote_cut_set(staged, manifest)
+
+    assert exc.value.code is ErrorCode.CUT_WORKSPACE_UNSAFE
+
+
+def test_delete_maps_native_remove_safety_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    promoted = _promoted(tmp_path)
+
+    def fail_native_remove(_path: Path) -> None:
+        raise UnsafeCacheError("native remove target was redirected")
+
+    monkeypatch.setattr(workspace_module, "_remove_tree", fail_native_remove)
+
+    with pytest.raises(AppError) as exc:
+        delete_workspace(promoted)
+
+    assert exc.value.code is ErrorCode.CUT_WORKSPACE_UNSAFE
+
+
+def test_listing_maps_bound_directory_close_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _output, _root, cuts, _scratch = workspace_module._workspace_layout(
+        tmp_path, create=True
+    )
+    original_close = workspace_module._BoundDirectory.close
+
+    def fail_cuts_close(bound: workspace_module._BoundDirectory) -> None:
+        if bound.path == cuts:
+            raise BoundDirectoryCloseError(OSError("native close failed"), None)
+        original_close(bound)
+
+    monkeypatch.setattr(workspace_module._BoundDirectory, "close", fail_cuts_close)
+
+    with pytest.raises(AppError) as exc:
+        list_workspaces(tmp_path)
+
+    assert exc.value.code is ErrorCode.CUT_WORKSPACE_UNSAFE
 
 
 def test_stage_cut_writes_only_sequential_rgba_pngs(tmp_path: Path) -> None:
@@ -965,6 +1264,35 @@ def test_snapshot_cancellation_removes_scratch_and_preserves_durable_cuts(
     assert exc.value.code is ErrorCode.JOB_CANCELLED
     assert not scratch.exists()
     assert validate_cut_set(cuts).frame_count == 3
+
+
+def test_snapshot_cleanup_safety_failure_does_not_replace_cancellation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cuts = _promoted(tmp_path)
+    scratch = cuts.scratch_root / "cancelled-cleanup-failure"
+    checks = 0
+
+    def cancel_after_scratch_creation() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks >= 3
+
+    def fail_native_cleanup(_path: Path) -> None:
+        raise UnsafeCacheError("scratch cleanup target was redirected")
+
+    monkeypatch.setattr(workspace_module, "_remove_tree", fail_native_cleanup)
+
+    with pytest.raises(AppError) as exc:
+        snapshot_for_rebuild(
+            cuts,
+            scratch,
+            cancelled=cancel_after_scratch_creation,
+            prefer_reflink=False,
+        )
+
+    assert exc.value.code is ErrorCode.JOB_CANCELLED
+    assert any("cleanup" in note for note in getattr(exc.value, "__notes__", ()))
 
 
 def test_read_promoted_cut_returns_independent_tracked_rgba_images(

@@ -30,10 +30,21 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
+from functools import wraps
 from pathlib import Path, PurePath, PureWindowsPath
 from threading import Lock, RLock
 from types import TracebackType
-from typing import Any, BinaryIO, Final, Self, cast, overload
+from typing import (
+    Any,
+    BinaryIO,
+    Final,
+    Literal,
+    ParamSpec,
+    Self,
+    TypeVar,
+    cast,
+    overload,
+)
 
 from PIL import Image, UnidentifiedImageError
 
@@ -43,6 +54,7 @@ from rembggui.core.fingerprints import (
     FINGERPRINT_SCHEMA_VERSION,
 )
 from rembggui.core.rgba import RgbaOwnershipTracker
+from rembggui.jobs.models.cache_fs import BoundDirectoryCloseError, UnsafeCacheError
 
 MANIFEST_FILENAME: Final = "manifest.json"
 MANIFEST_SCHEMA: Final = "rembggui-cut-manifest"
@@ -76,6 +88,34 @@ type JsonScalar = str | int | bool | None
 type FrozenJsonValue = JsonScalar | tuple["FrozenJsonValue", ...] | "FrozenJsonMap"
 type JsonValue = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
 type CancellationCheck = Callable[[], bool]
+type _BoundaryKind = Literal[
+    "unsafe", "set", "stage", "promotion", "snapshot", "delete"
+]
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _filesystem_boundary(
+    kind: _BoundaryKind, operation: str
+) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]:
+    """Keep native/cache filesystem exceptions behind the public AppError API."""
+
+    def decorate(function: Callable[_P, _R]) -> Callable[_P, _R]:
+        @wraps(function)
+        def wrapped(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+            try:
+                return function(*args, **kwargs)
+            except AppError:
+                raise
+            except (UnsafeCacheError, BoundDirectoryCloseError) as error:
+                raise _unsafe_error(f"{operation}: {error}") from error
+            except OSError as error:
+                raise _boundary_error(kind, f"{operation}: {error}") from error
+
+        return wrapped
+
+    return decorate
 
 
 @dataclass(frozen=True, slots=True, init=False, eq=False)
@@ -85,7 +125,19 @@ class FrozenJsonMap(Mapping[str, FrozenJsonValue]):
     _items: tuple[tuple[str, FrozenJsonValue], ...]
 
     def __init__(self, items: Sequence[tuple[str, FrozenJsonValue]]) -> None:
-        ordered = tuple(sorted(items, key=lambda item: item[0]))
+        if len(items) > 64:
+            raise _manifest_error("frozen JSON object has too many keys")
+        canonical: list[tuple[str, FrozenJsonValue]] = []
+        for pair in items:
+            if type(pair) is not tuple or len(pair) != 2:
+                raise _manifest_error("frozen JSON object entries must be key pairs")
+            key, value = pair
+            if type(key) is not str or not key or len(key) > 64:
+                raise _manifest_error("frozen JSON object contains an invalid key")
+            canonical.append((key, _freeze_json(value, field="frozen JSON", depth=1)))
+        if len({key for key, _value in canonical}) != len(canonical):
+            raise _manifest_error("frozen JSON object contains duplicate keys")
+        ordered = tuple(sorted(canonical, key=lambda item: item[0]))
         object.__setattr__(self, "_items", ordered)
 
     def __getitem__(self, key: str) -> FrozenJsonValue:
@@ -123,6 +175,8 @@ class CutFrame:
 
     def __post_init__(self) -> None:
         _validate_frame_index(self.index)
+        if type(self.filename) is not str:
+            raise _manifest_error("frame filename must be an exact string")
         if self.filename != _frame_filename(self.index):
             canonical_name = _frame_filename(self.index)
             raise _manifest_error(
@@ -154,7 +208,7 @@ class CutUnionMetadata:
         left, top, right, bottom = self.bounds
         if left < 0 or top < 0 or right <= left or bottom <= top:
             raise _manifest_error("union bounds must be a positive half-open rectangle")
-        if not isinstance(self.alpha_threshold, str) or not self.alpha_threshold:
+        if type(self.alpha_threshold) is not str or not self.alpha_threshold:
             raise _manifest_error("union alpha threshold must be a decimal string")
         try:
             threshold = Decimal(self.alpha_threshold)
@@ -187,22 +241,21 @@ class CutManifest:
 
     def __post_init__(self) -> None:
         if (
-            self.schema != MANIFEST_SCHEMA
+            type(self.schema) is not str
+            or type(self.schema_version) is not int
+            or self.schema != MANIFEST_SCHEMA
             or self.schema_version != MANIFEST_SCHEMA_VERSION
         ):
             raise _manifest_error("unsupported cut manifest schema")
-        if not isinstance(self.cache_key_inputs, FrozenJsonMap):
-            frozen = _freeze_json(self.cache_key_inputs, field="cache_key_inputs")
-            if not isinstance(frozen, FrozenJsonMap):
-                raise _manifest_error("cache_key_inputs must be an object")
-            object.__setattr__(self, "cache_key_inputs", frozen)
+        if type(self.cache_key_inputs) is not FrozenJsonMap:
+            raise _manifest_error("cache_key_inputs must be an exact frozen object")
         _validate_cache_inputs(self.cache_key_inputs)
         expected_key = self.cache_key_for(self.cache_key_inputs)
         _validate_cache_key(self.cache_key)
         if self.cache_key != expected_key:
             raise _manifest_error("cache key does not match its authoritative inputs")
         if (
-            not isinstance(self.source_path, str)
+            type(self.source_path) is not str
             or not self.source_path
             or "\x00" in self.source_path
             or len(self.source_path) > MAX_SOURCE_PATH_CHARS
@@ -298,7 +351,7 @@ class CutManifest:
         now_ns: int | None = None,
     ) -> Self:
         frozen = _freeze_json(cache_key_inputs, field="cache_key_inputs")
-        if not isinstance(frozen, FrozenJsonMap):
+        if type(frozen) is not FrozenJsonMap:
             raise _manifest_error("cache_key_inputs must be an object")
         frame_tuple = tuple(frames)
         if not frame_tuple:
@@ -323,7 +376,7 @@ class CutManifest:
     @staticmethod
     def cache_key_for(cache_key_inputs: Mapping[str, object]) -> str:
         frozen = _freeze_json(cache_key_inputs, field="cache_key_inputs")
-        if not isinstance(frozen, FrozenJsonMap):
+        if type(frozen) is not FrozenJsonMap:
             raise _manifest_error("cache_key_inputs must be an object")
         _validate_cache_inputs(frozen)
         payload: dict[str, object] = {
@@ -409,7 +462,7 @@ class CutManifest:
             )
         raw_inputs = _object(payload["cache_key_inputs"], "cache_key_inputs")
         frozen_inputs = _freeze_json(raw_inputs, field="cache_key_inputs")
-        assert isinstance(frozen_inputs, FrozenJsonMap)
+        assert type(frozen_inputs) is FrozenJsonMap
         return cls(
             cache_key=_string(payload["cache_key"], "cache_key"),
             cache_key_inputs=frozen_inputs,
@@ -525,6 +578,7 @@ class CutWorkspace:
             raise _unsafe_error("unknown workspace lifecycle")
 
     @classmethod
+    @_filesystem_boundary("stage", "cannot create staged cut workspace")
     def create_staging(
         cls, output_directory: Path, cache_key: str, job_id: str
     ) -> Self:
@@ -554,6 +608,7 @@ class CutWorkspace:
         )
 
     @classmethod
+    @_filesystem_boundary("unsafe", "cannot open promoted cut workspace")
     def open(cls, output_directory: Path, cache_key: str) -> Self:
         _validate_cache_key(cache_key)
         output, root, cuts, scratch = _workspace_layout(output_directory, create=False)
@@ -570,6 +625,7 @@ class CutWorkspace:
             WorkspaceLifecycle.PROMOTED,
         )
 
+    @_filesystem_boundary("set", "cannot read promoted cut")
     def read_promoted_cut(
         self,
         index: int,
@@ -611,6 +667,7 @@ class CutWorkspace:
             rgba_ownership_tracker.register(result)
         return result
 
+    @_filesystem_boundary("set", "cannot update cut-workspace pin")
     def set_pinned(self, pinned: bool, *, now_ns: int | None = None) -> CutManifest:
         if type(pinned) is not bool:
             raise TypeError("pinned must be a bool")
@@ -676,6 +733,7 @@ class ScratchCleanupResult:
     has_more: bool
 
 
+@_filesystem_boundary("stage", "cannot stage cut frame")
 def stage_cut(workspace: CutWorkspace, index: int, image: Image.Image) -> CutFrame:
     """Persist one sequential RGBA PNG into a private sibling stage."""
     _require_workspace(workspace)
@@ -727,6 +785,7 @@ def stage_cut(workspace: CutWorkspace, index: int, image: Image.Image) -> CutFra
     return frame
 
 
+@_filesystem_boundary("promotion", "cannot promote cut workspace")
 def promote_cut_set(
     workspace: CutWorkspace, manifest: CutManifest | None = None
 ) -> CutWorkspace:
@@ -749,7 +808,7 @@ def promote_cut_set(
         try:
             if workspace.path.exists():
                 _remove_tree(workspace.path)
-        except OSError as cleanup_error:
+        except (OSError, UnsafeCacheError, BoundDirectoryCloseError) as cleanup_error:
             error.add_note(f"additional staged-cut cleanup failure: {cleanup_error}")
         raise
     target = workspace.cuts_root / workspace.cache_key
@@ -794,7 +853,11 @@ def promote_cut_set(
                 try:
                     if workspace.path.exists():
                         _remove_tree(workspace.path)
-                except OSError as cleanup_error:
+                except (
+                    OSError,
+                    UnsafeCacheError,
+                    BoundDirectoryCloseError,
+                ) as cleanup_error:
                     error.add_note(
                         f"additional staged-cut cleanup failure: {cleanup_error}"
                     )
@@ -806,7 +869,11 @@ def promote_cut_set(
                 try:
                     if workspace.path.exists():
                         _remove_tree(workspace.path)
-                except OSError as cleanup_error:
+                except (
+                    OSError,
+                    UnsafeCacheError,
+                    BoundDirectoryCloseError,
+                ) as cleanup_error:
                     failure.add_note(
                         f"additional staged-cut cleanup failure: {cleanup_error}"
                     )
@@ -866,10 +933,11 @@ def promote_cut_set(
                     _recover_promotion(workspace.cuts_root, workspace.cache_key)
                 except AppError:
                     pass
-                except OSError:
+                except (OSError, UnsafeCacheError, BoundDirectoryCloseError):
                     pass
 
 
+@_filesystem_boundary("set", "cannot validate cut workspace")
 def validate_cut_set(workspace: CutWorkspace) -> CutManifest:
     """Validate manifest, namespace, frame bytes, metadata, and exact hashes."""
     _require_workspace(workspace)
@@ -891,6 +959,7 @@ def validate_cut_set(workspace: CutWorkspace) -> CutManifest:
             raise _set_error(f"cannot validate cut workspace: {error}") from error
 
 
+@_filesystem_boundary("set", "cannot detect external cut edits")
 def detect_external_edits(
     workspace: CutWorkspace, *, now_ns: int | None = None
 ) -> CutManifest:
@@ -925,6 +994,7 @@ def detect_external_edits(
         return validate_cut_set(workspace)
 
 
+@_filesystem_boundary("snapshot", "cannot snapshot cut workspace")
 def snapshot_for_rebuild(
     workspace: CutWorkspace,
     scratch_directory: Path,
@@ -1026,6 +1096,7 @@ def snapshot_for_rebuild(
         raise failure from error
 
 
+@_filesystem_boundary("unsafe", "cannot list cut workspaces")
 def list_workspaces(
     output_directory: Path,
     *,
@@ -1079,6 +1150,7 @@ def list_workspaces(
     )
 
 
+@_filesystem_boundary("delete", "cannot delete cut workspace")
 def delete_workspace(workspace: CutWorkspace, *, allow_pinned: bool = False) -> None:
     """Explicitly delete exactly one durable cut directory."""
     _require_workspace(workspace)
@@ -1116,6 +1188,7 @@ def delete_workspace(workspace: CutWorkspace, *, allow_pinned: bool = False) -> 
             raise _delete_error(f"cannot delete cut workspace: {error}") from error
 
 
+@_filesystem_boundary("delete", "cannot clean scratch workspace")
 def cleanup_scratch(output_directory: Path, job_id: str) -> bool:
     """Immediately remove one exact scratch job after success or cancellation."""
     _validate_job_id(job_id)
@@ -1140,6 +1213,7 @@ def cleanup_scratch(output_directory: Path, job_id: str) -> bool:
         raise _delete_error(f"cannot clean scratch job {job_id!r}: {error}") from error
 
 
+@_filesystem_boundary("snapshot", "cannot clean abandoned scratch workspaces")
 def cleanup_abandoned_scratch(
     output_directory: Path,
     *,
@@ -2440,7 +2514,7 @@ def _cleanup_snapshot(path: Path, primary: AppError) -> None:
         return
     try:
         _remove_tree(path)
-    except OSError as cleanup_error:
+    except (OSError, UnsafeCacheError, BoundDirectoryCloseError) as cleanup_error:
         primary.add_note(f"additional scratch cleanup failure: {cleanup_error}")
 
 
@@ -2557,7 +2631,7 @@ def _freeze_json(value: object, *, field: str, depth: int = 0) -> FrozenJsonValu
             raise _manifest_error(f"{field} object has too many keys")
         items: list[tuple[str, FrozenJsonValue]] = []
         for key, item in value.items():
-            if not isinstance(key, str) or not key or len(key) > 64:
+            if type(key) is not str or not key or len(key) > 64:
                 raise _manifest_error(f"{field} contains an invalid key")
             items.append((key, _freeze_json(item, field=field, depth=depth + 1)))
         if len({key for key, _item in items}) != len(items):
@@ -2571,11 +2645,11 @@ def _freeze_json(value: object, *, field: str, depth: int = 0) -> FrozenJsonValu
 
 
 def _thaw_json(value: FrozenJsonValue) -> JsonValue:
-    if isinstance(value, FrozenJsonMap):
+    if type(value) is FrozenJsonMap:
         return {key: _thaw_json(item) for key, item in value.items()}
-    if isinstance(value, tuple):
+    if type(value) is tuple:
         return [_thaw_json(item) for item in value]
-    return value
+    return cast(JsonScalar, value)
 
 
 def _canonical_json(payload: object) -> bytes:
@@ -2624,13 +2698,13 @@ def _object(value: object, field: str) -> dict[str, object]:
 
 
 def _frozen_object(value: FrozenJsonValue, field: str) -> FrozenJsonMap:
-    if not isinstance(value, FrozenJsonMap):
+    if type(value) is not FrozenJsonMap:
         raise _manifest_error(f"{field} must be an object")
     return value
 
 
 def _string(value: object, field: str) -> str:
-    if not isinstance(value, str):
+    if type(value) is not str:
         raise _manifest_error(f"{field} must be a string")
     return value
 
@@ -2680,13 +2754,13 @@ def _frame_filename(index: int) -> str:
 
 
 def _validate_cache_key(cache_key: str) -> None:
-    if not isinstance(cache_key, str) or _CACHE_KEY_RE.fullmatch(cache_key) is None:
+    if type(cache_key) is not str or _CACHE_KEY_RE.fullmatch(cache_key) is None:
         raise _unsafe_error("cache key must be canonical lowercase SHA-256")
 
 
 def _validate_job_id(job_id: str) -> None:
     if (
-        not isinstance(job_id, str)
+        type(job_id) is not str
         or len(job_id) > MAX_JOB_ID_CHARS
         or _SAFE_JOB_RE.fullmatch(job_id) is None
     ):
@@ -2695,7 +2769,7 @@ def _validate_job_id(job_id: str) -> None:
 
 def _validate_component(name: str) -> None:
     if (
-        not isinstance(name, str)
+        type(name) is not str
         or not name
         or len(name) > 255
         or name in {".", ".."}
@@ -2717,7 +2791,7 @@ def _validate_path_value(path: Path) -> None:
 
 
 def _validate_sha256(value: str, field: str) -> str:
-    if not isinstance(value, str) or _CACHE_KEY_RE.fullmatch(value) is None:
+    if type(value) is not str or _CACHE_KEY_RE.fullmatch(value) is None:
         raise _manifest_error(f"{field} must be lowercase hexadecimal SHA-256")
     return value
 
@@ -2836,6 +2910,20 @@ def _raise_if_cancelled(cancelled: CancellationCheck) -> None:
 
 def _not_cancelled() -> bool:
     return False
+
+
+def _boundary_error(kind: _BoundaryKind, detail: str) -> AppError:
+    if kind == "unsafe":
+        return _unsafe_error(detail)
+    if kind == "set":
+        return _set_error(detail)
+    if kind == "stage":
+        return _stage_error(detail)
+    if kind == "promotion":
+        return _promotion_error(detail)
+    if kind == "snapshot":
+        return _snapshot_error(detail)
+    return _delete_error(detail)
 
 
 def _require_workspace(workspace: CutWorkspace) -> CutWorkspace:
