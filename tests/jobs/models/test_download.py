@@ -12,6 +12,7 @@ from typing import NoReturn
 import pytest
 
 from rembggui.core.errors import AppError, ErrorCode
+from rembggui.jobs.models.cache_fs import BoundModelDirectory
 from rembggui.jobs.models.catalog import ModelCatalog, ModelSpec
 from rembggui.jobs.models.download import (
     DownloadHttpError,
@@ -211,14 +212,14 @@ def test_part_cleanup_failure_is_not_silently_hidden(
 ) -> None:
     expected = b"expected"
     catalog, spec = _spec(expected)
-    real_unlink = Path.unlink
+    real_unlink = BoundModelDirectory.unlink_regular
 
-    def deny_part_unlink(path: Path, *, missing_ok: bool = False) -> None:
-        if path.name.endswith(".part"):
+    def deny_part_unlink(bound: BoundModelDirectory, filename: str) -> bool:
+        if filename.endswith(".part"):
             raise PermissionError("part is locked")
-        real_unlink(path, missing_ok=missing_ok)
+        return real_unlink(bound, filename)
 
-    monkeypatch.setattr(Path, "unlink", deny_part_unlink)
+    monkeypatch.setattr(BoundModelDirectory, "unlink_regular", deny_part_unlink)
 
     with pytest.raises(AppError) as exc:
         ModelDownloader(
@@ -406,3 +407,148 @@ def test_permission_and_disk_write_failures_are_structured(
             spec, tmp_path, lambda _done, _total: None, lambda: False
         )
     assert exc.value.code is ErrorCode.MODEL_DOWNLOAD_PERMISSION
+
+
+def test_output_close_oserror_is_structured_and_part_cleanup_remains_visible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import rembggui.jobs.models.download as download_module
+
+    data = b"payload"
+    catalog, spec = _spec(data)
+    real_open = download_module._open_part
+
+    class CloseFailingOutput:
+        def __init__(self, output: object) -> None:
+            self._output = output
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._output, name)
+
+        def close(self) -> None:
+            self._output.close()  # type: ignore[attr-defined]
+            raise OSError("synthetic output close failure")
+
+    def close_failing(bound: BoundModelDirectory, filename: str) -> CloseFailingOutput:
+        return CloseFailingOutput(real_open(bound, filename))
+
+    monkeypatch.setattr(download_module, "_open_part", close_failing)
+
+    with pytest.raises(AppError) as exc:
+        ModelDownloader(FakeTransport(FakeResponse(data)), catalog=catalog).download(
+            spec, tmp_path, lambda _done, _total: None, lambda: False
+        )
+
+    assert exc.value.code is ErrorCode.MODEL_DOWNLOAD_DISK
+    assert "close" in exc.value.technical_detail
+    assert not list(tmp_path.rglob("*.part"))
+
+
+def _swap_bound_parent(bound: BoundModelDirectory, outside: Path) -> tuple[bool, Path]:
+    held = bound.path.with_name(f"{bound.path.name}-held")
+    try:
+        bound.path.rename(held)
+        bound.path.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        if held.exists() and not bound.path.exists():
+            held.rename(bound.path)
+        return False, held
+    return True, held
+
+
+def test_parent_swap_cannot_redirect_cached_reuse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import rembggui.jobs.models.download as download_module
+
+    data = b"cached"
+    catalog, spec = _spec(data)
+    cached = tmp_path / "2.0.72" / "u2net" / "u2net.onnx"
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(data)
+    outside = tmp_path / "outside-reuse"
+    outside.mkdir()
+    outside_file = outside / "u2net.onnx"
+    outside_file.write_bytes(b"outside")
+    swapped = False
+
+    def swap(bound: BoundModelDirectory) -> None:
+        nonlocal swapped
+        swapped, _held = _swap_bound_parent(bound, outside)
+
+    monkeypatch.setattr(download_module, "_after_model_directory_bound", swap)
+
+    try:
+        result = ModelDownloader(
+            FakeTransport(failure=OSError("offline")), catalog=catalog
+        ).download(spec, tmp_path, lambda _done, _total: None, lambda: False)
+    except AppError as error:
+        assert swapped is True
+        assert error.code is ErrorCode.MODEL_CACHE_UNSAFE
+    else:
+        assert swapped is False
+        assert result.read_bytes() == data
+    assert outside_file.read_bytes() == b"outside"
+
+
+def test_parent_swap_cannot_redirect_part_promotion_or_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import rembggui.jobs.models.download as download_module
+
+    data = b"verified"
+    catalog, spec = _spec(data)
+    outside = tmp_path / "outside-promotion"
+    outside.mkdir()
+    outside_part = outside / "u2net.onnx.part"
+    outside_part.write_bytes(b"outside-part")
+    outside_final = outside / "u2net.onnx"
+    outside_final.write_bytes(b"outside-final")
+    swapped = False
+
+    def swap(bound: BoundModelDirectory) -> None:
+        nonlocal swapped
+        swapped, _held = _swap_bound_parent(bound, outside)
+
+    monkeypatch.setattr(download_module, "_before_model_promotion", swap)
+
+    try:
+        ModelDownloader(FakeTransport(FakeResponse(data)), catalog=catalog).download(
+            spec, tmp_path, lambda _done, _total: None, lambda: False
+        )
+    except AppError as error:
+        assert swapped is True
+        assert error.code is ErrorCode.MODEL_CACHE_UNSAFE
+    else:
+        assert swapped is False
+    assert outside_part.read_bytes() == b"outside-part"
+    assert outside_final.read_bytes() == b"outside-final"
+
+
+def test_parent_swap_cannot_redirect_failed_download_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import rembggui.jobs.models.download as download_module
+
+    expected = b"expected"
+    catalog, spec = _spec(expected)
+    outside = tmp_path / "outside-cleanup"
+    outside.mkdir()
+    outside_part = outside / "u2net.onnx.part"
+    outside_part.write_bytes(b"outside-part")
+    swapped = False
+
+    def swap(bound: BoundModelDirectory) -> None:
+        nonlocal swapped
+        swapped, _held = _swap_bound_parent(bound, outside)
+
+    monkeypatch.setattr(download_module, "_after_model_directory_bound", swap)
+
+    with pytest.raises(AppError) as exc:
+        ModelDownloader(
+            FakeTransport(FakeResponse(b"tampered")), catalog=catalog
+        ).download(spec, tmp_path, lambda _done, _total: None, lambda: False)
+
+    assert swapped is (os.name != "nt")
+    assert exc.value.code is ErrorCode.MODEL_CHECKSUM_MISMATCH
+    assert outside_part.read_bytes() == b"outside-part"

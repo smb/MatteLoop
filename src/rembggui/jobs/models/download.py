@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import errno
 import hashlib
 import os
 import ssl
@@ -13,6 +12,7 @@ from threading import Lock
 from typing import NoReturn, Protocol, runtime_checkable
 
 from rembggui.core.errors import AppError, ErrorCode
+from rembggui.jobs.models.cache_fs import BoundModelDirectory, UnsafeCacheError
 from rembggui.jobs.models.catalog import (
     ExecutionClass,
     ModelArtifact,
@@ -94,19 +94,26 @@ class ModelDownloader:
         lock = _flight_lock(lexical_target)
         with lock:
             try:
-                target = _prepare_target(
+                bound = BoundModelDirectory.bind(
                     destination,
                     self._catalog.rembg_version,
                     trusted.id,
-                    artifact.runtime_filename,
+                    create=True,
                 )
+                assert bound is not None
             except AppError:
                 raise
+            except UnsafeCacheError as error:
+                raise _unsafe_error(str(error)) from error
             except PermissionError as error:
                 raise _permission_error(trusted.id, error) from error
             except OSError as error:
                 raise _disk_error(trusted.id, error) from error
-            return self._download_locked(trusted, artifact, target, progress, cancelled)
+            with bound:
+                _after_model_directory_bound(bound)
+                return self._download_locked(
+                    trusted, artifact, bound, progress, cancelled
+                )
 
     def _trusted_local_spec(self, spec: ModelSpec) -> ModelSpec:
         if type(spec) is not ModelSpec:
@@ -127,17 +134,20 @@ class ModelDownloader:
         self,
         spec: ModelSpec,
         artifact: ModelArtifact,
-        target: Path,
+        bound: BoundModelDirectory,
         progress: ProgressCallback,
         cancelled: CancellationCheck,
     ) -> Path:
-        part = target.with_name(f"{target.name}.part")
+        target_name = artifact.runtime_filename
+        part_name = f"{target_name}.part"
+        target = bound.target(target_name)
         _raise_if_cancelled(cancelled, spec.id)
-        if target.exists() or target.is_symlink():
-            if _verified_file(target, artifact, cancelled, spec.id):
+        if _entry_exists(bound, target_name, spec.id):
+            if _verified_file(bound, target_name, artifact, cancelled, spec.id):
+                _assert_bound_named(bound)
                 return target
-            _safe_unlink(target, spec.id)
-        _remove_stale_part(part, spec.id)
+            _safe_unlink(bound, target_name, spec.id)
+        _remove_stale_part(bound, part_name, spec.id)
         response: DownloadResponse | None = None
         try:
             response = self._open_response(artifact.url, spec.id)
@@ -154,7 +164,7 @@ class ModelDownloader:
             digest = hashlib.sha256()
             completed = 0
             try:
-                output = _open_part(part)
+                output = _open_part(bound, part_name)
             except PermissionError as error:
                 raise _permission_error(spec.id, error) from error
             except OSError as error:
@@ -201,19 +211,41 @@ class ModelDownloader:
                 except OSError as error:
                     raise _disk_error(spec.id, error) from error
             finally:
-                output.close()
+                try:
+                    output.close()
+                except PermissionError as error:
+                    raise _permission_error(spec.id, error) from error
+                except OSError as error:
+                    raise _disk_error(spec.id, error) from error
             _raise_if_cancelled(cancelled, spec.id)
             self._close_response(response, spec.id)
             response = None
-            _validate_part_identity(part, part_identity, spec.id)
-            if target.exists() or target.is_symlink():
-                if _verified_file(target, artifact, cancelled, spec.id):
-                    _safe_unlink(part, spec.id)
+            _validate_part_identity(bound, part_name, part_identity, spec.id)
+            if _entry_exists(bound, target_name, spec.id):
+                if _verified_file(bound, target_name, artifact, cancelled, spec.id):
+                    _safe_unlink(bound, part_name, spec.id)
+                    _assert_bound_named(bound)
                     return target
-                _safe_unlink(target, spec.id)
+                _safe_unlink(bound, target_name, spec.id)
+            _before_model_promotion(bound)
             try:
-                os.replace(part, target)
-                _fsync_directory(target.parent)
+                bound.replace(part_name, target_name)
+                try:
+                    _validate_part_identity(bound, target_name, part_identity, spec.id)
+                except AppError as identity_error:
+                    try:
+                        bound.unlink_file_entry(target_name)
+                    except (OSError, UnsafeCacheError) as cleanup_error:
+                        raise _disk_error(spec.id, cleanup_error) from identity_error
+                    raise
+                bound.fsync()
+                bound.assert_still_named()
+            except UnsafeCacheError as error:
+                try:
+                    bound.unlink_file_entry(target_name)
+                except (OSError, UnsafeCacheError):
+                    pass
+                raise _unsafe_error(str(error)) from error
             except PermissionError as error:
                 raise _permission_error(spec.id, error) from error
             except OSError as error:
@@ -221,7 +253,7 @@ class ModelDownloader:
             return target
         except BaseException as error:
             try:
-                _cleanup_part(part, spec.id)
+                _cleanup_part(bound, part_name, spec.id)
             except AppError as cleanup_error:
                 raise cleanup_error from error
             raise
@@ -262,41 +294,6 @@ class ModelDownloader:
             _raise_transport_error(model_id, error)
 
 
-def _prepare_target(root: Path, version: str, model_id: str, filename: str) -> Path:
-    _ensure_directory(root)
-    root_resolved = root.resolve(strict=True)
-    if root.is_symlink():
-        raise _unsafe_error("model cache root cannot be a symbolic link")
-    version_dir = root / version
-    _ensure_directory(version_dir)
-    model_dir = version_dir / model_id
-    _ensure_directory(model_dir)
-    target = model_dir / filename
-    resolved = target.resolve(strict=False)
-    if not resolved.is_relative_to(root_resolved):
-        raise _unsafe_error("model artifact target escapes the cache root")
-    for directory in (version_dir, model_dir):
-        if directory.is_symlink():
-            raise _unsafe_error("model cache namespace contains an unsafe directory")
-        if not directory.resolve(strict=True).is_relative_to(root_resolved):
-            raise _unsafe_error("model cache namespace escapes the cache root")
-    return target
-
-
-def _ensure_directory(path: Path) -> None:
-    if path.exists() or path.is_symlink():
-        info = path.lstat()
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-            raise _unsafe_error(
-                f"cache component {path.name!r} is not a real directory"
-            )
-        return
-    path.mkdir(mode=0o700)
-    info = path.lstat()
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-        raise _unsafe_error(f"cache component {path.name!r} is not a real directory")
-
-
 def _flight_lock(target: Path) -> Lock:
     key = os.path.normcase(str(target.resolve(strict=False)))
     with _flight_guard:
@@ -307,21 +304,28 @@ def _flight_lock(target: Path) -> Lock:
         return lock
 
 
-def _open_part(path: Path):  # type: ignore[no-untyped-def]
-    return path.open("xb")
+def _open_part(  # type: ignore[no-untyped-def]
+    bound: BoundModelDirectory, filename: str
+):
+    return bound.open_new(filename)
 
 
-def _remove_stale_part(part: Path, model_id: str) -> None:
-    if not part.exists() and not part.is_symlink():
+def _remove_stale_part(
+    bound: BoundModelDirectory, filename: str, model_id: str
+) -> None:
+    if not _entry_exists(bound, filename, model_id):
         return
-    _safe_unlink(part, model_id)
+    _safe_unlink(bound, filename, model_id)
 
 
 def _validate_part_identity(
-    part: Path, expected: os.stat_result, model_id: str
+    bound: BoundModelDirectory,
+    filename: str,
+    expected: os.stat_result,
+    model_id: str,
 ) -> None:
     try:
-        current = part.lstat()
+        current = bound.lstat(filename)
     except PermissionError as error:
         raise _permission_error(model_id, error) from error
     except OSError as error:
@@ -336,16 +340,13 @@ def _validate_part_identity(
         raise _unsafe_error("verified model part changed before atomic promotion")
 
 
-def _safe_unlink(path: Path, model_id: str) -> None:
+def _safe_unlink(bound: BoundModelDirectory, filename: str, model_id: str) -> None:
     try:
-        info = path.lstat()
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-            raise _unsafe_error(
-                f"model cache target {path.name!r} is not a regular file"
-            )
-        path.unlink()
+        bound.unlink_regular(filename)
     except FileNotFoundError:
         return
+    except UnsafeCacheError as error:
+        raise _unsafe_error(str(error)) from error
     except AppError:
         raise
     except PermissionError as error:
@@ -354,18 +355,19 @@ def _safe_unlink(path: Path, model_id: str) -> None:
         raise _disk_error(model_id, error) from error
 
 
-def _cleanup_part(part: Path, model_id: str) -> None:
-    _safe_unlink(part, model_id)
+def _cleanup_part(bound: BoundModelDirectory, filename: str, model_id: str) -> None:
+    _safe_unlink(bound, filename, model_id)
 
 
 def _verified_file(
-    path: Path,
+    bound: BoundModelDirectory,
+    filename: str,
     artifact: ModelArtifact,
     cancelled: CancellationCheck,
     model_id: str,
 ) -> bool:
     try:
-        before = path.lstat()
+        before = bound.lstat(filename)
     except FileNotFoundError:
         return False
     except OSError as error:
@@ -378,7 +380,7 @@ def _verified_file(
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     try:
-        descriptor = os.open(path, flags)
+        descriptor = bound.open_read(filename)
     except PermissionError as error:
         raise _permission_error(model_id, error) from error
     except OSError as error:
@@ -407,7 +409,7 @@ def _verified_file(
     finally:
         os.close(descriptor)
     try:
-        after = path.lstat()
+        after = bound.lstat(filename)
     except FileNotFoundError:
         return False
     except OSError as error:
@@ -419,6 +421,33 @@ def _verified_file(
     ):
         return False
     return digest.hexdigest() == artifact.sha256
+
+
+def _entry_exists(bound: BoundModelDirectory, filename: str, model_id: str) -> bool:
+    try:
+        bound.lstat(filename)
+    except FileNotFoundError:
+        return False
+    except PermissionError as error:
+        raise _permission_error(model_id, error) from error
+    except OSError as error:
+        raise _disk_error(model_id, error) from error
+    return True
+
+
+def _assert_bound_named(bound: BoundModelDirectory) -> None:
+    try:
+        bound.assert_still_named()
+    except UnsafeCacheError as error:
+        raise _unsafe_error(str(error)) from error
+
+
+def _after_model_directory_bound(_bound: BoundModelDirectory) -> None:
+    """Test seam immediately after the model directory is handle-bound."""
+
+
+def _before_model_promotion(_bound: BoundModelDirectory) -> None:
+    """Test seam immediately before descriptor-relative atomic promotion."""
 
 
 def _content_length(headers: Mapping[str, str], model_id: str) -> int | None:
@@ -437,26 +466,6 @@ def _content_length(headers: Mapping[str, str], model_id: str) -> int | None:
     if total <= 0:
         raise _network_error(model_id, "HTTP Content-Length is not positive")
     return total
-
-
-def _fsync_directory(directory: Path) -> None:
-    flags = os.O_RDONLY
-    if hasattr(os, "O_DIRECTORY"):
-        flags |= os.O_DIRECTORY
-    try:
-        descriptor = os.open(directory, flags)
-    except OSError as error:
-        if error.errno in {errno.EINVAL, errno.ENOTSUP, errno.EBADF, errno.EACCES}:
-            return
-        raise
-    try:
-        try:
-            os.fsync(descriptor)
-        except OSError as error:
-            if error.errno not in {errno.EINVAL, errno.ENOTSUP, errno.EBADF}:
-                raise
-    finally:
-        os.close(descriptor)
 
 
 def _raise_if_cancelled(cancelled: CancellationCheck, model_id: str) -> None:

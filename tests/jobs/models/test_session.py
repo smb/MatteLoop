@@ -6,14 +6,19 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 
+import numpy as np
 import pytest
+from PIL import Image
 
 from rembggui.core.errors import AppError, ErrorCode
+from rembggui.jobs.models.cache_fs import BoundModelDirectory
 from rembggui.jobs.models.catalog import ExecutionClass, ModelCatalog, ModelSpec
 from rembggui.jobs.models.session import ModelSessionManager, PreparationResult
 from rembggui.jobs.segmentation_host import (
     _create_rembg_session,
     _instantiate_verified_rembg_session,
+    _PreparedRembgSession,
+    _run_rembg,
     _validate_verified_launch_payload,
 )
 
@@ -55,6 +60,7 @@ class FakeClient:
         self.closes = 0
         self.fail_start: BaseException | None = None
         self.fail_replace: BaseException | None = None
+        self.close_failures = 0
 
     def start(self) -> None:
         self.events.append(f"start:{self.payload['model_id']}")
@@ -73,6 +79,15 @@ class FakeClient:
     def close(self) -> None:
         self.events.append("close")
         self.closes += 1
+        if self.close_failures:
+            self.close_failures -= 1
+            raise AppError(
+                ErrorCode.SEGMENTATION_CLEANUP_FAILED,
+                "segmentation-process",
+                "error.segmentation.cleanup-failed",
+                "synthetic cleanup failure",
+                "retry-segmentation-cleanup",
+            )
 
 
 def _manager(
@@ -123,6 +138,7 @@ def _verified_launch(
         "runtime_filename": spec.artifact.runtime_filename,
         "sha256": spec.artifact.sha256,
         "size_bytes": spec.artifact.size_bytes,
+        "inference_defaults": spec.inference_defaults.to_primitives(),
     }
     return catalog, payload, artifact_path
 
@@ -151,12 +167,38 @@ def test_local_prepare_downloads_before_start_with_exact_safe_launch_payload(
         "runtime_filename",
         "sha256",
         "size_bytes",
+        "inference_defaults",
     }
     assert payload["model_id"] == "u2net"
     assert payload["runtime_filename"] == "u2net.onnx"
     assert payload["model_home"] == str(tmp_path / "2.0.72" / "u2net")
     assert "model_path" not in payload
     assert "extras" not in payload
+
+
+def test_cloth_launch_uses_internal_full_default_and_preserves_source_shape(
+    tmp_path: Path,
+) -> None:
+    manager, _downloader, clients, _events = _manager(tmp_path)
+
+    manager.prepare("u2net_cloth_seg", {})
+
+    assert clients[0].payload["inference_defaults"] == {"cloth_category": "full"}
+    calls: list[dict[str, object]] = []
+
+    class FakeClothSession:
+        def predict(self, image: Image.Image, **kwargs: object) -> list[Image.Image]:
+            calls.append(kwargs)
+            mask = Image.new("L", image.size, 255)
+            return [mask] if kwargs.get("cloth_category") == "full" else [mask] * 3
+
+    source = np.zeros((4, 7, 3), dtype=np.uint8)
+    prepared = _PreparedRembgSession(FakeClothSession(), (("cloth_category", "full"),))
+
+    result = _run_rembg(source, prepared)
+
+    assert result.shape == (4, 7, 4)
+    assert calls == [{"cloth_category": "full"}]
 
 
 def test_same_active_model_is_idempotent_without_download_or_restart(
@@ -313,6 +355,48 @@ def test_remove_rejects_symlink_traversal_and_unknown_ids(tmp_path: Path) -> Non
     assert unknown.value.code is ErrorCode.MODEL_NOT_FOUND
 
 
+def test_remove_parent_swap_never_unlinks_outside_bound_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import rembggui.jobs.models.session as session_module
+
+    manager, _downloader, _clients, _events = _manager(tmp_path)
+    target = tmp_path / "2.0.72" / "u2net" / "u2net.onnx"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"cache")
+    outside = tmp_path / "outside-remove"
+    outside.mkdir()
+    outside_target = outside / "u2net.onnx"
+    outside_target.write_bytes(b"outside")
+    swapped = False
+
+    def swap(bound: BoundModelDirectory) -> None:
+        nonlocal swapped
+        held = bound.path.with_name("u2net-held")
+        try:
+            bound.path.rename(held)
+            bound.path.symlink_to(outside, target_is_directory=True)
+        except OSError:
+            if held.exists() and not bound.path.exists():
+                held.rename(bound.path)
+            return
+        swapped = True
+
+    monkeypatch.setattr(session_module, "_after_remove_directory_bound", swap)
+
+    if swapped:
+        pytest.fail("hook did not run")
+    try:
+        removed = manager.remove("u2net")
+    except AppError as error:
+        assert swapped is True
+        assert error.code is ErrorCode.MODEL_CACHE_UNSAFE
+    else:
+        assert swapped is False
+        assert removed is True
+    assert outside_target.read_bytes() == b"outside"
+
+
 def test_close_is_idempotent_and_calls_owned_client_exactly_once(
     tmp_path: Path,
 ) -> None:
@@ -329,6 +413,58 @@ def test_close_is_idempotent_and_calls_owned_client_exactly_once(
     assert exc.value.code is ErrorCode.MODEL_MANAGER_CLOSED
 
 
+def test_failed_close_retains_cleanup_handle_and_blocks_remove_until_retry(
+    tmp_path: Path,
+) -> None:
+    manager, _downloader, clients, _events = _manager(tmp_path)
+    manager.prepare("u2net", {})
+    clients[0].close_failures = 1
+
+    with pytest.raises(AppError) as cleanup:
+        manager.close()
+    assert cleanup.value.code is ErrorCode.SEGMENTATION_CLEANUP_FAILED
+    assert manager.active_id is None
+    assert manager.cleanup_pending_id == "u2net"
+    with pytest.raises(AppError) as in_use:
+        manager.remove("u2net")
+    assert in_use.value.code is ErrorCode.MODEL_IN_USE
+    with pytest.raises(AppError) as pending:
+        manager.prepare("birefnet-portrait", {})
+    assert pending.value.code is ErrorCode.MODEL_MANAGER_CLOSED
+
+    manager.close()
+    manager.close()
+
+    assert clients[0].closes == 2
+    assert manager.cleanup_pending_id is None
+
+
+def test_replacement_cleanup_failure_is_truthful_and_retryable(tmp_path: Path) -> None:
+    manager, _downloader, clients, _events = _manager(tmp_path)
+    manager.prepare("u2net", {})
+    clients[0].fail_replace = RuntimeError("replacement failed")
+    clients[0].close_failures = 1
+
+    with pytest.raises(AppError) as cleanup:
+        manager.prepare("u2netp", {})
+    assert cleanup.value.code is ErrorCode.SEGMENTATION_CLEANUP_FAILED
+    assert manager.active_id is None
+    assert manager.cleanup_pending_id == "u2net"
+    with pytest.raises(AppError) as in_use:
+        manager.remove("u2net")
+    assert in_use.value.code is ErrorCode.MODEL_IN_USE
+    with pytest.raises(AppError) as attempted_in_use:
+        manager.remove("u2netp")
+    assert attempted_in_use.value.code is ErrorCode.MODEL_IN_USE
+    with pytest.raises(AppError) as pending:
+        manager.prepare("birefnet-portrait", {})
+    assert pending.value.code is ErrorCode.SEGMENTATION_CLEANUP_FAILED
+
+    manager.close()
+    assert clients[0].closes == 2
+    assert manager.cleanup_pending_id is None
+
+
 def test_child_launch_reproves_exact_manifest_bound_regular_file(
     tmp_path: Path,
 ) -> None:
@@ -339,6 +475,8 @@ def test_child_launch_reproves_exact_manifest_bound_regular_file(
     assert verified.model_id == "u2net"
     assert verified.artifact_path == artifact_path
     assert verified.rembg_version == "2.0.72"
+    assert verified.model_bytes == b"verified-model"
+    assert verified.inference_kwargs == ()
 
 
 @pytest.mark.parametrize(
@@ -385,7 +523,7 @@ def test_child_creates_session_only_after_hash_proof_without_parent_env_mutation
     import rembggui.jobs.segmentation_host as host_module
 
     catalog, payload, artifact_path = _verified_launch(tmp_path)
-    calls: list[tuple[str, Path, str]] = []
+    calls: list[tuple[str, bytes, str, tuple[tuple[str, str], ...]]] = []
     sentinel = object()
 
     monkeypatch.setattr(
@@ -396,30 +534,15 @@ def test_child_creates_session_only_after_hash_proof_without_parent_env_mutation
     monkeypatch.setattr(
         host_module,
         "_instantiate_verified_rembg_session",
-        lambda model_id, path, rembg_version: (
-            calls.append((model_id, path, rembg_version)),
+        lambda model_id, model_bytes, rembg_version, inference_kwargs=(): (
+            calls.append((model_id, model_bytes, rembg_version, inference_kwargs)),
             sentinel,
         )[1],
     )
-    real_verify = host_module._verify_child_artifact
-    proofs: list[Path] = []
-
-    def recording_verify(
-        path: Path, *, expected_size: int, expected_sha256: str
-    ) -> None:
-        proofs.append(path)
-        real_verify(
-            path,
-            expected_size=expected_size,
-            expected_sha256=expected_sha256,
-        )
-
-    monkeypatch.setattr(host_module, "_verify_child_artifact", recording_verify)
     before = dict(os.environ)
 
     assert _create_rembg_session(payload) is sentinel
-    assert calls == [("u2net", artifact_path, "2.0.72")]
-    assert proofs == [artifact_path, artifact_path]
+    assert calls == [("u2net", b"verified-model", "2.0.72", ())]
     assert dict(os.environ) == before
 
     artifact_path.write_bytes(b"tampered")
@@ -428,14 +551,10 @@ def test_child_creates_session_only_after_hash_proof_without_parent_env_mutation
     assert len(calls) == 1
 
 
-def test_verified_instantiation_overrides_upstream_downloader_without_environment(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import rembg.sessions as rembg_sessions
-
-    artifact = tmp_path / "u2net.onnx"
-    artifact.write_bytes(b"already-verified")
+def test_verified_instantiation_passes_same_immutable_bytes_directly_to_ort() -> None:
     original_download_called = False
+    captured: list[bytes] = []
+    model_bytes = b"already-verified"
 
     class FakeSession:
         @classmethod
@@ -448,15 +567,76 @@ def test_verified_instantiation_overrides_upstream_downloader_without_environmen
             original_download_called = True
             raise AssertionError("upstream downloader must not be called")
 
-        def __init__(self, model_id: str, _options: object) -> None:
-            assert model_id == "u2net"
-            assert self.__class__.download_models() == artifact
+    class FakeOptions:
+        inter_op_num_threads = 0
+        intra_op_num_threads = 0
 
-    monkeypatch.setattr(rembg_sessions, "sessions_class", [FakeSession])
+    class FakeOrt:
+        @staticmethod
+        def SessionOptions() -> FakeOptions:
+            return FakeOptions()
+
+        @staticmethod
+        def get_device() -> str:
+            return "CPU"
+
+        @staticmethod
+        def InferenceSession(
+            content: bytes, *, sess_options: object, providers: list[str]
+        ) -> object:
+            assert isinstance(sess_options, FakeOptions)
+            assert providers == ["CPUExecutionProvider"]
+            captured.append(content)
+            return object()
+
     before = dict(os.environ)
 
-    session = _instantiate_verified_rembg_session("u2net", artifact, "2.0.72")
+    session = _instantiate_verified_rembg_session(
+        "u2net",
+        model_bytes,
+        "2.0.72",
+        session_classes=[FakeSession],
+        ort_module=FakeOrt,
+        installed_version="2.0.72",
+    )
 
-    assert isinstance(session, FakeSession)
+    assert isinstance(session, _PreparedRembgSession)
+    assert isinstance(session.session, FakeSession)
+    assert session.session.inner_session is not None
+    assert captured == [model_bytes]
+    assert captured[0] is model_bytes
     assert original_download_called is False
     assert dict(os.environ) == before
+
+
+def test_session_consumes_verified_bytes_even_if_path_swaps_back_during_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import rembggui.jobs.segmentation_host as host_module
+
+    catalog, payload, artifact_path = _verified_launch(tmp_path)
+    good = artifact_path.read_bytes()
+    evil = b"x" * len(good)
+    captured: list[bytes] = []
+
+    monkeypatch.setattr(
+        ModelCatalog, "load_resource", classmethod(lambda _cls: catalog)
+    )
+
+    def instantiate(
+        _model_id: str,
+        model_bytes: bytes,
+        _version: str,
+        _inference_kwargs: tuple[tuple[str, str], ...] = (),
+    ) -> object:
+        captured.append(model_bytes)
+        artifact_path.write_bytes(evil)
+        artifact_path.write_bytes(good)
+        return object()
+
+    monkeypatch.setattr(host_module, "_instantiate_verified_rembg_session", instantiate)
+
+    _create_rembg_session(payload)
+
+    assert captured == [good]
+    assert captured[0] is not artifact_path.read_bytes()

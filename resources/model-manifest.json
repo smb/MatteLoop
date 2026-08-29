@@ -16,6 +16,7 @@
         "sha256": "8d10d2f3bb75ae3b6d527c77944fc5e7dcd94b29809d47a739a7a728a912b491",
         "upstream_checksum": "md5:60024c5c889badc19c04ad937298a77b"
       },
+      "inference_defaults": {},
       "required_inputs": [],
       "edge_modes": ["standard", "decontaminate", "alpha_matting"],
       "supports_render": true,
@@ -37,6 +38,7 @@
         "sha256": "309c8469258dda742793dce0ebea8e6dd393174f89934733ecc8b14c76f4ddd8",
         "upstream_checksum": "md5:8e83ca70e441ab06c318d82300c84806"
       },
+      "inference_defaults": {},
       "required_inputs": [],
       "edge_modes": ["standard", "decontaminate", "alpha_matting"],
       "supports_render": true,
@@ -58,6 +60,7 @@
         "sha256": "01eb6a29a5c4d8edb30b56adad9bb3a2a0535338e480724a213e0acfd2d1c73c",
         "upstream_checksum": "md5:c09ddc2e0104f800e3e1bb4652583d1f"
       },
+      "inference_defaults": {},
       "required_inputs": [],
       "edge_modes": ["standard", "decontaminate", "alpha_matting"],
       "supports_render": true,
@@ -79,6 +82,7 @@
         "sha256": "6d2cbc27bfbdc989e1fd325656d65902ecc6a3ccbe94b2d3655ec114efcb128e",
         "upstream_checksum": "md5:2434d1f3cb744e0e49386c906e5a08bb"
       },
+      "inference_defaults": {"cloth_category": "full"},
       "required_inputs": [],
       "edge_modes": ["standard", "decontaminate", "alpha_matting"],
       "supports_render": true,
@@ -100,6 +104,7 @@
         "sha256": "75da6c8d2f8096ec743d071951be73b4a8bc7b3e51d9a6625d63644f90ffeedb",
         "upstream_checksum": "md5:55e59e0d8062d2f5d013f4725ee84782"
       },
+      "inference_defaults": {},
       "required_inputs": [],
       "edge_modes": ["standard", "decontaminate", "alpha_matting"],
       "supports_render": true,
@@ -121,6 +126,7 @@
         "sha256": "60920e99c45464f2ba57bee2ad08c919a52bbf852739e96947fbb4358c0d964a",
         "upstream_checksum": "md5:fc16ebd8b0c10d971d3513d564d01e29"
       },
+      "inference_defaults": {},
       "required_inputs": [],
       "edge_modes": ["standard", "decontaminate", "alpha_matting"],
       "supports_render": true,
@@ -142,6 +148,7 @@
         "sha256": "f15622d853e8260172812b657053460e20806f04b9e05147d49af7bed31a6e99",
         "upstream_checksum": "md5:6f184e756bb3bd901c8849220a83e38e"
       },
+      "inference_defaults": {},
       "required_inputs": [],
       "edge_modes": ["standard", "decontaminate", "alpha_matting"],
       "supports_render": true,
@@ -157,6 +164,7 @@
       "purpose": "Point-prompted extraction for a selected preview frame.",
       "execution_class": "sam_preview",
       "artifact": null,
+      "inference_defaults": {},
       "required_inputs": ["positive_point"],
       "edge_modes": ["standard"],
       "supports_render": false,
@@ -178,6 +186,7 @@
         "sha256": "58f621f00f5d756097615970a88a791584600dcf7c45b18a0a6267535a1ebd3c",
         "upstream_checksum": "md5:7a35a0141cbbc80de11d9c9a28f52697"
       },
+      "inference_defaults": {},
       "required_inputs": [],
       "edge_modes": ["standard", "decontaminate", "alpha_matting"],
       "supports_render": true,
@@ -199,6 +208,7 @@
         "sha256": "5600024376f572a557870a5eb0afb1e5961636bef4e1e22132025467d0f03333",
         "upstream_checksum": "md5:4fab47adc4ff364be1713e97b7e66334"
       },
+      "inference_defaults": {},
       "required_inputs": [],
       "edge_modes": ["standard", "decontaminate", "alpha_matting"],
       "supports_render": true,
@@ -220,6 +230,7 @@
         "sha256": "1ba1c8ff5a7bbfadc8d8d13fb11d7be793f91f23d9d466549e37a854f6668f99",
         "upstream_checksum": "md5:c3a64a6abf20250d090cd055f12a3b67"
       },
+      "inference_defaults": {},
       "required_inputs": [],
       "edge_modes": ["standard", "decontaminate", "alpha_matting"],
       "supports_render": true,
@@ -241,6 +252,7 @@
         "sha256": "6470117bac6f8d82a3f62921056f52d0f5c4d36d1d832096331d5ea38a03acb5",
         "upstream_checksum": "md5:2d4d44102b446f33a4ebb2e56c051f2b"
       },
+      "inference_defaults": {},
       "required_inputs": [],
       "edge_modes": ["standard", "decontaminate", "alpha_matting"],
       "supports_render": true,
@@ -262,6 +274,7 @@
         "sha256": "4f5837663194fb88f603b76782eae05a3c29f5749872ca1bfb636bd26e7f6bfc",
         "upstream_checksum": "md5:c017ade5de8a50ff0fd74d790d268dda"
       },
+      "inference_defaults": {},
       "required_inputs": [],
       "edge_modes": ["standard", "decontaminate", "alpha_matting"],
       "supports_render": true,
@@ -283,6 +296,7 @@
         "sha256": "91ec48f566db475cf6e4caa7e9cd997f352edfcc372372f437e2fbefc1557b13",
         "upstream_checksum": "md5:f6d0d21ca89d287f17e7afe9f5fd3b45"
       },
+      "inference_defaults": {},
       "required_inputs": [],
       "edge_modes": ["standard", "decontaminate", "alpha_matting"],
       "supports_render": true,
@@ -304,6 +318,7 @@
         "sha256": "a94814cac438a31f95287811882628644a04b22d313ef3071d2ba904b5f627b8",
         "upstream_checksum": "md5:33e726a2136a3d59eb0fdf613e31e3e9"
       },
+      "inference_defaults": {},
       "required_inputs": [],
       "edge_modes": ["standard", "decontaminate", "alpha_matting"],
       "supports_render": true,
@@ -325,6 +340,7 @@
         "sha256": "5b486f08200f513f460da46dd701db5fbb47d79b4be4b708a19444bcd4e79958",
         "upstream_checksum": "sha256:5b486f08200f513f460da46dd701db5fbb47d79b4be4b708a19444bcd4e79958"
       },
+      "inference_defaults": {},
       "required_inputs": [],
       "edge_modes": ["standard", "decontaminate", "alpha_matting"],
       "supports_render": true,
@@ -340,6 +356,7 @@
       "purpose": "Consent-gated cloud background removal.",
       "execution_class": "cloud_withoutbg",
       "artifact": null,
+      "inference_defaults": {},
       "required_inputs": ["session_token", "per_job_consent"],
       "edge_modes": ["standard"],
       "supports_render": true,

@@ -1047,17 +1047,12 @@ def _create_rembg_session(model_spec: dict[str, object]) -> object:
     verified = _validate_verified_launch_payload(
         model_spec, catalog=ModelCatalog.load_resource()
     )
-    session = _instantiate_verified_rembg_session(
+    return _instantiate_verified_rembg_session(
         verified.model_id,
-        verified.artifact_path,
+        verified.model_bytes,
         verified.rembg_version,
+        verified.inference_kwargs,
     )
-    _verify_child_artifact(
-        verified.artifact_path,
-        expected_size=verified.size_bytes,
-        expected_sha256=verified.sha256,
-    )
-    return session
 
 
 @dataclass(frozen=True, slots=True)
@@ -1067,6 +1062,14 @@ class _VerifiedModelLaunch:
     rembg_version: str
     size_bytes: int
     sha256: str
+    model_bytes: bytes
+    inference_kwargs: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedRembgSession:
+    session: object
+    inference_kwargs: tuple[tuple[str, str], ...]
 
 
 def _validate_verified_launch_payload(
@@ -1083,6 +1086,7 @@ def _validate_verified_launch_payload(
         "runtime_filename",
         "sha256",
         "size_bytes",
+        "inference_defaults",
     }
     if type(catalog) is not ModelCatalog:
         raise _model_preparation_error("child model catalog is not authoritative")
@@ -1098,6 +1102,7 @@ def _validate_verified_launch_payload(
     runtime_filename = model_spec.get("runtime_filename")
     sha256 = model_spec.get("sha256")
     size_bytes = model_spec.get("size_bytes")
+    inference_defaults = model_spec.get("inference_defaults")
     if type(schema_version) is not int or schema_version != 1:
         raise _model_preparation_error("child model launch schema is invalid")
     if type(model_id) is not str:
@@ -1118,6 +1123,7 @@ def _validate_verified_launch_payload(
         or sha256 != artifact.sha256
         or type(size_bytes) is not int
         or size_bytes != artifact.size_bytes
+        or inference_defaults != spec.inference_defaults.to_primitives()
     ):
         raise _model_preparation_error(
             "child model launch payload does not match the pinned manifest"
@@ -1150,7 +1156,7 @@ def _validate_verified_launch_payload(
     artifact_path = home / artifact.runtime_filename
     if artifact_path.resolve(strict=False).parent != home.resolve(strict=True):
         raise _model_cache_error("child model artifact escapes its cache namespace")
-    _verify_child_artifact(
+    model_bytes = _read_verified_child_artifact(
         artifact_path,
         expected_size=artifact.size_bytes,
         expected_sha256=artifact.sha256,
@@ -1161,12 +1167,14 @@ def _validate_verified_launch_payload(
         catalog.rembg_version,
         artifact.size_bytes,
         artifact.sha256,
+        model_bytes,
+        tuple(spec.inference_defaults.to_primitives().items()),
     )
 
 
-def _verify_child_artifact(
+def _read_verified_child_artifact(
     path: Path, *, expected_size: int, expected_sha256: str
-) -> None:
+) -> bytes:
     try:
         before = path.lstat()
     except OSError as error:
@@ -1190,7 +1198,6 @@ def _verify_child_artifact(
         raise _model_cache_error(
             f"verified model artifact cannot be opened: {type(error).__name__}"
         ) from error
-    digest = hashlib.sha256()
     try:
         opened = os.fstat(descriptor)
         if (
@@ -1200,11 +1207,8 @@ def _verify_child_artifact(
             or opened.st_size != expected_size
         ):
             raise _model_cache_error("verified model artifact changed before hashing")
-        while True:
-            chunk = os.read(descriptor, 256 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
+        with os.fdopen(descriptor, "rb", closefd=False) as model_file:
+            model_bytes = model_file.read(expected_size + 1)
     except AppError:
         raise
     except OSError as error:
@@ -1223,53 +1227,86 @@ def _verify_child_artifact(
         after.st_dev != opened.st_dev
         or after.st_ino != opened.st_ino
         or after.st_size != expected_size
-        or digest.hexdigest() != expected_sha256
+        or len(model_bytes) != expected_size
+        or hashlib.sha256(model_bytes).hexdigest() != expected_sha256
     ):
         raise _model_preparation_error(
             "verified model artifact failed the child SHA-256 proof"
         )
+    return model_bytes
 
 
 def _instantiate_verified_rembg_session(
-    model_id: str, artifact_path: Path, rembg_version: str
+    model_id: str,
+    model_bytes: bytes,
+    rembg_version: str,
+    inference_kwargs: tuple[tuple[str, str], ...] = (),
+    *,
+    session_classes: object | None = None,
+    ort_module: object | None = None,
+    installed_version: str | None = None,
 ) -> object:
-    """Instantiate a pinned built-in while overriding all download behavior."""
-    import onnxruntime as ort  # type: ignore[import-untyped]
-    from rembg.sessions import sessions_class  # type: ignore[import-untyped]
+    """Construct the pinned rembg class around the exact SHA-proven bytes."""
+    if type(model_bytes) is not bytes:
+        raise _model_preparation_error("verified model content is not immutable bytes")
+    if ort_module is None:
+        import onnxruntime as ort_module  # type: ignore[import-untyped,no-redef]
+    if session_classes is None:
+        from rembg.sessions import sessions_class  # type: ignore[import-untyped]
 
-    try:
-        installed_version = package_version("rembg")
-    except PackageNotFoundError as error:
-        raise _model_preparation_error(
-            "pinned rembg runtime is not installed"
-        ) from error
+        session_classes = sessions_class
+
+    if installed_version is None:
+        try:
+            installed_version = package_version("rembg")
+        except PackageNotFoundError as error:
+            raise _model_preparation_error(
+                "pinned rembg runtime is not installed"
+            ) from error
     if installed_version != rembg_version:
         raise _model_preparation_error(
             "installed rembg runtime does not match the verified model namespace"
         )
     session_class: Any | None = None
-    for candidate in sessions_class:
+    if not isinstance(session_classes, list):
+        raise _model_preparation_error("rembg session registry is invalid")
+    for candidate in session_classes:
         if candidate.name() == model_id:
             session_class = candidate
             break
     if session_class is None:
         raise _model_preparation_error("verified built-in rembg session is unavailable")
 
-    def verified_artifact(_cls: object, *_args: object, **_kwargs: object) -> Path:
-        return artifact_path
-
-    verified_class = type(
-        f"Verified_{session_class.__name__}",
-        (session_class,),
-        {"download_models": classmethod(verified_artifact)},  # type: ignore[arg-type]
-    )
-    session_options = ort.SessionOptions()
+    runtime: Any = ort_module
+    session_options = runtime.SessionOptions()
     threads = os.getenv("OMP_NUM_THREADS")
     if threads is not None:
         thread_count = int(threads)
         session_options.inter_op_num_threads = thread_count
         session_options.intra_op_num_threads = thread_count
-    return verified_class(model_id, session_options)
+    device_type = runtime.get_device()
+    available = (
+        runtime.get_available_providers() if str(device_type).startswith("GPU") else []
+    )
+    if device_type == "GPU" and "CUDAExecutionProvider" in available:
+        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    elif str(device_type).startswith("GPU") and "ROCMExecutionProvider" in available:
+        providers = ["ROCMExecutionProvider", "CPUExecutionProvider"]
+    else:
+        providers = ["CPUExecutionProvider"]
+    try:
+        session = session_class.__new__(session_class)
+        session.model_name = model_id
+        session.inner_session = runtime.InferenceSession(
+            model_bytes,
+            sess_options=session_options,
+            providers=providers,
+        )
+    except (MemoryError, OSError, RuntimeError, TypeError, ValueError) as error:
+        raise _model_preparation_error(
+            f"verified ONNX session could not be constructed: {type(error).__name__}"
+        ) from error
+    return _PreparedRembgSession(session, inference_kwargs)
 
 
 def _model_preparation_error(detail: str) -> AppError:
@@ -1295,7 +1332,12 @@ def _model_cache_error(detail: str) -> AppError:
 def _run_rembg(source: Uint8Frame, session: object) -> Uint8Frame:
     from rembg import remove  # type: ignore[import-untyped]
 
-    result = np.asarray(remove(source, session=session))
+    actual_session = session
+    inference_kwargs: dict[str, str] = {}
+    if type(session) is _PreparedRembgSession:
+        actual_session = session.session
+        inference_kwargs = dict(session.inference_kwargs)
+    result = np.asarray(remove(source, session=actual_session, **inference_kwargs))
     if result.dtype != np.dtype(np.uint8):
         raise ValueError("rembg output dtype is not uint8")
     return np.ascontiguousarray(result)

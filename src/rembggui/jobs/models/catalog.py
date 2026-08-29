@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -46,6 +47,7 @@ _MODEL_FIELDS = {
     "purpose",
     "execution_class",
     "artifact",
+    "inference_defaults",
     "required_inputs",
     "edge_modes",
     "supports_render",
@@ -75,6 +77,20 @@ class ExecutionClass(StrEnum):
     CLOUD_WITHOUTBG = "cloud_withoutbg"
 
 
+class ClothCategory(StrEnum):
+    FULL = "full"
+
+
+@dataclass(frozen=True, slots=True)
+class InferenceDefaults:
+    cloth_category: ClothCategory | None = None
+
+    def to_primitives(self) -> dict[str, str]:
+        if self.cloth_category is None:
+            return {}
+        return {"cloth_category": self.cloth_category.value}
+
+
 @dataclass(frozen=True, slots=True)
 class ModelArtifact:
     url: str
@@ -92,6 +108,7 @@ class ModelSpec:
     purpose: str
     execution_class: ExecutionClass
     artifact: ModelArtifact | None
+    inference_defaults: InferenceDefaults
     required_inputs: tuple[str, ...]
     edge_modes: tuple[str, ...]
     supports_render: bool
@@ -101,23 +118,30 @@ class ModelSpec:
     max_upload_bytes: int | None
 
 
+@dataclass(frozen=True, slots=True)
 class ModelCatalog:
     """The only source of model IDs and artifact trust metadata."""
 
-    __slots__ = ("default_id", "ids", "rembg_version", "specs")
+    rembg_version: str
+    default_id: str
+    ids: tuple[str, ...]
+    specs: Mapping[str, ModelSpec]
 
-    def __init__(
-        self,
-        *,
-        rembg_version: str,
-        default_id: str,
-        specs: tuple[ModelSpec, ...],
-    ) -> None:
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "ids", tuple(self.ids))
+        object.__setattr__(self, "specs", MappingProxyType(dict(self.specs)))
+
+    @classmethod
+    def _build(
+        cls, *, rembg_version: str, default_id: str, specs: tuple[ModelSpec, ...]
+    ) -> ModelCatalog:
         by_id = {spec.id: spec for spec in specs}
-        self.rembg_version = rembg_version
-        self.default_id = default_id
-        self.ids = tuple(spec.id for spec in specs)
-        self.specs = MappingProxyType(by_id)
+        return cls(
+            rembg_version,
+            default_id,
+            tuple(spec.id for spec in specs),
+            MappingProxyType(by_id),
+        )
 
     @staticmethod
     def resource_path() -> Path:
@@ -173,7 +197,7 @@ class ModelCatalog:
             raise _manifest_error(
                 "model manifest IDs are duplicate, missing, or unknown"
             )
-        return cls(
+        return cls._build(
             rembg_version=_PINNED_REMBG_VERSION,
             default_id=_DEFAULT_ID,
             specs=specs,
@@ -206,6 +230,9 @@ def _parse_model(value: object) -> ModelSpec:
     artifact = (
         None if artifact_value is None else _parse_artifact(artifact_value, model_id)
     )
+    inference_defaults = _parse_inference_defaults(
+        value["inference_defaults"], model_id
+    )
     required_inputs = _string_tuple(value, "required_inputs", allowed=None)
     edge_modes = _string_tuple(value, "edge_modes", allowed=_EDGE_MODES)
     if not edge_modes or len(set(edge_modes)) != len(edge_modes):
@@ -225,6 +252,7 @@ def _parse_model(value: object) -> ModelSpec:
         purpose=_strict_string(value, "purpose"),
         execution_class=execution_class,
         artifact=artifact,
+        inference_defaults=inference_defaults,
         required_inputs=required_inputs,
         edge_modes=edge_modes,
         supports_render=supports_render,
@@ -235,6 +263,20 @@ def _parse_model(value: object) -> ModelSpec:
     )
     _validate_model_invariants(spec)
     return spec
+
+
+def _parse_inference_defaults(value: object, model_id: str) -> InferenceDefaults:
+    if type(value) is not dict:
+        raise _manifest_error("model inference defaults must be an object")
+    expected = {"cloth_category"} if model_id == "u2net_cloth_seg" else set()
+    _exact_keys(value, expected, "model inference defaults")
+    if model_id != "u2net_cloth_seg":
+        return InferenceDefaults()
+    try:
+        category = ClothCategory(_strict_string(value, "cloth_category"))
+    except ValueError as error:
+        raise _manifest_error("cloth category default is invalid") from error
+    return InferenceDefaults(category)
 
 
 def _parse_artifact(value: object, model_id: str) -> ModelArtifact:
@@ -294,6 +336,13 @@ def _validate_model_invariants(spec: ModelSpec) -> None:
             or spec.max_upload_bytes is not None
         ):
             raise _manifest_error("local model capability invariants are invalid")
+        expected_defaults = (
+            InferenceDefaults(ClothCategory.FULL)
+            if spec.id == "u2net_cloth_seg"
+            else InferenceDefaults()
+        )
+        if spec.inference_defaults != expected_defaults:
+            raise _manifest_error("local model inference defaults are invalid")
         return
     if spec.id == "sam":
         if (
@@ -302,6 +351,7 @@ def _validate_model_invariants(spec: ModelSpec) -> None:
             or spec.required_inputs != ("positive_point",)
             or spec.supports_render
             or spec.max_upload_bytes is not None
+            or spec.inference_defaults != InferenceDefaults()
         ):
             raise _manifest_error("SAM preview capability invariants are invalid")
         return
@@ -311,6 +361,7 @@ def _validate_model_invariants(spec: ModelSpec) -> None:
         or spec.required_inputs != ("session_token", "per_job_consent")
         or not spec.supports_render
         or spec.max_upload_bytes != 20 * 1024 * 1024
+        or spec.inference_defaults != InferenceDefaults()
     ):
         raise _manifest_error("withoutBG cloud capability invariants are invalid")
 

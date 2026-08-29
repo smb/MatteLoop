@@ -6,7 +6,12 @@ from dataclasses import FrozenInstanceError
 import pytest
 
 from rembggui.core.errors import AppError, ErrorCode
-from rembggui.jobs.models.catalog import ExecutionClass, ModelCatalog
+from rembggui.jobs.models.catalog import (
+    ClothCategory,
+    ExecutionClass,
+    InferenceDefaults,
+    ModelCatalog,
+)
 
 APPROVED_IDS = {
     "u2net",
@@ -75,6 +80,41 @@ def test_local_catalog_metadata_is_pinned_and_deeply_immutable() -> None:
         portrait.purpose = "changed"  # type: ignore[misc]
     with pytest.raises(TypeError):
         catalog.specs[portrait.id] = portrait  # type: ignore[index]
+    with pytest.raises(FrozenInstanceError):
+        catalog.default_id = "u2net"  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        catalog.ids = ()  # type: ignore[misc]
+
+
+def test_cloth_model_has_only_the_canonical_input_free_full_default() -> None:
+    catalog = ModelCatalog.load_resource()
+
+    assert catalog.get("u2net_cloth_seg").inference_defaults == InferenceDefaults(
+        ClothCategory.FULL
+    )
+
+
+def test_direct_catalog_construction_cannot_retain_mutable_collections() -> None:
+    original = ModelCatalog.load_resource()
+    specs = dict(original.specs)
+    catalog = ModelCatalog(
+        original.rembg_version,
+        original.default_id,
+        list(original.ids),  # type: ignore[arg-type]
+        specs,
+    )
+
+    specs.clear()
+
+    assert catalog.ids == original.ids
+    assert len(catalog.specs) == 17
+    with pytest.raises(TypeError):
+        catalog.specs["u2net"] = original.get("u2net")  # type: ignore[index]
+    assert all(
+        spec.inference_defaults == InferenceDefaults()
+        for model_id, spec in catalog.specs.items()
+        if model_id != "u2net_cloth_seg"
+    )
 
 
 def test_special_models_are_capability_routed_without_local_artifacts() -> None:
@@ -211,6 +251,55 @@ def test_every_local_artifact_matches_the_app_pinned_release_index() -> None:
         assert artifact.upstream_checksum == upstream_checksum
 
 
+def test_each_local_pin_has_honest_auditable_provenance() -> None:
+    catalog = ModelCatalog.load_resource()
+    provenance_path = ModelCatalog.resource_path().with_name("model-provenance.json")
+    payload = json.loads(provenance_path.read_text(encoding="utf-8"))
+
+    assert payload["schema_version"] == 1
+    assert payload["rembg_version"] == catalog.rembg_version
+    assert payload["recorded_at"] == "2026-08-29"
+    assert payload["qualification_status"] == "app-pins-not-live-qualified"
+    assert payload["qualification_owner"] == "Task 17 release qualification"
+    entries = payload["entries"]
+    assert isinstance(entries, list)
+    by_id = {entry["model_id"]: entry for entry in entries}
+    local = {
+        model_id: spec
+        for model_id, spec in catalog.specs.items()
+        if spec.execution_class is ExecutionClass.LOCAL
+    }
+    assert set(by_id) == set(local)
+    assert len(entries) == len(by_id)
+    for model_id, spec in local.items():
+        artifact = spec.artifact
+        assert artifact is not None
+        entry = by_id[model_id]
+        assert set(entry) == {
+            "model_id",
+            "asset_url",
+            "expected_size_bytes",
+            "app_pinned_sha256",
+            "pin_method",
+            "pin_status",
+            "upstream_checksum",
+            "upstream_checksum_source",
+            "upstream_checksum_status",
+        }
+        assert entry["asset_url"] == artifact.url
+        assert entry["expected_size_bytes"] == artifact.size_bytes
+        assert entry["app_pinned_sha256"] == artifact.sha256
+        assert entry["upstream_checksum"] == artifact.upstream_checksum
+        assert entry["pin_method"] == "approved-task-9-brief-index"
+        assert entry["pin_status"] == "not-live-byte-qualified"
+        assert str(entry["upstream_checksum_source"]).startswith(
+            "rembg-2.0.72/rembg/sessions/"
+        )
+        assert str(entry["upstream_checksum_status"]).startswith(
+            "declared-in-pinned-source-"
+        )
+
+
 @pytest.mark.parametrize(
     "raw",
     [
@@ -289,6 +378,24 @@ def test_manifest_rejects_duplicate_nonfinite_nonobject_and_non_utf8_json(
         (
             lambda root: _model(root, "withoutbg").update({"max_upload_bytes": None}),
             "cloud upload invariant",
+        ),
+        (
+            lambda root: _model(root, "u2net_cloth_seg").update(
+                {"inference_defaults": {}}
+            ),
+            "missing cloth default",
+        ),
+        (
+            lambda root: _model(root, "u2net_cloth_seg").update(
+                {"inference_defaults": {"cloth_category": "upper"}}
+            ),
+            "unapproved cloth default",
+        ),
+        (
+            lambda root: _model(root, "u2net").update(
+                {"inference_defaults": {"cloth_category": "full"}}
+            ),
+            "default on wrong model",
         ),
     ],
 )

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import stat
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +9,7 @@ from threading import RLock
 from typing import Protocol
 
 from rembggui.core.errors import AppError, ErrorCode
+from rembggui.jobs.models.cache_fs import BoundModelDirectory, UnsafeCacheError
 from rembggui.jobs.models.catalog import ExecutionClass, ModelCatalog, ModelSpec
 from rembggui.jobs.models.download import CancellationCheck, ProgressCallback
 
@@ -76,6 +76,8 @@ class ModelSessionManager:
         self._client: SessionClient | None = None
         self._active_spec: ModelSpec | None = None
         self._active_result: PreparationResult | None = None
+        self._cleanup_spec: ModelSpec | None = None
+        self._cleanup_ids: frozenset[str] = frozenset()
         self._closed = False
 
     @property
@@ -88,9 +90,16 @@ class ModelSessionManager:
         with self._lock:
             return self._active_spec
 
+    @property
+    def cleanup_pending_id(self) -> str | None:
+        with self._lock:
+            return self._cleanup_spec.id if self._cleanup_spec is not None else None
+
     def prepare(self, model_id: str, extras: dict[str, object]) -> PreparationResult:
         with self._lock:
             self._require_open()
+            if self._cleanup_spec is not None:
+                raise _cleanup_pending_error(self._cleanup_spec.id)
             if type(extras) is not dict or extras:
                 raise _preparation_error(
                     "Task 9 accepts no model paths, custom options, prompts, or tokens"
@@ -123,24 +132,34 @@ class ModelSessionManager:
                 client = self._client_factory(launch_payload)
                 try:
                     client.start()
-                except BaseException:
+                except BaseException as startup_error:
+                    self._client = client
+                    self._cleanup_spec = spec
+                    self._cleanup_ids = frozenset({spec.id})
                     try:
                         client.close()
-                    except BaseException:
-                        pass
-                    self._clear_active_unlocked()
+                    except BaseException as cleanup_error:
+                        raise cleanup_error from startup_error
+                    self._clear_all_unlocked()
                     raise
                 self._client = client
             else:
                 client = self._client
                 try:
                     client.replace_model(launch_payload)
-                except BaseException:
+                except BaseException as replacement_error:
+                    previous_spec = self._active_spec
+                    self._clear_active_unlocked()
+                    self._cleanup_spec = previous_spec
+                    self._cleanup_ids = frozenset(
+                        {spec.id}
+                        | ({previous_spec.id} if previous_spec is not None else set())
+                    )
                     try:
                         client.close()
-                    except BaseException:
-                        pass
-                    self._clear_active_unlocked()
+                    except BaseException as cleanup_error:
+                        raise cleanup_error from replacement_error
+                    self._clear_all_unlocked()
                     raise
             self._active_spec = spec
             self._active_result = result
@@ -148,9 +167,10 @@ class ModelSessionManager:
 
     def remove(self, model_id: str) -> bool:
         with self._lock:
-            self._require_open()
             spec = self._catalog.get(model_id)
-            if self._active_spec is not None and self._active_spec.id == spec.id:
+            if (self._active_spec is not None and self._active_spec.id == spec.id) or (
+                spec.id in self._cleanup_ids
+            ):
                 raise AppError(
                     ErrorCode.MODEL_IN_USE,
                     "model-cache",
@@ -158,41 +178,41 @@ class ModelSessionManager:
                     f"model {spec.id!r} owns the active segmentation session",
                     "close-or-switch-model",
                 )
+            self._require_open()
             artifact = spec.artifact
             if artifact is None:
                 return False
-            target = (
-                self._cache_root
-                / self._catalog.rembg_version
-                / spec.id
-                / artifact.runtime_filename
-            )
-            _validate_remove_target(self._cache_root, target)
             try:
-                info = target.lstat()
-            except FileNotFoundError:
+                bound = BoundModelDirectory.bind(
+                    self._cache_root,
+                    self._catalog.rembg_version,
+                    spec.id,
+                    create=False,
+                )
+            except UnsafeCacheError as error:
+                raise _unsafe_cache(str(error)) from error
+            except PermissionError as error:
+                raise _remove_permission(spec.id, error) from error
+            except OSError as error:
+                raise _remove_disk(spec.id, error) from error
+            if bound is None:
                 return False
-            except PermissionError as error:
-                raise _remove_permission(spec.id, error) from error
-            except OSError as error:
-                raise _remove_disk(spec.id, error) from error
-            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-                raise _unsafe_cache("model removal target is not a real regular file")
-            try:
-                target.unlink()
+            with bound:
                 try:
-                    target.parent.rmdir()
-                except OSError:
-                    pass
-            except PermissionError as error:
-                raise _remove_permission(spec.id, error) from error
-            except OSError as error:
-                raise _remove_disk(spec.id, error) from error
-            return True
+                    _after_remove_directory_bound(bound)
+                    removed = bound.unlink_regular(artifact.runtime_filename)
+                    bound.assert_still_named()
+                    return removed
+                except UnsafeCacheError as error:
+                    raise _unsafe_cache(str(error)) from error
+                except PermissionError as error:
+                    raise _remove_permission(spec.id, error) from error
+                except OSError as error:
+                    raise _remove_disk(spec.id, error) from error
 
     def close(self) -> None:
         with self._lock:
-            if self._closed:
+            if self._closed and self._client is None:
                 return
             self._closed = True
             self._close_active_unlocked()
@@ -221,18 +241,33 @@ class ModelSessionManager:
             "runtime_filename": artifact.runtime_filename,
             "sha256": artifact.sha256,
             "size_bytes": artifact.size_bytes,
+            "inference_defaults": spec.inference_defaults.to_primitives(),
         }
 
     def _close_active_unlocked(self) -> None:
         client = self._client
+        if self._cleanup_spec is None:
+            self._cleanup_spec = self._active_spec
+            self._cleanup_ids = (
+                frozenset({self._active_spec.id})
+                if self._active_spec is not None
+                else frozenset()
+            )
         self._clear_active_unlocked()
         if client is not None:
             client.close()
+        self._clear_all_unlocked()
 
     def _clear_active_unlocked(self) -> None:
+        self._active_spec = None
+        self._active_result = None
+
+    def _clear_all_unlocked(self) -> None:
         self._client = None
         self._active_spec = None
         self._active_result = None
+        self._cleanup_spec = None
+        self._cleanup_ids = frozenset()
 
     def _require_open(self) -> None:
         if self._closed:
@@ -245,31 +280,8 @@ class ModelSessionManager:
             )
 
 
-def _validate_remove_target(root: Path, target: Path) -> None:
-    if not root.exists() and not root.is_symlink():
-        return
-    try:
-        root_info = root.lstat()
-    except OSError as error:
-        raise _unsafe_cache(
-            f"model cache root cannot be inspected: {type(error).__name__}"
-        ) from error
-    if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode):
-        raise _unsafe_cache("model cache root is not a real directory")
-    root_resolved = root.resolve(strict=True)
-    if not target.resolve(strict=False).is_relative_to(root_resolved):
-        raise _unsafe_cache("model removal target escapes the cache root")
-    current = target.parent
-    while current != root:
-        if current.exists() or current.is_symlink():
-            info = current.lstat()
-            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-                raise _unsafe_cache(
-                    "model cache namespace contains an unsafe component"
-                )
-            if not current.resolve(strict=True).is_relative_to(root_resolved):
-                raise _unsafe_cache("model cache namespace escapes the cache root")
-        current = current.parent
+def _after_remove_directory_bound(_bound: BoundModelDirectory) -> None:
+    """Test seam immediately after removal binds its exact model namespace."""
 
 
 def _preparation_error(detail: str) -> AppError:
@@ -279,6 +291,16 @@ def _preparation_error(detail: str) -> AppError:
         "error.model.preparation-invalid",
         detail,
         "choose-approved-model-options",
+    )
+
+
+def _cleanup_pending_error(model_id: str) -> AppError:
+    return AppError(
+        ErrorCode.SEGMENTATION_CLEANUP_FAILED,
+        "model-session",
+        "error.segmentation.cleanup-failed",
+        f"model {model_id!r} still has a cleanup handle; retry close first",
+        "retry-segmentation-cleanup",
     )
 
 
