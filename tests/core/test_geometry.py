@@ -353,6 +353,29 @@ def test_direct_interaction_geometry_rejects_arbitrary_mutable_transform() -> No
         )
 
 
+def test_interaction_geometry_rejects_mutable_media_transform_subclass() -> None:
+    class MutableMediaTransform(MediaTransform):
+        offset = 0.0
+
+        def source_to_widget(self, point: PointF) -> PointF:
+            mapped = super().source_to_widget(point)
+            return PointF(mapped.x + self.offset, mapped.y)
+
+    transform = MutableMediaTransform(SizeF(100, 100), SizeF(100, 100))
+    rectangles = {"target": RectF(1, 2, 24, 24)}
+
+    with pytest.raises(ValueError, match="transform"):
+        InteractionGeometry(
+            visual=rectangles,  # type: ignore[arg-type]
+            pointer_hit=rectangles,  # type: ignore[arg-type]
+            touch_hit=rectangles,  # type: ignore[arg-type]
+            focus=rectangles,  # type: ignore[arg-type]
+            accessible_screen=rectangles,  # type: ignore[arg-type]
+            transform=transform,
+            priority=("target",),
+        )
+
+
 @pytest.mark.parametrize(
     ("kwargs", "detail"),
     [

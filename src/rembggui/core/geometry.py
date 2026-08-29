@@ -17,10 +17,10 @@ from typing import Protocol, Self
 from PIL import Image
 
 from rembggui.core.errors import ErrorCode, ValidationError
-from rembggui.core.specs import MAX_FINAL_DIMENSION, FramingSpec
+from rembggui.core.specs import FramingSpec
 
 _ROTATIONS = frozenset({0, 90, 180, 270})
-_MAX_RGBA_ALLOCATION_BYTES = MAX_FINAL_DIMENSION * MAX_FINAL_DIMENSION * 4
+_MAX_IMAGE_ALLOCATION_BYTES = 1024 * 1024 * 1024
 _CROP_HANDLES = (
     "north_west",
     "north",
@@ -186,7 +186,7 @@ class FramingPlan:
 
     def __post_init__(self) -> None:
         source_size = _integer_size(self.source_size, "source canvas")
-        _validate_allocation_size(source_size, "source canvas allocation")
+        _validate_allocation_budget(source_size, 4, "source canvas")
         if not isinstance(self.padding, int) or isinstance(self.padding, bool):
             raise ValidationError(
                 ErrorCode.INVALID_FRAMING,
@@ -208,11 +208,17 @@ class FramingPlan:
             content_width, content_height = source_size
         padded_width = content_width + 2 * self.padding
         padded_height = content_height + 2 * self.padding
+        _validate_allocation_budget(
+            (content_width, content_height), 4, "cropped/premultiplied working image"
+        )
+        _validate_allocation_budget(
+            (padded_width, padded_height), 4, "padded working image"
+        )
         output_width = _round_positive_fraction(padded_width * stretch)
         output_size = FramingSpec().validate_final_dimensions(
             output_width, padded_height
         )
-        _validate_allocation_size(output_size, "framed output allocation")
+        _validate_allocation_budget(output_size, 4, "framed output")
         object.__setattr__(self, "source_size", source_size)
         object.__setattr__(self, "stretch_x", stretch)
         object.__setattr__(self, "output_size", output_size)
@@ -507,7 +513,7 @@ class InteractionGeometry:
             if not isinstance(value, Mapping):
                 raise ValueError(f"{name} must be a rectangle mapping")
             object.__setattr__(self, name, FrozenRectMap(value))
-        if not isinstance(self.transform, (MediaTransform, _TimelineTransform)):
+        if type(self.transform) not in {MediaTransform, _TimelineTransform}:
             raise ValueError("transform must be a frozen core coordinate transform")
         if isinstance(self.priority, str):
             raise ValueError("priority must be a sequence of target names")
@@ -723,7 +729,8 @@ def apply_source_crop(image: Image.Image, bounds: PixelBounds) -> Image.Image:
     """Crop one RGBA frame using exact half-open oriented-source bounds."""
     _validate_rgba(image)
     _validate_contained_bounds(bounds, image.size)
-    _validate_allocation_size((bounds.width, bounds.height), "crop allocation")
+    _validate_allocation_budget(image.size, 4, "source image")
+    _validate_allocation_budget((bounds.width, bounds.height), 4, "crop output")
     return image.crop((bounds.left, bounds.top, bounds.right, bounds.bottom))
 
 
@@ -732,7 +739,8 @@ def alpha_bounds(
 ) -> PixelBounds | None:
     """Return strict-threshold alpha bounds, or ``None`` for an empty mask."""
     _validate_rgba(image)
-    _validate_allocation_size(image.size, "alpha-mask allocation")
+    _validate_allocation_budget(image.size, 4, "alpha source image")
+    _validate_allocation_budget(image.size, 1, "alpha channel/mask")
     threshold = _percentage_fraction(threshold_percent)
     mask = image.getchannel("A").point(_alpha_threshold_table(threshold))
     bounds = mask.getbbox()
@@ -760,7 +768,8 @@ def union_alpha_bounds(
     expected_size: tuple[int, int] | None = None
     for image in iterator:
         _validate_rgba(image)
-        _validate_allocation_size(image.size, "alpha-union mask allocation")
+        _validate_allocation_budget(image.size, 4, "alpha-union source image")
+        _validate_allocation_budget(image.size, 1, "alpha-union channel/mask")
         if expected_size is None:
             expected_size = image.size
         elif image.size != expected_size:
@@ -792,7 +801,7 @@ def union_alpha_bounds(
 
 
 def apply_framing(image: Image.Image, plan: FramingPlan) -> Image.Image:
-    """Apply one preflighted crop/padding/stretch plan with one output allocation."""
+    """Apply one isolated, premultiplied crop/padding/stretch plan."""
     _validate_rgba(image)
     if not isinstance(plan, FramingPlan):
         raise ValidationError(
@@ -807,23 +816,30 @@ def apply_framing(image: Image.Image, plan: FramingPlan) -> Image.Image:
             "frame does not match the plan source canvas",
         )
     bounds = plan.content_bounds
-    padded_width, _ = plan.padded_size
-    output_width, output_height = plan.output_size
-    scale_x = padded_width / output_width
-    return image.transform(
-        (output_width, output_height),
-        Image.Transform.AFFINE,
-        (
-            scale_x,
-            0,
-            bounds.left - plan.padding,
-            0,
-            1,
-            bounds.top - plan.padding,
-        ),
-        resample=Image.Resampling.BICUBIC,
-        fillcolor=(0, 0, 0, 0),
-    )
+    cropped = image.crop((bounds.left, bounds.top, bounds.right, bounds.bottom))
+
+    if plan.output_size == plan.padded_size:
+        if not plan.padding:
+            return cropped
+        padded_rgba = Image.new("RGBA", plan.padded_size, (0, 0, 0, 0))
+        padded_rgba.paste(cropped, (plan.padding, plan.padding))
+        return padded_rgba
+
+    working = cropped.convert("RGBa")
+    del cropped
+
+    if plan.padding:
+        padded = Image.new("RGBa", plan.padded_size, (0, 0, 0, 0))
+        padded.paste(working, (plan.padding, plan.padding))
+        del working
+        working = padded
+
+    # Pillow resize uses center-aligned sampling:
+    # input_x = (output_x + 0.5) * padded_width / output_width - 0.5.
+    resized = working.resize(plan.output_size, Image.Resampling.BICUBIC)
+    del working
+    result = resized.convert("RGBA")
+    return result
 
 
 def solve_proportional_scale(
@@ -946,16 +962,15 @@ def _validate_contained_bounds(
         )
 
 
-def _validate_allocation_size(image_size: tuple[int, int], detail: str) -> None:
-    allocation_bytes = image_size[0] * image_size[1] * 4
-    if (
-        any(dimension > MAX_FINAL_DIMENSION for dimension in image_size)
-        or allocation_bytes > _MAX_RGBA_ALLOCATION_BYTES
-    ):
+def _validate_allocation_budget(
+    image_size: tuple[int, int], bytes_per_pixel: int, detail: str
+) -> None:
+    allocation_bytes = image_size[0] * image_size[1] * bytes_per_pixel
+    if allocation_bytes > _MAX_IMAGE_ALLOCATION_BYTES:
         raise ValidationError(
             ErrorCode.INVALID_FINAL_DIMENSIONS,
             "framing",
-            f"{detail} dimensions must not exceed 16383 pixels",
+            f"{detail} exceeds the 1073741824-byte allocation byte budget",
         )
 
 

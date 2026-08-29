@@ -41,6 +41,18 @@ def framing_plan(
     )
 
 
+def reference_framing(image: Image.Image, plan: FramingPlan) -> Image.Image:
+    bounds = plan.content_bounds
+    cropped = image.crop((bounds.left, bounds.top, bounds.right, bounds.bottom))
+    padded = Image.new(
+        "RGBA",
+        plan.padded_size,
+        (0, 0, 0, 0),
+    )
+    padded.alpha_composite(cropped, (plan.padding, plan.padding))
+    return padded.resize(plan.output_size, Image.Resampling.BICUBIC)
+
+
 def test_source_crop_uses_exact_half_open_pixel_bounds() -> None:
     image = rgba(4, 4)
     image.putpixel((1, 1), (255, 0, 0, 255))
@@ -189,6 +201,59 @@ def test_global_crop_precedes_equal_padding() -> None:
 
 
 @pytest.mark.parametrize(
+    ("content_width", "stretch_x"),
+    [(256, Decimal("0.5")), (128, Decimal("1.5"))],
+)
+def test_framing_matches_isolated_premultiplied_reference_for_resize(
+    content_width: int, stretch_x: Decimal
+) -> None:
+    source = Image.new("RGBA", (content_width + 4, 132), (255, 0, 0, 255))
+    bounds = PixelBounds(2, 2, content_width + 2, 130)
+    source.paste((20, 40, 200, 128), (2, 2, content_width + 2, 130))
+    plan = framing_plan(
+        *source.size,
+        global_bounds=bounds,
+        padding=2,
+        stretch_x=stretch_x,
+    )
+
+    actual = apply_framing(source, plan)
+    expected = reference_framing(source, plan)
+
+    assert actual.size == expected.size
+    assert actual.tobytes() == expected.tobytes()
+    assert all(
+        alpha == 0 or red < 100
+        for y in range(actual.height)
+        for x in range(actual.width)
+        for red, _green, _blue, alpha in (actual.getpixel((x, y)),)
+    )
+    alpha = actual.getchannel("A")
+    middle_row = [alpha.getpixel((x, actual.height // 2)) for x in range(actual.width)]
+    assert middle_row == list(reversed(middle_row))
+
+
+def test_no_stretch_crop_and_padding_have_exact_identity_placement() -> None:
+    source = Image.new("RGBA", (132, 132), (255, 0, 0, 255))
+    source.paste((10, 80, 220, 128), (2, 2, 130, 130))
+    plan = framing_plan(
+        132,
+        132,
+        global_bounds=PixelBounds(2, 2, 130, 130),
+        padding=2,
+    )
+
+    actual = apply_framing(source, plan)
+
+    assert actual.size == (132, 132)
+    assert actual.getpixel((0, 0)) == (0, 0, 0, 0)
+    assert actual.getpixel((1, 1)) == (0, 0, 0, 0)
+    assert actual.getpixel((2, 2)) == (10, 80, 220, 128)
+    assert actual.getpixel((129, 129)) == (10, 80, 220, 128)
+    assert actual.getpixel((130, 130)) == (0, 0, 0, 0)
+
+
+@pytest.mark.parametrize(
     ("width", "height", "bounds", "padding", "stretch"),
     [
         (128, 128, None, 0, Decimal("0.99")),
@@ -258,7 +323,7 @@ def test_framing_does_not_accumulate_outputs_or_retain_inputs() -> None:
     assert all(reference() is None for reference in output_references)
 
 
-def test_framing_fuses_large_padding_and_stretch_without_intermediate_allocation(
+def test_framing_allocates_only_preflighted_working_and_output_canvases(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     frame = rgba(16_000, 128)
@@ -269,7 +334,9 @@ def test_framing_fuses_large_padding_and_stretch_without_intermediate_allocation
         stretch_x=Decimal("0.01"),
     )
     allocated_sizes: list[tuple[int, int]] = []
+    resize_targets: list[tuple[int, int]] = []
     original_new = Image.new
+    original_resize = Image.Image.resize
 
     def observed_new(
         mode: str,
@@ -279,17 +346,24 @@ def test_framing_fuses_large_padding_and_stretch_without_intermediate_allocation
         allocated_sizes.append(size)
         return original_new(mode, size, color)
 
-    def forbidden_resize(*args: object, **kwargs: object) -> object:
-        raise AssertionError("resize intermediate was allocated")
+    def observed_resize(
+        image: Image.Image,
+        size: tuple[int, int],
+        *args: object,
+        **kwargs: object,
+    ) -> Image.Image:
+        resize_targets.append(size)
+        return original_resize(image, size, *args, **kwargs)
 
     monkeypatch.setattr(Image, "new", observed_new)
-    monkeypatch.setattr(Image.Image, "resize", forbidden_resize)
+    monkeypatch.setattr(Image.Image, "resize", observed_resize)
 
     framed = apply_framing(frame, plan)
 
     assert plan.output_size == (162, 328)
     assert framed.size == (162, 328)
-    assert allocated_sizes == [(162, 328)]
+    assert (16_200, 328) in allocated_sizes
+    assert resize_targets == [(162, 328)]
 
 
 def test_invalid_plan_performs_no_pillow_allocation(
@@ -313,35 +387,62 @@ def test_invalid_plan_performs_no_pillow_allocation(
     assert allocations == 0
 
 
-def test_plan_rejects_oversized_source_even_when_global_crop_is_small() -> None:
+def test_plan_accepts_large_source_axis_when_byte_budget_and_output_are_safe() -> None:
+    plan = framing_plan(
+        16_384,
+        1,
+        global_bounds=PixelBounds(0, 0, 128, 1),
+        padding=64,
+    )
+
+    assert plan.source_size == (16_384, 1)
+    assert plan.output_size == (256, 129)
+
+
+def test_alpha_bounds_accepts_large_axis_when_mask_bytes_are_safe() -> None:
+    image = rgba(16_384, 1)
+    image.putpixel((16_383, 0), (255, 255, 255, 255))
+
+    assert alpha_bounds(image, Decimal("2")) == PixelBounds(
+        16_383, 0, 16_384, 1
+    )
+
+
+def test_plan_rejects_excessive_source_bytes_without_allocating_an_image() -> None:
     with pytest.raises(ValidationError) as exc:
         framing_plan(
-            16_384,
-            128,
-            global_bounds=PixelBounds(0, 0, 128, 128),
+            268_435_457,
+            1,
+            global_bounds=PixelBounds(0, 0, 128, 1),
+            padding=64,
         )
 
     assert exc.value.code is ErrorCode.INVALID_FINAL_DIMENSIONS
+    assert "byte budget" in exc.value.technical_detail
 
 
-def test_alpha_bounds_preflights_mask_allocation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    image = rgba(16_384, 1)
-    allocations = 0
-
-    def counted(*args: object, **kwargs: object) -> object:
-        nonlocal allocations
-        allocations += 1
-        raise AssertionError("alpha channel allocated before preflight")
-
-    monkeypatch.setattr(Image.Image, "getchannel", counted)
-
+def test_plan_rejects_excessive_padded_working_bytes_before_output_math() -> None:
     with pytest.raises(ValidationError) as exc:
-        alpha_bounds(image, Decimal("2"))
+        framing_plan(
+            200_000_000,
+            1,
+            padding=64,
+            stretch_x=Decimal("0.000001"),
+        )
 
     assert exc.value.code is ErrorCode.INVALID_FINAL_DIMENSIONS
-    assert allocations == 0
+    assert "padded working image" in exc.value.technical_detail
+    assert "byte budget" in exc.value.technical_detail
+
+
+def test_final_output_still_enforces_webp_axis_cap_independently() -> None:
+    with pytest.raises(ValidationError) as exc:
+        framing_plan(128, 128, stretch_x=Decimal("128"))
+
+    assert exc.value.code is ErrorCode.INVALID_FINAL_DIMENSIONS
+    assert exc.value.technical_detail == (
+        "final dimensions must each be between 128 and 16383 pixels"
+    )
 
 
 @pytest.mark.parametrize(
