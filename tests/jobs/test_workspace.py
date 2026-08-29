@@ -128,52 +128,80 @@ class _ExclusiveWindowsCutsApi:
         self,
         cuts_root: Path,
         *,
-        reject_descendant_rebinds: bool,
         fail_journal_replace: bool = False,
     ) -> None:
         self.cuts_root = cuts_root
-        self.reject_descendant_rebinds = reject_descendant_rebinds
         self.fail_journal_replace = fail_journal_replace
         self.handle_paths: dict[int, Path] = {}
-        self.root_handles: set[int] = set()
+        self.handle_opens: dict[int, tuple[tuple[int, int], int, int]] = {}
         self.next_handle = 200
         self.sharing_violations: list[Path] = []
 
-    @property
-    def root_is_bound(self) -> bool:
-        return bool(self.root_handles)
-
     def bind_root(self) -> int:
-        if self.root_is_bound:
-            self.sharing_violations.append(self.cuts_root)
-            raise OSError(32, "synthetic Windows sharing violation")
-        return self._new_handle(self.cuts_root, root=True)
+        return self.open_directory(
+            self.cuts_root,
+            desired_access=0x80000000 | 0x40000000,
+            share_mode=0x00000001,
+            flags=0,
+        )
 
-    def reject_path_rebind(self, path: Path) -> None:
-        if not self.root_is_bound:
-            return
-        if path == self.cuts_root or (
-            self.reject_descendant_rebinds and self.cuts_root in path.parents
-        ):
-            self.sharing_violations.append(path)
-            raise OSError(32, "synthetic Windows sharing violation")
+    @staticmethod
+    def _share_allows(share_mode: int, desired_access: int) -> bool:
+        return bool(
+            (not desired_access & 0x80000000 or share_mode & 0x00000001)
+            and (not desired_access & 0x40000000 or share_mode & 0x00000002)
+            and (not desired_access & 0x00010000 or share_mode & 0x00000004)
+        )
 
-    def _new_handle(self, path: Path, *, root: bool = False) -> int:
+    def open_directory(
+        self,
+        path: Path,
+        *,
+        desired_access: int,
+        share_mode: int,
+        flags: int,
+    ) -> int:
+        del flags
+        info = path.stat()
+        identity = (info.st_dev, info.st_ino)
+        for (
+            existing_identity,
+            existing_access,
+            existing_share,
+        ) in self.handle_opens.values():
+            if existing_identity != identity:
+                continue
+            if not self._share_allows(
+                existing_share, desired_access
+            ) or not self._share_allows(share_mode, existing_access):
+                self.sharing_violations.append(path)
+                raise OSError(32, "synthetic Windows sharing violation")
         handle = self.next_handle
         self.next_handle += 1
         self.handle_paths[handle] = path
-        if root:
-            self.root_handles.add(handle)
+        self.handle_opens[handle] = (identity, desired_access, share_mode)
         return handle
 
     def open_child_directory(
-        self, parent: int, name: str, *, create: bool, **_kwargs: object
+        self,
+        parent: int,
+        name: str,
+        *,
+        create: bool,
+        desired_access: int,
+        share_mode: int,
+        flags: int,
     ) -> int:
         assert create is False
         path = self.handle_paths[parent] / name
         if not path.is_dir():
             raise FileNotFoundError(path)
-        return self._new_handle(path)
+        return self.open_directory(
+            path,
+            desired_access=desired_access,
+            share_mode=share_mode,
+            flags=flags,
+        )
 
     def file_attributes(self, handle: int) -> int:
         from rembggui.jobs.models import cache_fs
@@ -185,7 +213,7 @@ class _ExclusiveWindowsCutsApi:
         return attributes
 
     def close_handle(self, handle: int) -> None:
-        self.root_handles.discard(handle)
+        del self.handle_opens[handle]
         del self.handle_paths[handle]
 
     def lstat_at(self, handle: int, name: str) -> os.stat_result:
@@ -238,12 +266,10 @@ def _install_exclusive_windows_cuts_api(
     monkeypatch: pytest.MonkeyPatch,
     cuts_root: Path,
     *,
-    reject_descendant_rebinds: bool,
     fail_journal_replace: bool = False,
 ) -> _ExclusiveWindowsCutsApi:
     api = _ExclusiveWindowsCutsApi(
         cuts_root,
-        reject_descendant_rebinds=reject_descendant_rebinds,
         fail_journal_replace=fail_journal_replace,
     )
     original_open = workspace_module._BoundDirectory.open
@@ -251,12 +277,41 @@ def _install_exclusive_windows_cuts_api(
     def injected_open(
         cls: type[workspace_module._BoundDirectory], path: Path
     ) -> workspace_module._BoundDirectory:
-        api.reject_path_rebind(path)
-        if path == cuts_root:
+        if path == cuts_root or cuts_root in path.parents:
+            relative_parts = path.relative_to(cuts_root).parts
+            handles: list[int] = []
+            try:
+                handle = api.open_directory(
+                    cuts_root,
+                    desired_access=(
+                        0x80000000 if relative_parts else 0x80000000 | 0x40000000
+                    ),
+                    share_mode=0x00000001,
+                    flags=0x02000000 | 0x00200000,
+                )
+                handles.append(handle)
+                for index, component in enumerate(relative_parts):
+                    handle = api.open_child_directory(
+                        handle,
+                        component,
+                        create=False,
+                        desired_access=(
+                            0x80000000 | 0x40000000
+                            if index == len(relative_parts) - 1
+                            else 0x80000000
+                        ),
+                        share_mode=0x00000001,
+                        flags=0x02000000 | 0x00200000,
+                    )
+                    handles.append(handle)
+            except BaseException:
+                for opened in reversed(handles):
+                    api.close_handle(opened)
+                raise
             return cls(
                 path,
                 None,
-                windows_handles=(api.bind_root(),),
+                windows_handles=tuple(handles),
                 windows_api=api,
             )
         return original_open(path)
@@ -265,6 +320,142 @@ def _install_exclusive_windows_cuts_api(
         workspace_module._BoundDirectory, "open", classmethod(injected_open)
     )
     return api
+
+
+def test_windows_share_fake_checks_existing_share_before_granting_new_write(
+    tmp_path: Path,
+) -> None:
+    cuts_root = tmp_path / "cuts"
+    child = cuts_root / "candidate"
+    child.mkdir(parents=True)
+    api = _ExclusiveWindowsCutsApi(cuts_root)
+    root_handle = api.bind_root()
+    api.open_child_directory(
+        root_handle,
+        child.name,
+        create=False,
+        desired_access=0x80000000,
+        share_mode=0x00000001,
+        flags=0,
+    )
+
+    with pytest.raises(OSError, match="sharing violation"):
+        api.open_child_directory(
+            root_handle,
+            child.name,
+            create=False,
+            desired_access=0x80000000 | 0x40000000,
+            share_mode=0x00000001 | 0x00000002,
+            flags=0,
+        )
+
+
+def test_windows_share_fake_checks_new_share_against_existing_write(
+    tmp_path: Path,
+) -> None:
+    cuts_root = tmp_path / "cuts"
+    child = cuts_root / "candidate"
+    child.mkdir(parents=True)
+    api = _ExclusiveWindowsCutsApi(cuts_root)
+    root_handle = api.bind_root()
+    api.open_child_directory(
+        root_handle,
+        child.name,
+        create=False,
+        desired_access=0x80000000 | 0x40000000,
+        share_mode=0x00000001 | 0x00000002,
+        flags=0,
+    )
+
+    with pytest.raises(OSError, match="sharing violation"):
+        api.open_child_directory(
+            root_handle,
+            child.name,
+            create=False,
+            desired_access=0x80000000,
+            share_mode=0x00000001,
+            flags=0,
+        )
+
+
+def test_windows_share_fake_distinguishes_ancestor_from_same_child_object(
+    tmp_path: Path,
+) -> None:
+    cuts_root = tmp_path / "cuts"
+    child = cuts_root / "candidate"
+    child.mkdir(parents=True)
+    (child / "proof.txt").write_text("bound child", encoding="utf-8")
+    api = _ExclusiveWindowsCutsApi(cuts_root)
+    root_handle = api.bind_root()
+
+    child_handle = api.open_child_directory(
+        root_handle,
+        child.name,
+        create=False,
+        desired_access=0x80000000 | 0x40000000,
+        share_mode=0x00000001,
+        flags=0,
+    )
+
+    assert [
+        name for name, _info in api.iter_entries_at(child_handle, max_entries=2)
+    ] == ["proof.txt"]
+    with pytest.raises(OSError, match="sharing violation"):
+        api.open_child_directory(
+            root_handle,
+            child.name,
+            create=False,
+            desired_access=0x80000000,
+            share_mode=0x00000001,
+            flags=0,
+        )
+
+
+def test_windows_share_fake_close_removes_only_that_open_record(tmp_path: Path) -> None:
+    cuts_root = tmp_path / "cuts"
+    child = cuts_root / "candidate"
+    child.mkdir(parents=True)
+    api = _ExclusiveWindowsCutsApi(cuts_root)
+    root_handle = api.bind_root()
+    read_handle = api.open_child_directory(
+        root_handle,
+        child.name,
+        create=False,
+        desired_access=0x80000000,
+        share_mode=0x00000001 | 0x00000002,
+        flags=0,
+    )
+    write_handle = api.open_child_directory(
+        root_handle,
+        child.name,
+        create=False,
+        desired_access=0x80000000 | 0x40000000,
+        share_mode=0x00000001,
+        flags=0,
+    )
+
+    api.close_handle(read_handle)
+
+    with pytest.raises(OSError, match="sharing violation"):
+        api.open_child_directory(
+            root_handle,
+            child.name,
+            create=False,
+            desired_access=0x80000000,
+            share_mode=0x00000001,
+            flags=0,
+        )
+
+    api.close_handle(write_handle)
+    reopened = api.open_child_directory(
+        root_handle,
+        child.name,
+        create=False,
+        desired_access=0x80000000,
+        share_mode=0x00000001,
+        flags=0,
+    )
+    assert api.file_attributes(reopened) & 0x00000010
 
 
 def test_manifest_is_deeply_immutable_strict_and_deterministic(tmp_path: Path) -> None:
@@ -1228,7 +1419,6 @@ def test_windows_promotion_reuses_exclusive_cuts_binding(
     api = _install_exclusive_windows_cuts_api(
         monkeypatch,
         old.cuts_root,
-        reject_descendant_rebinds=True,
     )
 
     promoted = promote_cut_set(replacement, manifest)
@@ -1247,7 +1437,6 @@ def test_windows_journal_failure_cleans_stage_through_exclusive_cuts_binding(
     api = _install_exclusive_windows_cuts_api(
         monkeypatch,
         old.cuts_root,
-        reject_descendant_rebinds=False,
         fail_journal_replace=True,
     )
 

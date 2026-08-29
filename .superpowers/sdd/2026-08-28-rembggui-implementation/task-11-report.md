@@ -164,13 +164,14 @@ Final review-fix focused GREEN, including the model-cache native handle suite:
 
 ### Review fix round 5 RED/GREEN
 
-The fifth review found two Windows lifecycle gaps. The focused RED modeled
-Windows' bidirectional share checks and proved that promotion reopened the
-write-bound `cuts` directory for journal and cleanup work, so an ordinary
-promotion could fail with a sharing violation and a journal failure could leave
-its stage behind. It also dropped the last strong reference to an inline
-bound-directory context after a persistent `CloseHandle` failure, proving that
-the failed handle had no external retry owner.
+The fifth review found two Windows lifecycle gaps. The focused RED injected a
+sharing violation whenever promotion lexically rebound the active `cuts`
+directory or, in its strict mode, a descendant. That path oracle proved that
+journal and cleanup work still attempted competing path bindings, but it did not
+itself model Windows' bidirectional access/share compatibility. A journal failure
+could leave its stage behind. The RED also dropped the last strong reference to
+an inline bound-directory context after a persistent `CloseHandle` failure,
+proving that the failed handle had no external retry owner.
 
 ```text
 .venv/bin/pytest -q tests/jobs/test_workspace.py -k \
@@ -178,10 +179,10 @@ the failed handle had no external retry owner.
 4 failed, 84 deselected in 0.44s
 ```
 
-The GREEN tests force the exclusive Windows binding for a normal replacement
-and for initial-journal failure, verify zero competing path rebinds, complete
-stage removal, and byte-identical retention of the old valid cut. Persistent
-close failure remains externally reachable across traceback removal and garbage
+The initial GREEN tests forced that path-oracle binding for a normal replacement
+and for initial-journal failure, verified zero rejected rebinds, complete stage
+removal, and byte-identical retention of the old valid cut. Persistent close
+failure remains externally reachable across traceback removal and garbage
 collection; explicit drains report a structured failure while the handle still
 cannot close, and release it after the injected transient condition clears. A
 capacity test proves the registry bound and its explicit overflow ownership.
@@ -189,6 +190,35 @@ capacity test proves the registry bound and its explicit overflow ownership.
 ```text
 .venv/bin/pytest -q tests/jobs/test_workspace.py tests/jobs/models/test_cache_fs.py
 121 passed in 1.37s
+```
+
+### Round 5 sharing-evidence correction RED/GREEN
+
+Four meta-tests then challenged the Windows test double itself. They independently
+exercise both share-check directions in opposite open orders, distinguish a
+write-bound ancestor from a separately named child while rejecting an
+incompatible second open of that same child, and prove that `CloseHandle` removes
+only its own open record. All four failed because the old path oracle ignored the
+requested access and share masks.
+
+```text
+.venv/bin/pytest -q tests/jobs/test_workspace.py -k 'windows_share_fake'
+4 failed, 88 deselected in 0.23s
+```
+
+The corrected fake keys active opens by the existing directory's filesystem
+identity and applies both Windows compatibility conditions: every existing share
+must allow the new requested access, and the new share must allow every existing
+granted access. Ancestor and child identities do not conflict merely because one
+path contains the other. Closing a handle removes exactly its corresponding
+identity/access/share record. Under that stricter model, normal promotion and
+initial-journal-failure cleanup still perform no incompatible second open, remove
+the failed stage, and preserve the previous valid cut.
+
+```text
+.venv/bin/pytest -q tests/jobs/test_workspace.py -k \
+  'windows_share_fake or windows_promotion_reuses_exclusive or windows_journal_failure_cleans_stage'
+6 passed, 86 deselected in 0.23s
 ```
 
 ## Architecture and safety decisions
@@ -315,8 +345,8 @@ not replace its code, including `JOB_CANCELLED`.
 
 ## Verification
 
-- Focused Task 11 plus native handle suite: `121 passed in 1.37s`.
-- Permitted full suite: `810 passed in 45.82s`.
+- Focused Task 11 plus native handle suite: `125 passed in 1.27s`.
+- Permitted full suite: `815 passed in 43.85s`.
 - `.venv/bin/ruff check .` — passed.
 - `.venv/bin/mypy src` — passed for 28 source files.
 - Ruff format check over Task 11 Python files — passed.
