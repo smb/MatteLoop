@@ -117,6 +117,17 @@ def test_direct_catalog_construction_cannot_retain_mutable_collections() -> None
     )
 
 
+def test_direct_catalog_construction_maps_a_malformed_id_element() -> None:
+    original = ModelCatalog.load_resource()
+    ids = list(original.ids)
+    ids[0] = ["u2net"]  # type: ignore[list-item]
+
+    with pytest.raises(AppError) as exc:
+        ModelCatalog(original.rembg_version, original.default_id, ids, original.specs)  # type: ignore[arg-type]
+
+    assert exc.value.code is ErrorCode.MODEL_MANIFEST_INVALID
+
+
 def test_direct_catalog_construction_rejects_a_hidden_former_id() -> None:
     original = ModelCatalog.load_resource()
     specs = dict(original.specs)
@@ -128,6 +139,115 @@ def test_direct_catalog_construction_rejects_a_hidden_former_id() -> None:
 
     with pytest.raises(AppError) as exc:
         ModelCatalog(original.rembg_version, original.default_id, ids, specs)
+
+    assert exc.value.code is ErrorCode.MODEL_MANIFEST_INVALID
+
+
+def test_direct_catalog_construction_rejects_a_former_upstream_alias() -> None:
+    original = ModelCatalog.load_resource()
+    specs = dict(original.specs)
+    specs["u2net"] = replace(
+        original.get("u2net"),
+        upstream_id="withoutbg",
+    )
+
+    with pytest.raises(AppError) as exc:
+        ModelCatalog(original.rembg_version, original.default_id, original.ids, specs)
+
+    assert exc.value.code is ErrorCode.MODEL_MANIFEST_INVALID
+
+
+def test_direct_catalog_construction_rejects_a_custom_artifact_url() -> None:
+    original = ModelCatalog.load_resource()
+    specs = dict(original.specs)
+    spec = original.get("u2net")
+    assert spec.artifact is not None
+    specs[spec.id] = replace(
+        spec,
+        artifact=replace(
+            spec.artifact,
+            url="https://provider.example/u2net.onnx",
+        ),
+    )
+
+    with pytest.raises(AppError) as exc:
+        ModelCatalog(original.rembg_version, original.default_id, original.ids, specs)
+
+    assert exc.value.code is ErrorCode.MODEL_MANIFEST_INVALID
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        (
+            "url",
+            "https://github.com/danielgatis/rembg/releases/download/v0.0.1/u2net.onnx",
+        ),
+        ("url", object()),
+        ("runtime_filename", "custom.onnx"),
+        ("size_bytes", True),
+        ("size_bytes", 0),
+        ("sha256", "0" * 63),
+        ("upstream_checksum", "md5:" + "0" * 31),
+    ],
+)
+def test_direct_catalog_construction_rejects_malformed_artifact_fields(
+    field: str, value: object
+) -> None:
+    original = ModelCatalog.load_resource()
+    specs = dict(original.specs)
+    spec = original.get("u2net")
+    assert spec.artifact is not None
+    artifact = replace(spec.artifact, **{field: value})
+    specs[spec.id] = replace(spec, artifact=artifact)
+
+    with pytest.raises(AppError) as exc:
+        ModelCatalog(original.rembg_version, original.default_id, original.ids, specs)
+
+    assert exc.value.code is ErrorCode.MODEL_MANIFEST_INVALID
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("display_name", ""),
+        ("purpose", object()),
+        ("execution_class", "local"),
+        ("required_inputs", []),
+        ("edge_modes", ()),
+        ("edge_modes", ("standard", "standard")),
+        ("edge_modes", ("provider",)),
+        ("supports_render", 1),
+        ("license_note", ""),
+        ("privacy_note", object()),
+        ("warning", None),
+    ],
+)
+def test_direct_catalog_construction_rejects_malformed_spec_fields(
+    field: str, value: object
+) -> None:
+    original = ModelCatalog.load_resource()
+    specs = dict(original.specs)
+    spec = original.get("u2net")
+    specs[spec.id] = replace(spec, **{field: value})
+
+    with pytest.raises(AppError) as exc:
+        ModelCatalog(original.rembg_version, original.default_id, original.ids, specs)
+
+    assert exc.value.code is ErrorCode.MODEL_MANIFEST_INVALID
+
+
+def test_direct_catalog_construction_rejects_a_stringly_typed_cloth_default() -> None:
+    original = ModelCatalog.load_resource()
+    specs = dict(original.specs)
+    cloth = original.get("u2net_cloth_seg")
+    specs[cloth.id] = replace(
+        cloth,
+        inference_defaults=InferenceDefaults("full"),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(AppError) as exc:
+        ModelCatalog(original.rembg_version, original.default_id, original.ids, specs)
 
     assert exc.value.code is ErrorCode.MODEL_MANIFEST_INVALID
 

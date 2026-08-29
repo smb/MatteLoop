@@ -298,15 +298,46 @@ def test_unknown_former_model_id_starts_no_download_or_client(
 ) -> None:
     manager, downloader, clients, _events = _manager(tmp_path)
     manager.prepare("u2net", {})
+    legacy_extras = {
+        "api_" + "key": "unused",
+        "per_job_" + "consent": True,
+    }
 
     with pytest.raises(AppError) as exc:
-        manager.prepare("withoutbg", {})
+        manager.prepare("withoutbg", legacy_extras)
 
     assert exc.value.code is ErrorCode.MODEL_NOT_FOUND
     assert downloader.calls == ["u2net"]
     assert len(clients) == 1
     assert clients[0].closes == 0
     assert manager.active_id == "u2net"
+
+
+def test_unknown_former_model_id_precedes_cleanup_pending_and_preserves_state(
+    tmp_path: Path,
+) -> None:
+    manager, downloader, clients, events = _manager(tmp_path)
+    manager.prepare("u2net", {})
+    clients[0].fail_replace = RuntimeError("replacement failed")
+    clients[0].close_failures = 1
+    with pytest.raises(AppError) as cleanup:
+        manager.prepare("u2netp", {})
+    assert cleanup.value.code is ErrorCode.SEGMENTATION_CLEANUP_FAILED
+    calls_before = list(downloader.calls)
+    events_before = list(events)
+
+    with pytest.raises(AppError) as exc:
+        manager.prepare(
+            "withoutbg",
+            {"api_" + "key": "unused", "per_job_" + "consent": True},
+        )
+
+    assert exc.value.code is ErrorCode.MODEL_NOT_FOUND
+    assert downloader.calls == calls_before
+    assert events == events_before
+    assert len(clients) == 1
+    assert manager.active_id is None
+    assert manager.cleanup_pending_id == "u2net"
 
 
 @pytest.mark.parametrize(

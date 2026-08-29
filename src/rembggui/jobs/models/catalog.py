@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
-from typing import NoReturn
+from typing import NoReturn, cast
 from urllib.parse import unquote, urlsplit
 
 from rembggui.core.errors import AppError, ErrorCode
@@ -126,12 +126,22 @@ class ModelCatalog:
     specs: Mapping[str, ModelSpec]
 
     def __post_init__(self) -> None:
+        if type(self.rembg_version) is not str:
+            raise _manifest_error("catalog rembg version must be a string")
+        if type(self.default_id) is not str:
+            raise _manifest_error("catalog default must be a string")
+        if type(self.ids) not in (list, tuple):
+            raise _manifest_error("catalog IDs must be an array")
+        if not isinstance(self.specs, Mapping):
+            raise _manifest_error("catalog specifications must be a mapping")
         ids = tuple(self.ids)
         specs = dict(self.specs)
         if self.rembg_version != _PINNED_REMBG_VERSION:
             raise _manifest_error("catalog rembg version is not the app pin")
         if self.default_id != _DEFAULT_ID:
             raise _manifest_error("catalog default is not the approved default")
+        if any(type(model_id) is not str for model_id in ids):
+            raise _manifest_error("catalog IDs must be strings")
         if (
             len(ids) != len(_APPROVED_IDS)
             or len(set(ids)) != len(ids)
@@ -142,7 +152,7 @@ class ModelCatalog:
         for model_id, spec in specs.items():
             if type(spec) is not ModelSpec or spec.id != model_id:
                 raise _manifest_error("catalog model key and specification mismatch")
-            _validate_model_invariants(spec)
+            _validate_model_spec(spec)
         object.__setattr__(self, "ids", ids)
         object.__setattr__(self, "specs", MappingProxyType(specs))
 
@@ -239,12 +249,7 @@ def _parse_model(value: object) -> ModelSpec:
     if type(value) is not dict:
         raise _manifest_error("each model entry must be an object")
     _exact_keys(value, _MODEL_FIELDS, "model entry")
-    model_id = _strict_string(value, "id")
-    if _ID_PATTERN.fullmatch(model_id) is None or model_id not in _APPROVED_IDS:
-        raise _manifest_error("model entry has an unknown or malformed ID")
-    upstream_id = _strict_string(value, "upstream_id")
-    if upstream_id != model_id:
-        raise _manifest_error("model upstream ID must match the approved public ID")
+    model_id = _validate_model_id(value["id"])
     try:
         execution_class = ExecutionClass(_strict_string(value, "execution_class"))
     except ValueError as error:
@@ -260,25 +265,22 @@ def _parse_model(value: object) -> ModelSpec:
     edge_modes = _string_tuple(value, "edge_modes", allowed=_EDGE_MODES)
     if not edge_modes or len(set(edge_modes)) != len(edge_modes):
         raise _manifest_error("model edge modes must be unique and non-empty")
-    supports_render = value["supports_render"]
-    if type(supports_render) is not bool:
-        raise _manifest_error("model supports_render must be a boolean")
     spec = ModelSpec(
         id=model_id,
-        display_name=_strict_string(value, "display_name"),
-        upstream_id=upstream_id,
-        purpose=_strict_string(value, "purpose"),
+        display_name=cast(str, value["display_name"]),
+        upstream_id=cast(str, value["upstream_id"]),
+        purpose=cast(str, value["purpose"]),
         execution_class=execution_class,
         artifact=artifact,
         inference_defaults=inference_defaults,
         required_inputs=required_inputs,
         edge_modes=edge_modes,
-        supports_render=supports_render,
-        license_note=_strict_string(value, "license_note"),
-        privacy_note=_strict_string(value, "privacy_note"),
-        warning=_strict_string(value, "warning", allow_empty=True),
+        supports_render=cast(bool, value["supports_render"]),
+        license_note=cast(str, value["license_note"]),
+        privacy_note=cast(str, value["privacy_note"]),
+        warning=cast(str, value["warning"]),
     )
-    _validate_model_invariants(spec)
+    _validate_model_spec(spec)
     return spec
 
 
@@ -300,14 +302,69 @@ def _parse_artifact(value: object, model_id: str) -> ModelArtifact:
     if type(value) is not dict:
         raise _manifest_error("model artifact must be an object or null")
     _exact_keys(value, _ARTIFACT_FIELDS, "model artifact")
-    url = _strict_string(value, "url")
-    split = urlsplit(url)
+    artifact = ModelArtifact(
+        url=cast(str, value["url"]),
+        runtime_filename=cast(str, value["runtime_filename"]),
+        size_bytes=cast(int, value["size_bytes"]),
+        sha256=cast(str, value["sha256"]),
+        upstream_checksum=cast(str, value["upstream_checksum"]),
+    )
+    _validate_model_artifact(artifact, model_id)
+    return artifact
+
+
+def _validate_model_spec(spec: ModelSpec) -> None:
+    if type(spec) is not ModelSpec:
+        raise _manifest_error("catalog model specification has an invalid type")
+    model_id = _validate_model_id(spec.id)
+    _bounded_string(spec.display_name, "display_name")
+    upstream_id = _bounded_string(spec.upstream_id, "upstream_id")
+    if upstream_id != model_id:
+        raise _manifest_error("model upstream ID must match the approved public ID")
+    _bounded_string(spec.purpose, "purpose")
+    if type(spec.execution_class) is not ExecutionClass:
+        raise _manifest_error("model execution class is invalid")
+    if spec.artifact is not None:
+        _validate_model_artifact(spec.artifact, model_id)
+    if type(spec.inference_defaults) is not InferenceDefaults:
+        raise _manifest_error("model inference defaults have an invalid type")
+    category = spec.inference_defaults.cloth_category
+    if category is not None and type(category) is not ClothCategory:
+        raise _manifest_error("cloth category default is invalid")
+    _validate_string_tuple(spec.required_inputs, "required_inputs", allowed=None)
+    _validate_string_tuple(spec.edge_modes, "edge_modes", allowed=_EDGE_MODES)
+    if not spec.edge_modes:
+        raise _manifest_error("model edge modes must be non-empty")
+    if type(spec.supports_render) is not bool:
+        raise _manifest_error("model supports_render must be a boolean")
+    _bounded_string(spec.license_note, "license_note")
+    _bounded_string(spec.privacy_note, "privacy_note")
+    _bounded_string(spec.warning, "warning", allow_empty=True)
+    _validate_model_invariants(spec)
+
+
+def _validate_model_id(value: object) -> str:
+    model_id = _bounded_string(value, "id")
+    if _ID_PATTERN.fullmatch(model_id) is None or model_id not in _APPROVED_IDS:
+        raise _manifest_error("model entry has an unknown or malformed ID")
+    return model_id
+
+
+def _validate_model_artifact(artifact: object, model_id: str) -> None:
+    if type(artifact) is not ModelArtifact:
+        raise _manifest_error("model artifact has an invalid type")
+    url = _bounded_string(artifact.url, "url")
+    try:
+        split = urlsplit(url)
+        port = split.port
+    except ValueError as error:
+        raise _manifest_error("model artifact URL is malformed") from error
     if (
         split.scheme != "https"
         or split.hostname != "github.com"
         or split.username is not None
         or split.password is not None
-        or split.port is not None
+        or port is not None
         or split.query
         or split.fragment
         or not split.path.startswith(_RELEASE_PATH_PREFIX)
@@ -317,30 +374,27 @@ def _parse_artifact(value: object, model_id: str) -> ModelArtifact:
         or "/" in split.path[len(_RELEASE_PATH_PREFIX) :]
     ):
         raise _manifest_error("model artifact URL is outside the pinned HTTPS release")
-    runtime_filename = _strict_string(value, "runtime_filename")
+    runtime_filename = _bounded_string(artifact.runtime_filename, "runtime_filename")
     if (
         _FILENAME_PATTERN.fullmatch(runtime_filename) is None
         or runtime_filename != f"{model_id}.onnx"
     ):
         raise _manifest_error("model artifact runtime filename is unsafe or mismatched")
-    size_bytes = _strict_int(value, "size_bytes", minimum=1)
-    if size_bytes > 2 * 1024 * 1024 * 1024:
-        raise _manifest_error("model artifact exceeds the supported size bound")
-    sha256 = _strict_string(value, "sha256")
+    size_bytes = artifact.size_bytes
+    if (
+        type(size_bytes) is not int
+        or size_bytes < 1
+        or size_bytes > 2 * 1024 * 1024 * 1024
+    ):
+        raise _manifest_error("model artifact size is outside the supported bound")
+    sha256 = _bounded_string(artifact.sha256, "sha256")
     if _SHA256_PATTERN.fullmatch(sha256) is None:
         raise _manifest_error("model artifact SHA-256 is malformed")
-    upstream_checksum = _strict_string(value, "upstream_checksum")
+    upstream_checksum = _bounded_string(artifact.upstream_checksum, "upstream_checksum")
     if _UPSTREAM_CHECKSUM_PATTERN.fullmatch(upstream_checksum) is None:
         raise _manifest_error(
             "model artifact upstream checksum provenance is malformed"
         )
-    return ModelArtifact(
-        url=url,
-        runtime_filename=runtime_filename,
-        size_bytes=size_bytes,
-        sha256=sha256,
-        upstream_checksum=upstream_checksum,
-    )
 
 
 def _validate_model_invariants(spec: ModelSpec) -> None:
@@ -379,22 +433,32 @@ def _string_tuple(
     value = payload[key]
     if type(value) is not list or len(value) > 16:
         raise _manifest_error(f"{key} must be a bounded array")
-    result: list[str] = []
+    result = tuple(value)
+    _validate_string_tuple(result, key, allowed=allowed)
+    return cast(tuple[str, ...], result)
+
+
+def _validate_string_tuple(
+    value: object, key: str, *, allowed: frozenset[str] | None
+) -> None:
+    if type(value) is not tuple or len(value) > 16:
+        raise _manifest_error(f"{key} must be a bounded tuple")
     for item in value:
         if type(item) is not str or not item or len(item) > 64:
             raise _manifest_error(f"{key} must contain bounded non-empty strings")
         if allowed is not None and item not in allowed:
             raise _manifest_error(f"{key} contains an unsupported value")
-        result.append(item)
-    if len(set(result)) != len(result):
+    if len(set(value)) != len(value):
         raise _manifest_error(f"{key} values must be unique")
-    return tuple(result)
 
 
 def _strict_string(
     payload: dict[str, object], key: str, *, allow_empty: bool = False
 ) -> str:
-    value = payload.get(key)
+    return _bounded_string(payload.get(key), key, allow_empty=allow_empty)
+
+
+def _bounded_string(value: object, key: str, *, allow_empty: bool = False) -> str:
     if type(value) is not str or len(value) > 2048 or (not allow_empty and not value):
         raise _manifest_error(f"{key} must be a bounded string")
     return value

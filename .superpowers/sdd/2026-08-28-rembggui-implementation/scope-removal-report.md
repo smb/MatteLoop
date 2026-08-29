@@ -9,15 +9,19 @@ preview-only and requires point prompts.
 
 The runtime model trust boundary now has only two execution classes:
 `LOCAL` and `SAM_PREVIEW`. The strict manifest schema and `ModelSpec` no longer
-contain fields that existed only for the retired remote execution path. Both
-manifest parsing and direct `ModelCatalog` construction reject missing,
-duplicate, unknown, or hidden IDs.
+contain fields that existed only for the retired execution path. Manifest
+parsing and direct `ModelCatalog` construction now share one complete
+`ModelSpec` validator. Both reject missing, duplicate, unknown, or hidden IDs;
+mismatched upstream aliases; non-canonical execution/default/input/edge types;
+malformed scalar metadata; and artifacts outside the pinned release URL,
+filename, size, and checksum contract.
 
 `ModelSessionManager` now routes only verified local sessions and the SAM
-preview capability. A former catalog ID fails with `MODEL_NOT_FOUND` before a
-download or client action, preserves an already-active local session, and
-cannot be used as an alias or custom catalog entry. The execution-specific error
-code was removed from the serializable error contract.
+preview capability. A former catalog ID fails with `MODEL_NOT_FOUND` before
+extras or cleanup-state validation and before a download or client action. It
+preserves either an already-active local session or a pending cleanup handle
+and cannot be used as an alias or custom catalog entry. The execution-specific
+error code was removed from the serializable error contract.
 
 The binding design, executable plan, Task 9 report, and current local SDD
 context now describe the same 16-ID product. Task 16 is SAM-only. Task 17 has
@@ -39,7 +43,7 @@ uv run pytest tests/jobs/models/test_catalog.py tests/jobs/models/test_session.p
 ```
 
 The failures proved the old 17-ID catalog, third execution class,
-provider-only model field/error code, former-ID session routing, and stale
+retired model field/error code, former-ID session routing, and stale
 binding documentation were observable before implementation.
 
 A second RED case proved direct `ModelCatalog` construction could still admit
@@ -57,6 +61,30 @@ uv run pytest tests/jobs/models/test_catalog.py::test_direct_catalog_constructio
 82 passed in 1.24s
 ```
 
+Review fix round 1 added direct-construction coverage for a former upstream
+alias, custom and wrong release URLs, malformed artifact scalar fields,
+non-canonical specification/default/edge types, and malformed catalog ID
+elements. It also proved unknown-ID lookup must precede both extras and pending
+cleanup checks:
+
+```text
+uv run pytest tests/jobs/models/test_catalog.py -k 'direct_catalog_construction' -q
+20 failed, 3 passed
+
+uv run pytest tests/jobs/models/test_session.py -k 'unknown_former_model_id' -q
+2 failed
+
+uv run pytest tests/jobs/models/test_catalog.py::test_direct_catalog_construction_maps_a_malformed_id_element -q
+1 failed
+```
+
+Focused GREEN for the complete catalog/session/error/scope boundary:
+
+```text
+uv run pytest tests/jobs/models/test_catalog.py tests/jobs/models/test_session.py tests/core/test_errors.py tests/test_scope_contract.py -q
+104 passed in 0.72s
+```
+
 No test downloaded model weights, started a live network request, or ran real
 ONNX inference.
 
@@ -64,7 +92,7 @@ ONNX inference.
 
 ```text
 uv run pytest -q
-696 passed in 44.66s
+719 passed in 45.48s
 
 uv run ruff check .
 All checks passed!
@@ -73,7 +101,7 @@ uv run mypy src
 Success: no issues found in 27 source files
 
 uv run ruff format --check <changed Python files>
-7 files already formatted
+4 files already formatted
 
 git diff --check
 clean

@@ -102,13 +102,13 @@ class ModelSessionManager:
     def prepare(self, model_id: str, extras: dict[str, object]) -> PreparationResult:
         with self._lock:
             self._require_open()
+            spec = self._catalog.get(model_id)
             if self._cleanup_spec is not None:
                 raise _cleanup_pending_error(self._cleanup_spec.id)
             if type(extras) is not dict or extras:
                 raise _preparation_error(
                     "Task 9 accepts no model paths, custom options, or prompts"
                 )
-            spec = self._catalog.get(model_id)
             if spec.execution_class is ExecutionClass.SAM_PREVIEW:
                 self._close_active_unlocked()
                 return PreparationResult(
