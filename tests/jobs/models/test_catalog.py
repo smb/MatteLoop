@@ -252,6 +252,34 @@ def test_every_local_artifact_matches_the_app_pinned_release_index() -> None:
 
 
 def test_each_local_pin_has_honest_auditable_provenance() -> None:
+    classic_revision = "cd3a3d6767a7859efea31ef0f2f373582cf06d82"
+    biref_revision = "43d1d62b06bac8b7d3886a209771f6d7ca10d899"
+    bria_revision = "302f8bb8c9606587dae63532702ef3b72208cce7"
+    expected_witness_urls = {
+        "u2net": f"https://huggingface.co/tomjackson2023/rembg/blob/{classic_revision}/u2net.onnx",
+        "u2netp": f"https://huggingface.co/tomjackson2023/rembg/blob/{classic_revision}/u2netp.onnx",
+        "u2net_human_seg": f"https://huggingface.co/tomjackson2023/rembg/blob/{classic_revision}/u2net_human_seg.onnx",
+        "u2net_cloth_seg": f"https://huggingface.co/tomjackson2023/rembg/blob/{classic_revision}/u2net_cloth_seg.onnx",
+        "silueta": f"https://huggingface.co/tomjackson2023/rembg/blob/{classic_revision}/silueta.onnx",
+        "isnet-general-use": f"https://huggingface.co/tomjackson2023/rembg/blob/{classic_revision}/isnet-general-use.onnx",
+        "isnet-anime": f"https://huggingface.co/tomjackson2023/rembg/blob/{classic_revision}/isnet-anime.onnx",
+        "birefnet-general": "https://huggingface.co/EmmaJohnson311/TensorRT-ONNX-collect/blob/"
+        f"{biref_revision}/BiRefNet-v2-onnx/BiRefNet-general-epoch_244.onnx",
+        "birefnet-general-lite": "https://huggingface.co/EmmaJohnson311/TensorRT-ONNX-collect/blob/"
+        f"{biref_revision}/BiRefNet-v2-onnx/BiRefNet-general-bb_swin_v1_tiny-epoch_232.onnx",
+        "birefnet-portrait": "https://huggingface.co/EmmaJohnson311/TensorRT-ONNX-collect/blob/"
+        f"{biref_revision}/BiRefNet-v2-onnx/BiRefNet-portrait-epoch_150.onnx",
+        "birefnet-dis": "https://huggingface.co/EmmaJohnson311/TensorRT-ONNX-collect/blob/"
+        f"{biref_revision}/BiRefNet-v2-onnx/BiRefNet-DIS-epoch_590.onnx",
+        "birefnet-hrsod": "https://huggingface.co/EmmaJohnson311/TensorRT-ONNX-collect/blob/"
+        f"{biref_revision}/BiRefNet-v2-onnx/BiRefNet-HRSOD_DHU-epoch_115.onnx",
+        "birefnet-cod": "https://huggingface.co/EmmaJohnson311/TensorRT-ONNX-collect/blob/"
+        f"{biref_revision}/BiRefNet-v2-onnx/BiRefNet-COD-epoch_125.onnx",
+        "birefnet-massive": "https://huggingface.co/EmmaJohnson311/TensorRT-ONNX-collect/blob/"
+        f"{biref_revision}/BiRefNet-v2-onnx/BiRefNet-massive-TR_DIS5K_TR_TEs-epoch_420.onnx",
+        "bria-rmbg": "https://huggingface.co/ChuuniZ/comfyui-image-models/blob/"
+        f"{bria_revision}/BiRefNet/RMBG-2.0/onnx/model.onnx",
+    }
     catalog = ModelCatalog.load_resource()
     provenance_path = ModelCatalog.resource_path().with_name("model-provenance.json")
     payload = json.loads(provenance_path.read_text(encoding="utf-8"))
@@ -259,7 +287,9 @@ def test_each_local_pin_has_honest_auditable_provenance() -> None:
     assert payload["schema_version"] == 1
     assert payload["rembg_version"] == catalog.rembg_version
     assert payload["recorded_at"] == "2026-08-29"
-    assert payload["qualification_status"] == "app-pins-not-live-qualified"
+    assert payload["qualification_status"] == (
+        "fail-closed-pending-official-release-live-qualification"
+    )
     assert payload["qualification_owner"] == "Task 17 release qualification"
     entries = payload["entries"]
     assert isinstance(entries, list)
@@ -270,6 +300,7 @@ def test_each_local_pin_has_honest_auditable_provenance() -> None:
         if spec.execution_class is ExecutionClass.LOCAL
     }
     assert set(by_id) == set(local)
+    assert set(expected_witness_urls) == set(local)
     assert len(entries) == len(by_id)
     for model_id, spec in local.items():
         artifact = spec.artifact
@@ -282,6 +313,10 @@ def test_each_local_pin_has_honest_auditable_provenance() -> None:
             "app_pinned_sha256",
             "pin_method",
             "pin_status",
+            "witness_url",
+            "witness_sha256",
+            "witness_size",
+            "witness_trust_status",
             "upstream_checksum",
             "upstream_checksum_source",
             "upstream_checksum_status",
@@ -290,14 +325,27 @@ def test_each_local_pin_has_honest_auditable_provenance() -> None:
         assert entry["expected_size_bytes"] == artifact.size_bytes
         assert entry["app_pinned_sha256"] == artifact.sha256
         assert entry["upstream_checksum"] == artifact.upstream_checksum
-        assert entry["pin_method"] == "approved-task-9-brief-index"
-        assert entry["pin_status"] == "not-live-byte-qualified"
+        assert entry["pin_method"] == "commit-pinned-secondary-lfs-witness"
+        assert entry["pin_status"] == (
+            "derived-from-secondary-witness-pending-official-live-qualification"
+        )
+        assert entry["witness_url"] == expected_witness_urls[model_id]
+        assert entry["witness_sha256"] == artifact.sha256
+        assert entry["witness_size"] == artifact.size_bytes
+        assert entry["witness_trust_status"] == (
+            "secondary-lfs-metadata-witness-not-official-release-byte-proof"
+        )
+        revision = str(entry["witness_url"]).split("/blob/", 1)[1].split("/", 1)[0]
+        assert len(revision) == 40
+        assert all(character in "0123456789abcdef" for character in revision)
         assert str(entry["upstream_checksum_source"]).startswith(
             "rembg-2.0.72/rembg/sessions/"
         )
         assert str(entry["upstream_checksum_status"]).startswith(
             "declared-in-pinned-source-"
         )
+    assert "/blob/main/" not in json.dumps(payload)
+    assert "brief" not in json.dumps(payload).lower()
 
 
 @pytest.mark.parametrize(

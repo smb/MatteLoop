@@ -41,8 +41,12 @@ replacement lifecycle, and the manifest-bound Task 8 child launch boundary.
 - Rejects symlink/reparse/non-directory namespace components and non-regular
   cache files. On POSIX, every cache operation is relative to a bound directory
   descriptor opened with `O_DIRECTORY|O_NOFOLLOW`. On Windows, root/version/
-  model directory handles are held without delete sharing, preventing parent
-  rename/junction replacement while the full-path APIs run.
+  model are opened hierarchically without delete sharing. Immediately after
+  each `CreateFileW`, `GetFileInformationByHandleEx(FileAttributeTagInfo)`
+  proves that the opened object has `FILE_ATTRIBUTE_DIRECTORY` and not
+  `FILE_ATTRIBUTE_REPARSE_POINT`; all validated ancestor/model handles remain
+  held until the full-path file operation finishes. Missing-component early
+  returns and all exceptions close every already-opened handle exactly once.
 - Streams only bounded native chunks, enforces manifest size on both overrun
   and EOF, emits progress only when a valid known total exists, and checks
   cancellation before/between/after reads and before promotion.
@@ -93,20 +97,28 @@ replacement lifecycle, and the manifest-bound Task 8 child launch boundary.
   project-pinned `rembg==2.0.72` sources under
   `.venv/lib/python3.13/site-packages/rembg/sessions`.
 - For assets where those sources declare only MD5, the manifest retains that
-  MD5 explicitly as upstream provenance while enforcing the separately indexed
-  app-pinned SHA-256 supplied by the approved Task 9 brief.
-- Expected byte sizes and SHA-256 values are app pins from the approved Task 9
-  brief; they are not claimed as SHA-256 values published by GitHub or as live
-  byte qualification. BRIA's checksum literal in pinned rembg source matches
-  the app pin, but was likewise not independently live-qualified here.
+  MD5 explicitly as upstream provenance while enforcing the separately pinned
+  application SHA-256.
+- Each app SHA-256/size has a secondary large-file-metadata witness at a fixed
+  commit: the seven classic U²-Net/IS-Net/Silueta assets use
+  `tomjackson2023/rembg@cd3a3d6767a7859efea31ef0f2f373582cf06d82`; seven
+  BiRefNet assets use
+  `EmmaJohnson311/TensorRT-ONNX-collect@43d1d62b06bac8b7d3886a209771f6d7ca10d899`;
+  BRIA uses
+  `ChuuniZ/comfyui-image-models@302f8bb8c9606587dae63532702ef3b72208cce7`.
+  These secondary witnesses are not official GitHub release checksums and do
+  not establish byte identity with the upstream release asset.
+- BRIA's checksum literal in pinned rembg source matches the app pin, but was
+  likewise not independently live-qualified here.
 - `resources/model-provenance.json` records, per local ID, the exact URL, size,
-  app SHA-256, pin method/status, upstream checksum, exact pinned source file,
-  and checksum-status wording. It dates the record and assigns live artifact
-  qualification explicitly to Task 17.
+  app SHA-256, commit-bound witness URL/SHA/size/trust status, upstream
+  checksum, exact pinned source file, and checksum-status wording. It dates the
+  record and assigns live artifact qualification explicitly to Task 17.
 - Automated tests use synthetic bytes and an injected transport. No live model
   was downloaded and this report does not claim live release-asset
-  qualification; Task 17/manual release qualification must acquire every real
-  local artifact and run inference on each target architecture.
+  qualification; Task 17/manual release qualification must download each
+  official GitHub asset, verify the app SHA-256 and the pinned rembg upstream
+  checksum, and run inference on each target architecture.
 
 ## TDD evidence
 
@@ -152,6 +164,48 @@ Success: no issues found in 23 source files
 
 `ruff format` reports all nine changed Python files already formatted, and
 `git diff --check` is part of the final pre-commit gate.
+
+### Fix round 2
+
+RED evidence:
+
+```text
+uv run pytest tests/jobs/models/test_cache_fs.py -q
+3 failed: _bind_windows did not accept the post-open API seam
+
+uv run pytest tests/jobs/models/test_cache_fs.py::test_windows_binding_rejects_open_handle_without_directory_identity -q
+1 failed: missing DIRECTORY handle identity was accepted
+
+uv run pytest tests/jobs/models/test_cache_fs.py::test_windows_early_return_attempts_every_close_after_one_close_failure -q
+1 failed: one CloseHandle error prevented remaining handle cleanup
+
+uv run pytest tests/jobs/models/test_catalog.py::test_each_local_pin_has_honest_auditable_provenance -q
+1 failed: provenance still named an unsupported internal source label
+```
+
+GREEN evidence:
+
+```text
+uv run pytest tests/jobs/models -q
+91 passed in 0.66s
+
+uv run pytest -q
+610 passed in 39.60s
+
+uv run ruff check .
+All checks passed!
+
+uv run mypy src
+Success: no issues found in 23 source files
+
+git diff --check
+clean
+```
+
+No network transport, official release asset, or real ONNX inference was used
+by the automated tests. The BRIA secondary witness revision was resolved to
+`302f8bb8c9606587dae63532702ef3b72208cce7`; its metadata exposes the same
+SHA-256 as the app pin, without being treated as official-release byte proof.
 
 ## Deliberate tradeoffs / remaining qualification
 

@@ -639,4 +639,3 @@ def test_session_consumes_verified_bytes_even_if_path_swaps_back_during_creation
     _create_rembg_session(payload)
 
     assert captured == [good]
-    assert captured[0] is not artifact_path.read_bytes()

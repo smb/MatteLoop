@@ -12,6 +12,18 @@ import os
 import stat
 from pathlib import Path
 from types import TracebackType
+from typing import Protocol
+
+_FILE_ATTRIBUTE_DIRECTORY = 0x00000010
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+
+
+class _WindowsDirectoryApi(Protocol):
+    def open_directory(self, path: Path) -> int: ...
+
+    def file_attributes(self, handle: int) -> int: ...
+
+    def close_handle(self, handle: int) -> None: ...
 
 
 class UnsafeCacheError(Exception):
@@ -21,7 +33,7 @@ class UnsafeCacheError(Exception):
 class BoundModelDirectory:
     """A model directory whose namespace cannot be redirected while bound."""
 
-    __slots__ = ("_fd", "_windows_handles", "path")
+    __slots__ = ("_fd", "_windows_api", "_windows_handles", "path")
 
     def __init__(
         self,
@@ -29,10 +41,12 @@ class BoundModelDirectory:
         *,
         descriptor: int | None,
         windows_handles: tuple[int, ...] = (),
+        windows_api: _WindowsDirectoryApi | None = None,
     ) -> None:
         self.path = path
         self._fd = descriptor
         self._windows_handles = windows_handles
+        self._windows_api = windows_api
 
     @classmethod
     def bind(
@@ -61,15 +75,12 @@ class BoundModelDirectory:
         if descriptor is not None:
             os.close(descriptor)
         if self._windows_handles:
-            import ctypes
-            from ctypes import wintypes
-
-            kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
-            kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
-            kernel32.CloseHandle.restype = wintypes.BOOL
-            for handle in reversed(self._windows_handles):
-                kernel32.CloseHandle(handle)
+            api = self._windows_api
+            if api is None:
+                raise RuntimeError("Windows directory handles have no owner API")
+            handles = self._windows_handles
             self._windows_handles = ()
+            _close_windows_handles(api, handles)
 
     def target(self, filename: str) -> Path:
         _validate_filename(filename)
@@ -226,28 +237,17 @@ def _bind_posix(path: Path, *, create: bool) -> BoundModelDirectory | None:
 
 
 def _bind_windows(
-    root: Path, version: str, model_id: str, *, create: bool
+    root: Path,
+    version: str,
+    model_id: str,
+    *,
+    create: bool,
+    api: _WindowsDirectoryApi | None = None,
 ) -> BoundModelDirectory | None:
-    import ctypes
-    from ctypes import wintypes
-
-    kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
-    create_file = kernel32.CreateFileW
-    create_file.argtypes = (
-        wintypes.LPCWSTR,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        wintypes.LPVOID,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        wintypes.HANDLE,
-    )
-    create_file.restype = wintypes.HANDLE
-    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
-    kernel32.CloseHandle.restype = wintypes.BOOL
-    invalid = wintypes.HANDLE(-1).value
+    active_api = api if api is not None else _CtypesWindowsDirectoryApi()
     handles: list[int] = []
     current = root
+    bound: BoundModelDirectory | None = None
     try:
         for component in (None, version, model_id):
             if component is not None:
@@ -267,26 +267,116 @@ def _bind_windows(
                 or not stat.S_ISDIR(info.st_mode)
             ):
                 raise UnsafeCacheError("model cache component is not a real directory")
-            handle = create_file(
-                str(current),
-                0x80000000,
-                0x00000001 | 0x00000002,
-                None,
-                3,
-                0x02000000 | 0x00200000,
-                None,
-            )
-            if handle == invalid:
-                last_error = getattr(ctypes, "get_last_error")()
-                raise OSError(last_error, "could not bind cache directory")
-            handles.append(int(handle))
-        return BoundModelDirectory(
-            current, descriptor=None, windows_handles=tuple(handles)
+            handle = active_api.open_directory(current)
+            handles.append(handle)
+            attributes = active_api.file_attributes(handle)
+            if not attributes & _FILE_ATTRIBUTE_DIRECTORY:
+                raise UnsafeCacheError("opened model cache handle is not a directory")
+            if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+                raise UnsafeCacheError("opened model cache handle is a reparse point")
+        bound = BoundModelDirectory(
+            current,
+            descriptor=None,
+            windows_handles=tuple(handles),
+            windows_api=active_api,
         )
-    except BaseException:
-        for handle in reversed(handles):
-            kernel32.CloseHandle(handle)
-        raise
+        return bound
+    finally:
+        if bound is None:
+            _close_windows_handles(active_api, tuple(handles))
+
+
+def _close_windows_handles(api: _WindowsDirectoryApi, handles: tuple[int, ...]) -> None:
+    first_error: BaseException | None = None
+    for handle in reversed(handles):
+        try:
+            api.close_handle(handle)
+        except BaseException as error:
+            if first_error is None:
+                first_error = error
+    if first_error is not None:
+        raise first_error
+
+
+class _CtypesWindowsDirectoryApi:
+    __slots__ = ("_close_handle", "_create_file", "_get_information", "_invalid")
+
+    def __init__(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = (
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        )
+        create_file.restype = wintypes.HANDLE
+        get_information = kernel32.GetFileInformationByHandleEx
+        get_information.argtypes = (
+            wintypes.HANDLE,
+            wintypes.INT,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+        )
+        get_information.restype = wintypes.BOOL
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
+        self._create_file = create_file
+        self._get_information = get_information
+        self._close_handle = close_handle
+        self._invalid = wintypes.HANDLE(-1).value
+
+    def open_directory(self, path: Path) -> int:
+        import ctypes
+
+        handle = self._create_file(
+            str(path),
+            0x80000000,
+            0x00000001 | 0x00000002,
+            None,
+            3,
+            0x02000000 | 0x00200000,
+            None,
+        )
+        if handle == self._invalid:
+            last_error = getattr(ctypes, "get_last_error")()
+            raise OSError(last_error, "could not bind cache directory")
+        return int(handle)
+
+    def file_attributes(self, handle: int) -> int:
+        import ctypes
+        from ctypes import wintypes
+
+        class FileAttributeTagInfo(ctypes.Structure):
+            _fields_ = (
+                ("FileAttributes", wintypes.DWORD),
+                ("ReparseTag", wintypes.DWORD),
+            )
+
+        info = FileAttributeTagInfo()
+        if not self._get_information(
+            handle,
+            9,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        ):
+            last_error = getattr(ctypes, "get_last_error")()
+            raise OSError(last_error, "could not validate cache directory handle")
+        return int(info.FileAttributes)
+
+    def close_handle(self, handle: int) -> None:
+        import ctypes
+
+        if not self._close_handle(handle):
+            last_error = getattr(ctypes, "get_last_error")()
+            raise OSError(last_error, "could not close cache directory handle")
 
 
 def _validate_component(value: str) -> None:
