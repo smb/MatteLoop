@@ -1,4 +1,4 @@
-"""Bounded disk-QImage and GUI-owned QPixmap thumbnail LRUs."""
+"""Serialized disk-QImage and GUI-owned QPixmap thumbnail LRUs."""
 
 from __future__ import annotations
 
@@ -10,25 +10,30 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
+from threading import RLock
 
 from platformdirs import user_cache_dir
-from PySide6.QtCore import QCoreApplication, QSize, QThread
+from PySide6.QtCore import QSize, QThread
 from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtWidgets import QApplication
 
 from rembggui.core.errors import AppError, ErrorCode
+from rembggui.jobs.source import SourceRevision
+from rembggui.jobs.thumbnails import ThumbnailResult
 
 MIB = 1024 * 1024
 DEFAULT_DISK_CACHE_BYTES = 256 * MIB
 DEFAULT_PIXMAP_CACHE_BYTES = 64 * MIB
-THUMBNAIL_PIPELINE_VERSION = "thumbnail-v1"
+THUMBNAIL_PIPELINE_VERSION = "thumbnail-v2"
 
 
 @dataclass(frozen=True, slots=True, init=False)
 class ThumbnailCacheKey:
-    """Exact thumbnail identity for either provisional or complete fingerprints."""
+    """Exact scaled-image identity, including its bound file revision."""
 
     source_id: str
     source_fingerprint: str
+    source_revision: SourceRevision
     timestamp: Fraction
     physical_dimensions: tuple[int, int]
     generation: int
@@ -41,29 +46,18 @@ class ThumbnailCacheKey:
         timestamp: Fraction,
         physical_size: QSize | tuple[int, int],
         generation: int,
+        source_revision: SourceRevision,
         pipeline_version: str = THUMBNAIL_PIPELINE_VERSION,
     ) -> None:
-        if isinstance(physical_size, QSize):
-            dimensions = (physical_size.width(), physical_size.height())
-        elif isinstance(physical_size, tuple) and len(physical_size) == 2:
-            dimensions = physical_size
-        else:
-            raise _cache_error("physical_size must be QSize or an integer pair")
+        dimensions = _dimensions(physical_size)
         if not isinstance(source_id, str) or not source_id:
             raise _cache_error("source_id must be a non-empty string")
         if not isinstance(source_fingerprint, str) or not source_fingerprint:
             raise _cache_error("source_fingerprint must be a non-empty string")
-        if not isinstance(timestamp, Fraction):
-            raise _cache_error("timestamp must be a Fraction")
-        if (
-            not all(
-                isinstance(item, int) and not isinstance(item, bool)
-                for item in dimensions
-            )
-            or dimensions[0] <= 0
-            or dimensions[1] <= 0
-        ):
-            raise _cache_error("physical dimensions must be positive integers")
+        if not isinstance(source_revision, SourceRevision):
+            raise _cache_error("source_revision must be a SourceRevision")
+        if not isinstance(timestamp, Fraction) or timestamp < 0:
+            raise _cache_error("timestamp must be a non-negative Fraction")
         if (
             not isinstance(generation, int)
             or isinstance(generation, bool)
@@ -74,6 +68,7 @@ class ThumbnailCacheKey:
             raise _cache_error("pipeline_version must be a non-empty string")
         object.__setattr__(self, "source_id", source_id)
         object.__setattr__(self, "source_fingerprint", source_fingerprint)
+        object.__setattr__(self, "source_revision", source_revision)
         object.__setattr__(self, "timestamp", timestamp)
         object.__setattr__(self, "physical_dimensions", dimensions)
         object.__setattr__(self, "generation", generation)
@@ -90,14 +85,23 @@ class ThumbnailCacheKey:
             self.timestamp,
             self.physical_dimensions,
             self.generation,
+            self.source_revision,
             self.pipeline_version,
         )
 
     def digest(self) -> str:
+        revision = self.source_revision
         payload = {
             "generation": self.generation,
             "height": self.physical_dimensions[1],
             "pipeline_version": self.pipeline_version,
+            "revision": [
+                revision.device,
+                revision.inode,
+                revision.size,
+                revision.mtime_ns,
+                revision.ctime_ns,
+            ],
             "source_fingerprint": self.source_fingerprint,
             "source_id": self.source_id,
             "timestamp_denominator": self.timestamp.denominator,
@@ -109,7 +113,7 @@ class ThumbnailCacheKey:
 
 
 class ThumbnailDiskCache:
-    """A PNG-on-disk LRU charged by actual encoded file bytes."""
+    """A lock-serialized PNG LRU charged by actual filesystem bytes."""
 
     def __init__(
         self,
@@ -123,19 +127,23 @@ class ThumbnailDiskCache:
             if directory is None
             else Path(directory)
         )
+        self._lock = RLock()
+        self._entries: OrderedDict[str, int] = OrderedDict()
         try:
             self.directory.mkdir(parents=True, exist_ok=True)
         except OSError as error:
             raise _cache_error(
                 f"cache directory could not be created: {error}"
             ) from error
-        self._entries: OrderedDict[str, int] = OrderedDict()
-        self._load_entries()
-        self._evict()
+        with self._lock:
+            self._clean_orphan_temporaries()
+            self._load_entries()
+            self._evict()
 
     @property
     def total_bytes(self) -> int:
-        return sum(self._entries.values())
+        with self._lock:
+            return sum(self._entries.values())
 
     def path_for(self, key: ThumbnailCacheKey) -> Path:
         return self.directory / f"{key.digest()}.png"
@@ -146,100 +154,155 @@ class ThumbnailDiskCache:
         *,
         current_source_id: str,
         current_generation: int,
+        current_fingerprint: str,
+        current_revision: SourceRevision,
     ) -> QImage | None:
-        if not _is_current(key, current_source_id, current_generation):
-            return None
-        path = self.path_for(key)
-        if not path.is_file():
-            self._entries.pop(path.name, None)
-            return None
-        try:
-            image = QImage(str(path))
-        except (OSError, TypeError, ValueError, RuntimeError, OverflowError):
-            self._remove_path(path)
-            return None
-        if image.isNull() or image.size() != key.physical_size:
-            self._remove_path(path)
-            return None
-        try:
-            cost = path.stat().st_size
-            os.utime(path, None)
-        except OSError:
-            self._remove_path(path)
-            return None
-        self._entries[path.name] = cost
-        self._entries.move_to_end(path.name)
-        return image
+        with self._lock:
+            if not _is_current(
+                key,
+                current_source_id,
+                current_generation,
+                current_fingerprint,
+                current_revision,
+            ):
+                return None
+            path = self.path_for(key)
+            if not path.is_file():
+                self._entries.pop(path.name, None)
+                return None
+            image = self._load_valid_image(path, key)
+            if image is None:
+                self._remove_path(path)
+                return None
+            try:
+                cost = path.stat().st_size
+                os.utime(path, None)
+            except OSError as error:
+                raise _cache_error(
+                    f"cache hit metadata update failed: {error}"
+                ) from error
+            self._entries[path.name] = cost
+            self._entries.move_to_end(path.name)
+            self._evict()
+            return image
 
     def put(
         self,
         key: ThumbnailCacheKey,
-        image: QImage,
+        result: ThumbnailResult,
         *,
         current_source_id: str,
         current_generation: int,
+        current_fingerprint: str,
+        current_revision: SourceRevision,
     ) -> bool:
-        if not _is_current(key, current_source_id, current_generation):
-            return False
-        if image.isNull() or image.size() != key.physical_size:
-            raise _cache_error("disk cache accepts only its exact scaled target image")
-        path = self.path_for(key)
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=f".{path.stem}-", suffix=".tmp", dir=self.directory
-        )
-        os.close(descriptor)
-        temporary = Path(temporary_name)
-        try:
-            if not image.save(str(temporary), "PNG"):  # type: ignore[call-overload]
-                raise OSError("Qt image writer rejected PNG output")
-            os.replace(temporary, path)
-            cost = path.stat().st_size
-        except (OSError, ValueError, RuntimeError) as error:
+        with self._lock:
+            if not _result_is_current(
+                key,
+                result,
+                current_source_id,
+                current_generation,
+                current_fingerprint,
+                current_revision,
+            ):
+                return False
+            image = result.image
+            if image.isNull() or image.size() != key.physical_size:
+                raise _cache_error(
+                    "disk cache accepts only its exact scaled target image"
+                )
+            path = self.path_for(key)
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{path.stem}-", suffix=".tmp", dir=self.directory
+            )
+            os.close(descriptor)
+            temporary = Path(temporary_name)
             try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise _cache_error(f"thumbnail cache write failed: {error}") from error
-        self._entries[path.name] = cost
-        self._entries.move_to_end(path.name)
-        self._evict()
-        return path.is_file()
+                if not image.save(
+                    str(temporary),
+                    "PNG",  # type: ignore[call-overload]
+                ):
+                    raise OSError("Qt image writer rejected PNG output")
+                cost = temporary.stat().st_size
+                os.replace(temporary, path)
+            except BaseException as error:
+                self._cleanup_temporary(temporary)
+                if isinstance(error, (OSError, TypeError, ValueError, RuntimeError)):
+                    raise _cache_error(
+                        f"thumbnail cache write failed: {error}"
+                    ) from error
+                raise
+            self._entries[path.name] = cost
+            self._entries.move_to_end(path.name)
+            self._evict()
+            return path.is_file()
 
     def promote(
         self, provisional: ThumbnailCacheKey, complete: ThumbnailCacheKey
     ) -> bool:
-        """Atomically re-key one verified provisional entry as a complete key."""
-        if (
-            provisional.source_id != complete.source_id
-            or provisional.timestamp != complete.timestamp
-            or provisional.physical_dimensions != complete.physical_dimensions
-            or provisional.generation != complete.generation
-            or provisional.pipeline_version != complete.pipeline_version
-        ):
-            raise _cache_error("promotion may change only the source fingerprint")
-        source_path = self.path_for(provisional)
-        destination = self.path_for(complete)
-        if not source_path.is_file():
+        """Promote only a fingerprint while retaining revision and target."""
+        with self._lock:
+            if not _promotion_compatible(provisional, complete):
+                raise _cache_error("promotion may change only the source fingerprint")
+            source_path = self.path_for(provisional)
+            destination = self.path_for(complete)
+            if source_path == destination:
+                image = self._load_valid_image(source_path, provisional)
+                if image is None:
+                    self._remove_path(source_path)
+                    return False
+                cost = self._file_cost(source_path, "same-key promotion")
+                self._entries[source_path.name] = cost
+                self._entries.move_to_end(source_path.name)
+                self._evict()
+                return source_path.is_file()
+            if not source_path.is_file():
+                if not destination.is_file():
+                    return False
+                destination_image = self._load_valid_image(destination, complete)
+                if destination_image is None:
+                    self._remove_path(destination)
+                    return False
+                cost = self._file_cost(destination, "complete-key promotion")
+                self._entries[destination.name] = cost
+                self._entries.move_to_end(destination.name)
+                self._evict()
+                return destination.is_file()
+            source_image = self._load_valid_image(source_path, provisional)
+            if source_image is None:
+                self._remove_path(source_path)
+                return False
+            destination_image = (
+                self._load_valid_image(destination, complete)
+                if destination.is_file()
+                else None
+            )
+            if destination_image is not None:
+                cost = self._file_cost(destination, "promotion collision")
+                self._remove_path(source_path)
+            else:
+                if destination.exists():
+                    self._remove_path(destination)
+                cost = self._file_cost(source_path, "provisional promotion")
+                try:
+                    os.replace(source_path, destination)
+                except OSError as error:
+                    raise _cache_error(
+                        f"thumbnail cache promotion failed: {error}"
+                    ) from error
+            self._entries.pop(source_path.name, None)
+            self._entries[destination.name] = cost
+            self._entries.move_to_end(destination.name)
+            self._evict()
             return destination.is_file()
-        try:
-            os.replace(source_path, destination)
-            os.utime(destination, None)
-            cost = destination.stat().st_size
-        except OSError as error:
-            raise _cache_error(f"thumbnail cache promotion failed: {error}") from error
-        self._entries.pop(source_path.name, None)
-        self._entries[destination.name] = cost
-        self._entries.move_to_end(destination.name)
-        self._evict()
-        return destination.is_file()
+
+    def _clean_orphan_temporaries(self) -> None:
+        for path in self.directory.glob("*.tmp"):
+            self._unlink(path, "orphan temporary cleanup")
 
     def _load_entries(self) -> None:
         found: list[tuple[int, str, int]] = []
-        try:
-            paths = tuple(self.directory.glob("*.png"))
-        except OSError:
-            paths = ()
-        for path in paths:
+        for path in self.directory.glob("*.png"):
             try:
                 source_stat = path.stat()
                 image = QImage(str(path))
@@ -253,26 +316,51 @@ class ThumbnailDiskCache:
         for _, name, cost in sorted(found):
             self._entries[name] = cost
 
+    def _load_valid_image(self, path: Path, key: ThumbnailCacheKey) -> QImage | None:
+        try:
+            image = QImage(str(path))
+        except (OSError, TypeError, ValueError, RuntimeError, OverflowError):
+            return None
+        if image.isNull() or image.size() != key.physical_size:
+            return None
+        return image
+
     def _evict(self) -> None:
-        while self.total_bytes > self.max_bytes and self._entries:
-            name, _ = self._entries.popitem(last=False)
-            try:
-                (self.directory / name).unlink(missing_ok=True)
-            except OSError:
-                pass
+        while sum(self._entries.values()) > self.max_bytes and self._entries:
+            name = next(iter(self._entries))
+            path = self.directory / name
+            self._unlink(path, "LRU eviction")
+            self._entries.pop(name)
 
     def _remove_path(self, path: Path) -> None:
+        if path.exists():
+            self._unlink(path, "cache entry removal")
         self._entries.pop(path.name, None)
+
+    def _unlink(self, path: Path, operation: str) -> None:
         try:
             path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        except OSError as error:
+            raise _cache_error(
+                f"{operation} failed for {path.name}: {error}"
+            ) from error
+
+    def _file_cost(self, path: Path, operation: str) -> int:
+        try:
+            return path.stat().st_size
+        except OSError as error:
+            raise _cache_error(f"{operation} stat failed: {error}") from error
+
+    def _cleanup_temporary(self, path: Path) -> None:
+        if path.exists():
+            self._unlink(path, "atomic temporary cleanup")
 
 
 class PixmapCache:
-    """GUI-thread-only QPixmap LRU charged by actual pixmap storage depth."""
+    """Live-QApplication-only defensive QPixmap LRU."""
 
     def __init__(self, max_bytes: int = DEFAULT_PIXMAP_CACHE_BYTES) -> None:
+        self._require_gui_thread()
         self.max_bytes = _validated_max_bytes(max_bytes)
         self._entries: OrderedDict[ThumbnailCacheKey, tuple[QPixmap, int]] = (
             OrderedDict()
@@ -289,27 +377,45 @@ class PixmapCache:
         *,
         current_source_id: str,
         current_generation: int,
+        current_fingerprint: str,
+        current_revision: SourceRevision,
     ) -> QPixmap | None:
         self._require_gui_thread()
-        if not _is_current(key, current_source_id, current_generation):
+        if not _is_current(
+            key,
+            current_source_id,
+            current_generation,
+            current_fingerprint,
+            current_revision,
+        ):
             return None
         entry = self._entries.get(key)
         if entry is None:
             return None
         self._entries.move_to_end(key)
-        return entry[0]
+        return QPixmap(entry[0])
 
     def put(
         self,
         key: ThumbnailCacheKey,
-        image: QImage,
+        result: ThumbnailResult,
         *,
         current_source_id: str,
         current_generation: int,
+        current_fingerprint: str,
+        current_revision: SourceRevision,
     ) -> QPixmap | None:
         self._require_gui_thread()
-        if not _is_current(key, current_source_id, current_generation):
+        if not _result_is_current(
+            key,
+            result,
+            current_source_id,
+            current_generation,
+            current_fingerprint,
+            current_revision,
+        ):
             return None
+        image = result.image
         if image.isNull() or image.size() != key.physical_size:
             raise _cache_error(
                 "pixmap cache accepts only its exact scaled target image"
@@ -320,11 +426,12 @@ class PixmapCache:
             raise _cache_error(f"QPixmap conversion failed: {error}") from error
         if pixmap.isNull():
             raise _cache_error("QPixmap conversion failed")
-        cost = pixmap.width() * pixmap.height() * max(1, (pixmap.depth() + 7) // 8)
-        self._entries[key] = (pixmap, cost)
+        stored = QPixmap(pixmap)
+        cost = _pixmap_cost(stored)
+        self._entries[key] = (stored, cost)
         self._entries.move_to_end(key)
         self._evict()
-        return pixmap if key in self._entries else None
+        return QPixmap(stored) if key in self._entries else None
 
     def _evict(self) -> None:
         while sum(cost for _, cost in self._entries.values()) > self.max_bytes:
@@ -332,17 +439,83 @@ class PixmapCache:
 
     @staticmethod
     def _require_gui_thread() -> None:
-        application = QCoreApplication.instance()
-        if application is None or QThread.currentThread() != application.thread():
+        application = QApplication.instance()
+        if not isinstance(application, QApplication):
+            raise RuntimeError("QPixmap cache requires a live QApplication")
+        try:
+            application_thread = application.thread()
+        except RuntimeError as error:
+            raise RuntimeError("QPixmap cache QApplication was destroyed") from error
+        if QThread.currentThread() != application_thread:
             raise RuntimeError("QPixmap cache access is restricted to the GUI thread")
 
 
+def _dimensions(value: QSize | tuple[int, int]) -> tuple[int, int]:
+    dimensions = (value.width(), value.height()) if isinstance(value, QSize) else value
+    if (
+        not isinstance(dimensions, tuple)
+        or len(dimensions) != 2
+        or not all(
+            isinstance(item, int) and not isinstance(item, bool) for item in dimensions
+        )
+        or dimensions[0] <= 0
+        or dimensions[1] <= 0
+    ):
+        raise _cache_error("physical dimensions must be positive integers")
+    return dimensions
+
+
+def _result_is_current(
+    key: ThumbnailCacheKey,
+    result: ThumbnailResult,
+    source_id: str,
+    generation: int,
+    fingerprint: str,
+    revision: SourceRevision,
+) -> bool:
+    request = result.request
+    return (
+        _is_current(key, source_id, generation, fingerprint, revision)
+        and request.source_id == key.source_id
+        and request.timestamp == key.timestamp
+        and request.physical_dimensions == key.physical_dimensions
+        and request.generation == key.generation
+        and request.source_fingerprint == key.source_fingerprint
+        and request.source_revision == key.source_revision
+    )
+
+
 def _is_current(
-    key: ThumbnailCacheKey, current_source_id: str, current_generation: int
+    key: ThumbnailCacheKey,
+    source_id: str,
+    generation: int,
+    fingerprint: str,
+    revision: SourceRevision,
 ) -> bool:
     return (
-        key.source_id == current_source_id and key.generation == current_generation
+        key.source_id == source_id
+        and key.generation == generation
+        and key.source_fingerprint == fingerprint
+        and key.source_revision == revision
     )
+
+
+def _promotion_compatible(
+    provisional: ThumbnailCacheKey, complete: ThumbnailCacheKey
+) -> bool:
+    return (
+        provisional.source_id == complete.source_id
+        and provisional.source_revision == complete.source_revision
+        and provisional.timestamp == complete.timestamp
+        and provisional.physical_dimensions == complete.physical_dimensions
+        and provisional.generation == complete.generation
+        and provisional.pipeline_version == complete.pipeline_version
+    )
+
+
+def _pixmap_cost(pixmap: QPixmap) -> int:
+    row_bytes = ((pixmap.width() * pixmap.depth() + 31) // 32) * 4
+    return row_bytes * pixmap.height()
 
 
 def _validated_max_bytes(value: int) -> int:

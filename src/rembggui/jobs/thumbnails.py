@@ -14,11 +14,13 @@ from PySide6.QtCore import QSize, QSizeF
 from PySide6.QtGui import QImage
 
 from rembggui.core.errors import AppError, ErrorCode
-from rembggui.jobs.source import decode_frame
+from rembggui.jobs.source import SourceRevision, decode_frame
 
 MIN_FILMSTRIP_SAMPLES = 12
 MAX_FILMSTRIP_SAMPLES = 48
 FILMSTRIP_SAMPLE_SPACING = 90.0
+MAX_THUMBNAIL_DIMENSION = 2048
+MAX_THUMBNAIL_PIXELS = 2_097_152
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -30,6 +32,9 @@ class ThumbnailRequest:
     logical_size: tuple[float, float]
     dpr: float
     generation: int
+    source_fingerprint: str
+    source_revision: SourceRevision
+    physical_dimensions: tuple[int, int]
 
     def __init__(
         self,
@@ -38,6 +43,9 @@ class ThumbnailRequest:
         logical_size: QSize | QSizeF | tuple[float, float],
         dpr: float,
         generation: int,
+        *,
+        source_fingerprint: str,
+        source_revision: SourceRevision,
     ) -> None:
         width, height = _logical_dimensions(logical_size)
         normalized_dpr = _finite_number(dpr, "dpr")
@@ -45,6 +53,8 @@ class ThumbnailRequest:
             raise _thumbnail_error("source_id must be a non-empty string")
         if not isinstance(timestamp, Fraction):
             raise _thumbnail_error("timestamp must be a Fraction")
+        if timestamp < 0:
+            raise _thumbnail_error("timestamp must be non-negative")
         if width <= 0 or height <= 0:
             raise _thumbnail_error("logical dimensions must be positive")
         if normalized_dpr <= 0:
@@ -55,20 +65,35 @@ class ThumbnailRequest:
             or generation < 0
         ):
             raise _thumbnail_error("generation must be a non-negative integer")
+        if not isinstance(source_fingerprint, str) or not source_fingerprint:
+            raise _thumbnail_error("source_fingerprint must be a non-empty string")
+        if not isinstance(source_revision, SourceRevision):
+            raise _thumbnail_error("source_revision must be a SourceRevision")
+        physical_dimensions = (
+            _physical_dimension(width, normalized_dpr),
+            _physical_dimension(height, normalized_dpr),
+        )
+        if (
+            physical_dimensions[0] > MAX_THUMBNAIL_DIMENSION
+            or physical_dimensions[1] > MAX_THUMBNAIL_DIMENSION
+            or physical_dimensions[0] * physical_dimensions[1] > MAX_THUMBNAIL_PIXELS
+        ):
+            raise _thumbnail_error(
+                "physical thumbnail dimensions exceed the scaled timeline ceiling"
+            )
         object.__setattr__(self, "source_id", source_id)
         object.__setattr__(self, "timestamp", timestamp)
         object.__setattr__(self, "logical_size", (width, height))
         object.__setattr__(self, "dpr", normalized_dpr)
         object.__setattr__(self, "generation", generation)
+        object.__setattr__(self, "source_fingerprint", source_fingerprint)
+        object.__setattr__(self, "source_revision", source_revision)
+        object.__setattr__(self, "physical_dimensions", physical_dimensions)
 
     @property
     def physical_size(self) -> QSize:
         """Return physical dimensions using deterministic round-half-up."""
-        width, height = self.logical_size
-        return QSize(
-            _round_positive(width * self.dpr),
-            _round_positive(height * self.dpr),
-        )
+        return QSize(*self.physical_dimensions)
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +102,14 @@ class ThumbnailResult:
 
     request: ThumbnailRequest
     image: QImage
+
+    @property
+    def source_fingerprint(self) -> str:
+        return self.request.source_fingerprint
+
+    @property
+    def source_revision(self) -> SourceRevision:
+        return self.request.source_revision
 
 
 def generate_thumbnail(
@@ -95,7 +128,16 @@ def generate_thumbnail(
         request.timestamp,
         request_id=request.generation,
         is_cancelled=is_cancelled,
+        expected_revision=request.source_revision,
     )
+    if decoded.source_revision != request.source_revision:
+        raise AppError(
+            ErrorCode.SOURCE_CHANGED,
+            "thumbnail",
+            "thumbnail.source.changed",
+            "decoded frame revision does not match thumbnail request",
+            "reload-source",
+        )
     if is_cancelled is not None and is_cancelled():
         raise _cancelled_error()
     physical = request.physical_size
@@ -188,6 +230,23 @@ def _finite_number(value: object, name: str) -> float:
 def _round_positive(value: float) -> int:
     rounded = Decimal(str(value)).quantize(Decimal(1), rounding=ROUND_HALF_UP)
     return max(1, int(rounded))
+
+
+def _physical_dimension(logical: float, dpr: float) -> int:
+    try:
+        value = Decimal(str(logical)) * Decimal(str(dpr))
+        rounded = value.quantize(Decimal(1), rounding=ROUND_HALF_UP)
+    except (ArithmeticError, ValueError) as error:
+        raise _thumbnail_error("physical thumbnail dimensions overflow") from error
+    if not value.is_finite() or rounded < 1:
+        raise _thumbnail_error(
+            "physical thumbnail dimensions must be finite and positive"
+        )
+    if rounded > MAX_THUMBNAIL_DIMENSION:
+        raise _thumbnail_error(
+            "physical thumbnail dimensions exceed the scaled timeline ceiling"
+        )
+    return int(rounded)
 
 
 def _thumbnail_error(detail: str) -> AppError:

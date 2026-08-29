@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import struct
 from fractions import Fraction
 from types import SimpleNamespace
@@ -11,7 +12,13 @@ from PIL import Image
 from rembggui.core.errors import AppError, ErrorCode
 from rembggui.jobs.source import (
     DecodedFrame,
+    SourceRevision,
+    _decodable_video_stream,
+    _derive_timeline,
     _display_dimensions,
+    _duration,
+    _frame_at_timestamp,
+    _normalized_image,
     _rotation_from_display_matrix,
     _rotation_from_metadata,
     decode_frame,
@@ -76,6 +83,24 @@ def _make_seekable_video(path):
     return path
 
 
+def _make_nonzero_start_video(path):
+    with av.open(path, "w") as container:
+        stream = container.add_stream("libx264rgb", rate=1)
+        stream.width = 16
+        stream.height = 8
+        stream.pix_fmt = "rgb24"
+        stream.codec_context.time_base = Fraction(1)
+        for pts, color in zip((10, 11, 12), ("red", "lime", "blue")):
+            frame = av.VideoFrame.from_image(Image.new("RGB", (16, 8), color))
+            frame.pts = pts
+            frame.time_base = Fraction(1)
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+    return path
+
+
 def test_probe_reports_exact_vfr_stream_metadata_and_ignores_fixture_sidecar(
     tmp_path,
 ):
@@ -102,7 +127,6 @@ def test_probe_reports_exact_vfr_stream_metadata_and_ignores_fixture_sidecar(
 @pytest.mark.parametrize(
     ("timestamp", "actual_pts", "dominant_channel"),
     [
-        (Fraction(-1), Fraction(0), 0),
         (Fraction(49, 1000), Fraction(0), 0),
         (Fraction(1, 20), Fraction(1, 20), 1),
         (Fraction(7, 100), Fraction(1, 20), 1),
@@ -130,6 +154,206 @@ def test_vfr_decode_selects_frame_owning_half_open_interval(
     pixel = decoded.image.getpixel((0, 0))
     assert pixel[3] == 255
     assert max(range(3), key=pixel.__getitem__) == dominant_channel
+
+
+def test_decode_rejects_negative_public_timestamps(tmp_path):
+    path = make_video(tmp_path / "negative-request.mp4", _solid_frames(), Fraction(2))
+
+    with pytest.raises(AppError) as error:
+        decode_frame(path, Fraction(-1), request_id=4)
+
+    assert error.value.code is ErrorCode.SOURCE_CORRUPT
+
+
+def test_nonzero_raw_pts_are_normalized_to_presentation_origin(tmp_path):
+    path = _make_nonzero_start_video(tmp_path / "nonzero.mkv")
+
+    info = probe_source(path)
+    first = decode_frame(path, Fraction(0), request_id=1)
+    boundary = decode_frame(path, Fraction(1), request_id=2)
+
+    assert info.duration == Fraction(3)
+    assert first.actual_pts == Fraction(0)
+    assert boundary.actual_pts == Fraction(1)
+    assert first.image.getpixel((0, 0)) == (255, 0, 0, 255)
+    assert boundary.image.getpixel((0, 0)) == (0, 255, 0, 255)
+
+
+def test_negative_raw_pts_are_selected_on_nonnegative_presentation_timeline():
+    frames = []
+    for pts in (-2, -1, 0):
+        frame = av.VideoFrame.from_image(Image.new("RGB", (2, 2), "red"))
+        frame.pts = pts
+        frame.time_base = Fraction(1)
+        frames.append(frame)
+    stream = _color_stream(matrix=0)
+
+    class Container:
+        def decode(self, selected_stream):
+            assert selected_stream is stream
+            yield from frames
+
+    selected, _ = _frame_at_timestamp(
+        Container(), stream, Fraction(1), Fraction(-2), None
+    )
+
+    assert Fraction(selected.pts) * selected.time_base - Fraction(-2) == Fraction(1)
+
+
+def test_negative_raw_origin_is_removed_from_absolute_end_duration():
+    stream = SimpleNamespace(duration=1, start_time=None)
+    container = SimpleNamespace(duration=None)
+
+    assert _duration(container, stream, Fraction(1), Fraction(-2)) == Fraction(3)
+
+
+def test_decode_rejects_stream_with_only_negative_preroll_frames():
+    frame = av.VideoFrame.from_image(Image.new("RGB", (2, 2), "red"))
+    frame.pts = -1
+    frame.time_base = Fraction(1)
+    stream = _color_stream(matrix=0)
+
+    class Container:
+        def decode(self, selected_stream):
+            assert selected_stream is stream
+            yield frame
+
+    with pytest.raises(AppError) as error:
+        _frame_at_timestamp(Container(), stream, Fraction(0), Fraction(0), None)
+
+    assert error.value.code is ErrorCode.SOURCE_CORRUPT
+
+
+def test_missing_duration_and_rate_are_derived_from_exact_frame_pts():
+    frames = []
+    for pts in (0, 1, 3):
+        frame = av.VideoFrame.from_image(Image.new("RGB", (2, 2), "red"))
+        frame.pts = pts
+        frame.time_base = Fraction(1, 10)
+        frames.append(frame)
+    stream = _color_stream(matrix=0)
+    stream.time_base = Fraction(1, 10)
+
+    class Container:
+        def seek(self, *args, **kwargs):
+            return None
+
+        def decode(self, selected_stream):
+            assert selected_stream is stream
+            yield from frames
+
+    derived = _derive_timeline(Container(), stream, Fraction(0), None)
+
+    assert derived.duration == Fraction(1, 2)
+    assert derived.peak_rate == Fraction(10)
+    assert derived.frame_count == 3
+
+
+def test_missing_single_frame_cadence_is_rejected_as_unproven():
+    frame = av.VideoFrame.from_image(Image.new("RGB", (2, 2), "red"))
+    frame.pts = 0
+    frame.time_base = Fraction(1)
+    stream = _color_stream(matrix=0)
+    stream.time_base = Fraction(1)
+
+    class Container:
+        def seek(self, *args, **kwargs):
+            return None
+
+        def decode(self, selected_stream):
+            yield frame
+
+    with pytest.raises(AppError) as error:
+        _derive_timeline(Container(), stream, Fraction(0), None)
+    assert error.value.code is ErrorCode.SOURCE_FPS_UNSUPPORTED
+
+
+def test_stream_selection_skips_first_undecodable_video_stream():
+    bad = SimpleNamespace(disposition=av.stream.Disposition(0))
+    good = SimpleNamespace(disposition=av.stream.Disposition(0))
+    frame = av.VideoFrame.from_image(Image.new("RGB", (2, 2), "green"))
+    frame.pts = 0
+    frame.time_base = Fraction(1)
+
+    class Container:
+        streams = SimpleNamespace(video=(bad, good))
+
+        def seek(self, *args, **kwargs):
+            return None
+
+        def decode(self, stream):
+            if stream is bad:
+                raise ValueError("broken first stream")
+            yield frame
+
+    selected, first = _decodable_video_stream(Container(), None)
+
+    assert selected is good
+    assert first is frame
+
+
+def test_probe_revision_binds_decode_to_same_regular_file(tmp_path):
+    path = make_video(tmp_path / "revision.mp4", _solid_frames(), Fraction(2))
+    info = probe_source(path)
+
+    assert isinstance(info.revision, SourceRevision)
+    replacement = make_video(
+        tmp_path / "replacement.mp4", list(reversed(_solid_frames())), Fraction(2)
+    )
+    os.replace(replacement, path)
+
+    with pytest.raises(AppError) as error:
+        decode_frame(
+            path,
+            Fraction(0),
+            request_id=3,
+            expected_revision=info.revision,
+        )
+    assert error.value.code is ErrorCode.SOURCE_CHANGED
+
+
+def test_retarget_during_decode_is_rejected_after_native_access(tmp_path, monkeypatch):
+    path = make_video(tmp_path / "retarget.mp4", _solid_frames(), Fraction(2))
+    replacement = make_video(
+        tmp_path / "retarget-replacement.mp4",
+        list(reversed(_solid_frames())),
+        Fraction(2),
+    )
+    info = probe_source(path)
+    import rembggui.jobs.source as source_module
+
+    real_normalize = source_module._normalized_image
+
+    def replace_then_normalize(*args, **kwargs):
+        os.replace(replacement, path)
+        return real_normalize(*args, **kwargs)
+
+    monkeypatch.setattr(source_module, "_normalized_image", replace_then_normalize)
+
+    with pytest.raises(AppError) as error:
+        decode_frame(
+            path,
+            Fraction(0),
+            request_id=3,
+            expected_revision=info.revision,
+        )
+
+    assert error.value.code is ErrorCode.SOURCE_CHANGED
+
+
+def test_probe_rejects_symlink_and_container_suffix_mismatch(tmp_path):
+    original = make_video(tmp_path / "original.mp4", _solid_frames(), Fraction(2))
+    symlink = tmp_path / "link.mp4"
+    symlink.symlink_to(original)
+    with pytest.raises(AppError) as symlink_error:
+        probe_source(symlink)
+    assert symlink_error.value.code is ErrorCode.SOURCE_UNREADABLE
+
+    renamed = tmp_path / "renamed.webm"
+    renamed.write_bytes(original.read_bytes())
+    with pytest.raises(AppError) as format_error:
+        probe_source(renamed)
+    assert format_error.value.code is ErrorCode.SOURCE_FORMAT_UNSUPPORTED
 
 
 def test_cfr_decode_uses_exact_boundary_and_preserves_each_request_id(tmp_path):
@@ -185,6 +409,52 @@ def test_every_probe_and_decode_owns_and_closes_its_container(tmp_path, monkeypa
     assert all(container.closed for container in containers)
 
 
+def test_decode_closes_container_when_normalization_raises_baseexception(
+    tmp_path, monkeypatch
+):
+    path = make_video(tmp_path / "baseexception.mp4", _solid_frames(), Fraction(2))
+    import rembggui.jobs.source as source_module
+
+    real_open = source_module.av.open
+    containers = []
+
+    class FatalDecode(BaseException):
+        pass
+
+    class TrackedContainer:
+        def __init__(self, container):
+            self._container = container
+            self.closed = False
+
+        def __getattr__(self, name):
+            return getattr(self._container, name)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            self.closed = True
+            self._container.close()
+
+    def tracked_open(*args, **kwargs):
+        tracked = TrackedContainer(real_open(*args, **kwargs))
+        containers.append(tracked)
+        return tracked
+
+    monkeypatch.setattr(source_module.av, "open", tracked_open)
+    monkeypatch.setattr(
+        source_module,
+        "_normalized_image",
+        lambda *args, **kwargs: (_ for _ in ()).throw(FatalDecode()),
+    )
+
+    with pytest.raises(FatalDecode):
+        decode_frame(path, Fraction(0), request_id=1)
+
+    assert len(containers) == 1
+    assert containers[0].closed
+
+
 def test_late_decode_seeks_to_a_nearby_keyframe_instead_of_retaining_whole_video(
     tmp_path, monkeypatch
 ):
@@ -237,9 +507,7 @@ def test_display_matrix_boundary_uses_ffmpeg_clockwise_sign():
         type = SimpleNamespace(name="DISPLAYMATRIX")
 
         def __bytes__(self):
-            return struct.pack(
-                "=9i", 0, 65536, 0, -65536, 0, 0, 0, 0, 1 << 30
-            )
+            return struct.pack("=9i", 0, 65536, 0, -65536, 0, 0, 0, 0, 1 << 30)
 
     frame = SimpleNamespace(side_data=[DisplayMatrix()])
 
@@ -270,13 +538,183 @@ def test_real_metadata_rotation_pixel_aspect_and_lossless_rgba_are_normalized(
     assert green.image.getpixel((0, 0)) == (0, 255, 0, 255)
 
 
+def _yuv_frame(y: int, u: int, v: int, *, matrix: int, color_range: int):
+    frame = av.VideoFrame(2, 2, "yuv420p")
+    frame.colorspace = matrix
+    frame.color_range = color_range
+    for plane, value in zip(frame.planes, (y, u, v)):
+        plane.update(bytes([value]) * plane.buffer_size)
+    return frame
+
+
+def _color_stream(*, matrix: int, transfer: int = 13, primaries: int = 1):
+    codec = SimpleNamespace(
+        color_primaries=primaries,
+        color_trc=transfer,
+        colorspace=matrix,
+        color_range=0,
+        pix_fmt="yuv420p",
+        sample_aspect_ratio=None,
+    )
+    return SimpleNamespace(
+        codec_context=codec,
+        sample_aspect_ratio=None,
+        metadata={},
+        side_data=(),
+    )
+
+
+def test_yuv_limited_and_full_range_are_explicitly_normalized_to_srgb():
+    limited = _yuv_frame(16, 128, 128, matrix=1, color_range=1)
+    full = _yuv_frame(0, 128, 128, matrix=1, color_range=2)
+    stream = _color_stream(matrix=1)
+
+    assert _normalized_image(limited, stream, limited).getpixel((0, 0)) == (
+        0,
+        0,
+        0,
+        255,
+    )
+    assert _normalized_image(full, stream, full).getpixel((0, 0)) == (
+        0,
+        0,
+        0,
+        255,
+    )
+
+
+def test_yuv_matrix_selection_changes_literal_rgba_conversion():
+    bt709 = _yuv_frame(81, 90, 240, matrix=1, color_range=1)
+    bt601 = _yuv_frame(81, 90, 240, matrix=5, color_range=1)
+
+    assert _normalized_image(bt709, _color_stream(matrix=1), bt709).getpixel(
+        (0, 0)
+    ) == (255, 23, 0, 255)
+    assert _normalized_image(bt601, _color_stream(matrix=5), bt601).getpixel(
+        (0, 0)
+    ) == (252, 0, 0, 255)
+
+
+def test_bt709_transfer_is_converted_to_srgb_with_deterministic_lut():
+    frame = av.VideoFrame.from_image(Image.new("RGB", (2, 2), (128, 128, 128)))
+    frame.colorspace = 0
+    frame.color_range = 2
+    stream = _color_stream(matrix=0, transfer=1)
+
+    assert _normalized_image(frame, stream, frame).getpixel((0, 0)) == (
+        140,
+        140,
+        140,
+        255,
+    )
+
+
+@pytest.mark.parametrize("primaries", [8, 12, 22])
+def test_per_frame_p3_or_other_wide_gamut_metadata_is_rejected(primaries):
+    frame = av.VideoFrame.from_image(Image.new("RGB", (2, 2), "red"))
+
+    class FrameMetadata:
+        color_primaries = primaries
+        color_trc = 13
+        colorspace = 0
+        color_range = 2
+        sample_aspect_ratio = None
+        side_data = ()
+        format = frame.format
+
+        def to_image(self):
+            return frame.to_image()
+
+    with pytest.raises(AppError) as error:
+        _normalized_image(
+            FrameMetadata(),
+            _color_stream(matrix=0, primaries=primaries),
+            FrameMetadata(),
+        )
+    assert error.value.code is ErrorCode.SOURCE_HDR_UNSUPPORTED
+
+
+def test_conflicting_rotation_or_per_frame_sar_is_rejected():
+    frame = av.VideoFrame.from_image(Image.new("RGB", (2, 2), "red"))
+
+    class Matrix:
+        type = SimpleNamespace(name="DISPLAYMATRIX")
+
+        def __bytes__(self):
+            return struct.pack("=9i", 0, -65536, 0, 65536, 0, 0, 0, 0, 1 << 30)
+
+    class FrameMetadata:
+        side_data = (Matrix(),)
+        sample_aspect_ratio = Fraction(2)
+        colorspace = 0
+        color_range = 2
+        format = frame.format
+
+        def to_image(self):
+            return frame.to_image()
+
+    stream = _color_stream(matrix=0)
+    stream.metadata = {"rotate": "90"}
+    stream.sample_aspect_ratio = Fraction(1)
+
+    with pytest.raises(AppError) as error:
+        _normalized_image(FrameMetadata(), stream, FrameMetadata())
+    assert error.value.code is ErrorCode.SOURCE_CORRUPT
+
+
+def test_explicit_identity_matrix_conflicting_with_legacy_rotation_is_rejected():
+    frame = av.VideoFrame.from_image(Image.new("RGB", (2, 2), "red"))
+
+    class IdentityMatrix:
+        type = SimpleNamespace(name="DISPLAYMATRIX")
+
+        def __bytes__(self):
+            return struct.pack("=9i", 65536, 0, 0, 0, 65536, 0, 0, 0, 1 << 30)
+
+    class FrameMetadata:
+        side_data = (IdentityMatrix(),)
+        sample_aspect_ratio = None
+        colorspace = 0
+        color_range = 2
+        format = frame.format
+
+        def reformat(self, *, format):
+            return frame.reformat(format=format)
+
+    stream = _color_stream(matrix=0)
+    stream.metadata = {"rotate": "90"}
+
+    with pytest.raises(AppError) as error:
+        _normalized_image(FrameMetadata(), stream, FrameMetadata())
+
+    assert error.value.code is ErrorCode.SOURCE_CORRUPT
+
+
+def test_per_frame_hdr_side_data_is_rejected():
+    frame = av.VideoFrame.from_image(Image.new("RGB", (2, 2), "red"))
+
+    class FrameMetadata:
+        side_data = (SimpleNamespace(type=SimpleNamespace(name="DYNAMIC_HDR_PLUS")),)
+        sample_aspect_ratio = None
+        color_primaries = 1
+        color_trc = 13
+        colorspace = 0
+        color_range = 2
+        format = frame.format
+
+    with pytest.raises(AppError) as error:
+        _normalized_image(FrameMetadata(), _color_stream(matrix=0), FrameMetadata())
+
+    assert error.value.code is ErrorCode.SOURCE_HDR_UNSUPPORTED
+
+
 def test_probe_rejects_non_local_and_audio_only_sources(tmp_path):
     with pytest.raises(AppError) as network_error:
         probe_source("https://example.invalid/video.mp4")
     assert network_error.value.code is ErrorCode.SOURCE_NOT_LOCAL
     assert network_error.value.retry_action == "choose-local-file"
 
-    audio_path = tmp_path / "audio-only.wav"
+    audio_path = tmp_path / "audio-only.mkv"
     with av.open(audio_path, "w") as container:
         stream = container.add_stream("pcm_s16le", rate=8000)
         frame = av.AudioFrame(format="s16", layout="mono", samples=800)
@@ -334,9 +772,7 @@ def test_probe_rejects_corrupt_high_depth_hdr_and_over_limit_sources(tmp_path):
         probe_source(hdr)
     assert hdr_error.value.code is ErrorCode.SOURCE_HDR_UNSUPPORTED
 
-    high_fps = make_video(
-        tmp_path / "61fps.mp4", _solid_frames()[:2], Fraction(61)
-    )
+    high_fps = make_video(tmp_path / "61fps.mp4", _solid_frames()[:2], Fraction(61))
     with pytest.raises(AppError) as fps_error:
         probe_source(high_fps)
     assert fps_error.value.code is ErrorCode.SOURCE_FPS_UNSUPPORTED

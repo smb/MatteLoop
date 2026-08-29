@@ -33,6 +33,7 @@ class ErrorCode(StrEnum):
     SOURCE_DIMENSIONS_UNSUPPORTED = "source_dimensions_unsupported"
     SOURCE_FPS_UNSUPPORTED = "source_fps_unsupported"
     SOURCE_DURATION_UNSUPPORTED = "source_duration_unsupported"
+    SOURCE_FORMAT_UNSUPPORTED = "source_format_unsupported"
     INVALID_THUMBNAIL = "invalid_thumbnail"
     JOB_CANCELLED = "job_cancelled"
 

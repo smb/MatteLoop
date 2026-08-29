@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import math
 import os
+import stat
 import struct
 from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import av
+from av.video.reformatter import ColorRange, Colorspace, VideoReformatter
 from PIL import Image
 
 from rembggui.core.errors import AppError, ErrorCode
@@ -21,9 +25,8 @@ MAX_SOURCE_WIDTH = 3840
 MAX_SOURCE_HEIGHT = 2160
 MAX_SOURCE_FPS = Fraction(60)
 MAX_SOURCE_DURATION = Fraction(10 * 60)
+SUPPORTED_CONTAINER_SUFFIXES = frozenset({".mp4", ".mov", ".webm", ".mkv"})
 
-_HDR_TRANSFERS = {16, 18}  # SMPTE ST 2084 (PQ), ARIB STD-B67 (HLG)
-_HDR_PRIMARIES = {9}  # BT.2020 is outside the V1 SDR/sRGB input envelope.
 _HDR_SIDE_DATA = {
     "CONTENT_LIGHT_LEVEL",
     "DOVI_METADATA",
@@ -37,10 +40,22 @@ CancelCheck = Callable[[], bool]
 
 
 @dataclass(frozen=True, slots=True)
+class SourceRevision:
+    """Immutable identity for one regular-file revision."""
+
+    device: int
+    inode: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+
+
+@dataclass(frozen=True, slots=True)
 class SourceInfo:
     """Validated presentation metadata in oriented, square-pixel coordinates."""
 
     path: Path
+    revision: SourceRevision
     width: int
     height: int
     duration: Fraction
@@ -48,6 +63,7 @@ class SourceInfo:
     average_rate: Fraction | None
     base_rate: Fraction | None
     guessed_rate: Fraction | None
+    peak_rate: Fraction
     frame_count: int | None
     rotation: int
     pixel_aspect: Fraction
@@ -68,16 +84,17 @@ class DecodedFrame:
     requested_timestamp: Fraction
     actual_pts: Fraction
     request_id: int
+    source_revision: SourceRevision
 
 
 def probe_source(path: Path | str) -> SourceInfo:
     """Probe one local source using an InputContainer owned only by this call."""
     source = _validate_source_path(path)
     try:
-        with av.open(str(source), mode="r") as container:
-            stream = _video_stream(container)
-            first_frame = _first_decoded_frame(container, stream)
-            return _source_info(source, container, stream, first_frame)
+        with _input_container(source, None) as (container, revision):
+            _validate_container_format(source, container)
+            stream, first_frame = _decodable_video_stream(container)
+            return _source_info(source, revision, container, stream, first_frame)
     except AppError:
         raise
     except (OSError, ValueError, av.FFmpegError) as error:
@@ -95,6 +112,7 @@ def decode_frame(
     request_id: int,
     *,
     is_cancelled: CancelCheck | None = None,
+    expected_revision: SourceRevision | None = None,
 ) -> DecodedFrame:
     """Decode the frame whose half-open presentation interval owns ``timestamp``.
 
@@ -111,6 +129,13 @@ def decode_frame(
             "timestamp must be a Fraction",
             "reload-source",
         )
+    if timestamp < 0:
+        raise _source_error(
+            ErrorCode.SOURCE_CORRUPT,
+            "source.decode.negative-timestamp",
+            "public presentation timestamps must be non-negative",
+            "reload-source",
+        )
     if not isinstance(request_id, int) or isinstance(request_id, bool):
         raise _source_error(
             ErrorCode.SOURCE_CORRUPT,
@@ -120,17 +145,32 @@ def decode_frame(
         )
     _raise_if_cancelled(is_cancelled)
     try:
-        with av.open(str(source), mode="r") as container:
-            stream = _video_stream(container)
-            metadata_frame = _first_decoded_frame(container, stream, is_cancelled)
-            source_info = _source_info(source, container, stream, metadata_frame)
-            _seek_for_timestamp(container, stream, timestamp, source_info.duration)
-            candidate, _ = _frame_at_timestamp(
-                container, stream, timestamp, is_cancelled
+        with _input_container(source, expected_revision) as (container, revision):
+            _validate_container_format(source, container)
+            stream, metadata_frame = _decodable_video_stream(container, is_cancelled)
+            source_info = _source_info(
+                source, revision, container, stream, metadata_frame
             )
-            actual_pts = _frame_timestamp(candidate)
+            presentation_origin = _presentation_origin(
+                stream, metadata_frame, source_info.time_base
+            )
+            _seek_for_timestamp(
+                container,
+                stream,
+                timestamp,
+                presentation_origin,
+                source_info.duration,
+            )
+            candidate, _ = _frame_at_timestamp(
+                container,
+                stream,
+                timestamp,
+                presentation_origin,
+                is_cancelled,
+            )
+            actual_pts = _frame_timestamp(candidate) - presentation_origin
             image = _normalized_image(candidate, stream, metadata_frame)
-            return DecodedFrame(image, timestamp, actual_pts, request_id)
+            return DecodedFrame(image, timestamp, actual_pts, request_id, revision)
     except AppError:
         raise
     except (OSError, ValueError, av.FFmpegError) as error:
@@ -158,9 +198,21 @@ def _validate_source_path(value: Path | str) -> Path:
             "network paths, URIs, and live inputs are unsupported",
             "choose-local-file",
         )
+    if source.suffix.casefold() not in SUPPORTED_CONTAINER_SUFFIXES:
+        raise _source_error(
+            ErrorCode.SOURCE_FORMAT_UNSUPPORTED,
+            "source.path.unsupported-suffix",
+            "source suffix must be MP4, MOV, WebM, or MKV",
+            "choose-another-file",
+        )
     try:
-        if not source.is_file() or not os.access(source, os.R_OK):
-            raise OSError("path is not a readable regular file")
+        source_stat = source.lstat()
+        if (
+            not stat.S_ISREG(source_stat.st_mode)
+            or source.is_symlink()
+            or not os.access(source, os.R_OK)
+        ):
+            raise OSError("path is not a readable non-symlink regular file")
     except OSError as error:
         raise _source_error(
             ErrorCode.SOURCE_UNREADABLE,
@@ -171,7 +223,91 @@ def _validate_source_path(value: Path | str) -> Path:
     return source
 
 
-def _video_stream(container: Any) -> Any:
+@contextmanager
+def _input_container(
+    source: Path, expected_revision: SourceRevision | None
+) -> Iterator[tuple[Any, SourceRevision]]:
+    before = _path_revision(source)
+    if expected_revision is not None and before != expected_revision:
+        raise _source_changed("source revision changed before decode")
+    try:
+        with source.open("rb") as source_file:
+            opened = _revision_from_stat(os.fstat(source_file.fileno()))
+            if opened != before:
+                raise _source_changed("source changed while it was opened")
+            try:
+                with av.open(source_file, mode="r") as container:
+                    yield container, before
+            finally:
+                after_open = _revision_from_stat(os.fstat(source_file.fileno()))
+                after_path = _path_revision(source)
+                if after_open != before or after_path != before:
+                    raise _source_changed("source changed during media access")
+    except AppError:
+        raise
+    except OSError as error:
+        if expected_revision is not None:
+            raise _source_changed("source became unavailable during decode") from error
+        raise _source_error(
+            ErrorCode.SOURCE_UNREADABLE,
+            "source.path.unreadable",
+            "source must remain a readable non-symlink regular file",
+            "choose-another-file",
+        ) from error
+
+
+def _path_revision(source: Path) -> SourceRevision:
+    try:
+        source_stat = source.lstat()
+    except OSError as error:
+        raise _source_changed("source path became unavailable") from error
+    if not stat.S_ISREG(source_stat.st_mode) or source.is_symlink():
+        raise _source_changed("source path is no longer a regular file")
+    return _revision_from_stat(source_stat)
+
+
+def _revision_from_stat(source_stat: os.stat_result) -> SourceRevision:
+    return SourceRevision(
+        device=source_stat.st_dev,
+        inode=source_stat.st_ino,
+        size=source_stat.st_size,
+        mtime_ns=source_stat.st_mtime_ns,
+        ctime_ns=source_stat.st_ctime_ns,
+    )
+
+
+def _source_changed(detail: str) -> AppError:
+    return _source_error(
+        ErrorCode.SOURCE_CHANGED,
+        "source.revision.changed",
+        detail,
+        "reload-source",
+    )
+
+
+def _validate_container_format(source: Path, container: Any) -> None:
+    format_name = str(getattr(getattr(container, "format", None), "name", ""))
+    suffix = source.suffix.casefold()
+    compatible = {
+        ".mp4": ("mov", "mp4"),
+        ".mov": ("mov", "mp4"),
+        ".mkv": ("matroska",),
+        ".webm": ("matroska", "webm"),
+    }[suffix]
+    names = {item.casefold() for item in format_name.split(",")}
+    if not names.intersection(compatible):
+        raise _source_error(
+            ErrorCode.SOURCE_FORMAT_UNSUPPORTED,
+            "source.probe.container-mismatch",
+            f"{suffix} suffix does not match demuxer {format_name or 'unknown'}",
+            "choose-another-file",
+        )
+
+
+def _decodable_video_stream(
+    container: Any, is_cancelled: CancelCheck | None = None
+) -> tuple[Any, Any]:
+    """Select the first ordinary video stream with a timestamped frame."""
     streams = tuple(container.streams.video)
     if not streams:
         raise _source_error(
@@ -180,7 +316,43 @@ def _video_stream(container: Any) -> Any:
             "source contains no video stream",
             "choose-another-file",
         )
-    return streams[0]
+    excluded = (
+        av.stream.Disposition.attached_pic
+        | av.stream.Disposition.timed_thumbnails
+        | av.stream.Disposition.still_image
+    )
+    candidates = tuple(
+        stream
+        for stream in streams
+        if not (getattr(stream, "disposition", av.stream.Disposition(0)) & excluded)
+    )
+    if not candidates:
+        raise _source_error(
+            ErrorCode.SOURCE_NO_VIDEO,
+            "source.probe.no-display-video",
+            "source contains only attached pictures or thumbnail streams",
+            "choose-another-file",
+        )
+    for index, stream in enumerate(candidates):
+        _raise_if_cancelled(is_cancelled)
+        if index:
+            try:
+                container.seek(0, backward=True, any_frame=False)
+            except (OSError, ValueError, av.FFmpegError):
+                continue
+        try:
+            for frame in container.decode(stream):
+                _raise_if_cancelled(is_cancelled)
+                if frame.pts is not None and frame.time_base is not None:
+                    return stream, frame
+        except (OSError, ValueError, av.FFmpegError):
+            continue
+    raise _source_error(
+        ErrorCode.SOURCE_CORRUPT,
+        "source.probe.no-frames",
+        "source contains no decodable timestamped video stream",
+        "choose-another-file",
+    )
 
 
 def _decoded_frames(container: Any, stream: Any) -> Iterator[Any]:
@@ -195,29 +367,20 @@ def _decoded_frames(container: Any, stream: Any) -> Iterator[Any]:
         ) from error
 
 
-def _first_decoded_frame(
-    container: Any, stream: Any, is_cancelled: CancelCheck | None = None
-) -> Any:
-    for frame in _decoded_frames(container, stream):
-        _raise_if_cancelled(is_cancelled)
-        if frame.pts is not None and frame.time_base is not None:
-            return frame
-    raise _source_error(
-        ErrorCode.SOURCE_CORRUPT,
-        "source.probe.no-frames",
-        "video stream contains no decodable timestamped frames",
-        "choose-another-file",
-    )
-
-
 def _seek_for_timestamp(
-    container: Any, stream: Any, timestamp: Fraction, duration: Fraction
+    container: Any,
+    stream: Any,
+    timestamp: Fraction,
+    presentation_origin: Fraction,
+    duration: Fraction,
 ) -> None:
     time_base = Fraction(stream.time_base)
-    latest_seek = max(Fraction(0), duration - time_base)
-    seek_timestamp = min(max(timestamp, Fraction(0)), latest_seek)
-    offset = seek_timestamp.numerator * time_base.denominator // (
-        seek_timestamp.denominator * time_base.numerator
+    latest_seek = presentation_origin + max(Fraction(0), duration - time_base)
+    seek_timestamp = min(presentation_origin + timestamp, latest_seek)
+    offset = (
+        seek_timestamp.numerator
+        * time_base.denominator
+        // (seek_timestamp.denominator * time_base.numerator)
     )
     try:
         container.seek(offset, stream=stream, backward=True, any_frame=False)
@@ -234,6 +397,7 @@ def _frame_at_timestamp(
     container: Any,
     stream: Any,
     timestamp: Fraction,
+    presentation_origin: Fraction,
     is_cancelled: CancelCheck | None,
 ) -> tuple[Any, Any]:
     candidate = None
@@ -241,11 +405,14 @@ def _frame_at_timestamp(
     # The caller seeks backward to a keyframe, never by frame/fps arithmetic.
     for frame in _decoded_frames(container, stream):
         _raise_if_cancelled(is_cancelled)
+        _validate_frame_color(stream, frame)
         if frame.pts is None or frame.time_base is None:
+            continue
+        frame_pts = _frame_timestamp(frame) - presentation_origin
+        if frame_pts < 0:
             continue
         if first_frame is None:
             first_frame = frame
-        frame_pts = _frame_timestamp(frame)
         if frame_pts <= timestamp:
             candidate = frame
             continue
@@ -267,7 +434,104 @@ def _frame_at_timestamp(
     return candidate, first_frame
 
 
-def _source_info(source: Path, container: Any, stream: Any, frame: Any) -> SourceInfo:
+@dataclass(frozen=True, slots=True)
+class _DerivedTimeline:
+    duration: Fraction
+    peak_rate: Fraction
+    frame_count: int
+
+
+def _derive_timeline(
+    container: Any,
+    stream: Any,
+    presentation_origin: Fraction,
+    nominal_rate: Fraction | None,
+) -> _DerivedTimeline:
+    """Boundedly prove duration and maximum cadence from exact decoded PTS."""
+    time_base = Fraction(stream.time_base)
+    offset = (
+        presentation_origin.numerator
+        * time_base.denominator
+        // (presentation_origin.denominator * time_base.numerator)
+    )
+    try:
+        container.seek(offset, stream=stream, backward=True, any_frame=False)
+    except (OSError, ValueError, av.FFmpegError) as error:
+        raise _source_error(
+            ErrorCode.SOURCE_CORRUPT,
+            "source.probe.timeline-seek",
+            f"could not derive missing timeline metadata: {error}",
+            "convert-source",
+        ) from error
+    timestamps: list[Fraction] = []
+    for frame in _decoded_frames(container, stream):
+        _validate_frame_color(stream, frame)
+        if frame.pts is None or frame.time_base is None:
+            continue
+        timestamp = _frame_timestamp(frame) - presentation_origin
+        if timestamp < 0:
+            continue
+        if timestamps and timestamp < timestamps[-1]:
+            raise _source_error(
+                ErrorCode.SOURCE_CORRUPT,
+                "source.probe.nonmonotonic-pts",
+                "presentation timestamps are not monotonic",
+                "convert-source",
+            )
+        if not timestamps or timestamp > timestamps[-1]:
+            timestamps.append(timestamp)
+        if len(timestamps) > 36_002:
+            raise _source_error(
+                ErrorCode.SOURCE_DURATION_UNSUPPORTED,
+                "source.probe.unbounded-timeline",
+                "timeline metadata could not be proven within the V1 envelope",
+                "trim-or-convert-source",
+            )
+        if timestamp > MAX_SOURCE_DURATION:
+            raise _source_error(
+                ErrorCode.SOURCE_DURATION_UNSUPPORTED,
+                "source.probe.too-long",
+                "video duration exceeds the 10 minute V1 limit",
+                "trim-or-convert-source",
+            )
+    if not timestamps:
+        raise _source_error(
+            ErrorCode.SOURCE_CORRUPT,
+            "source.probe.no-timestamps",
+            "video cadence cannot be proven without presentation timestamps",
+            "convert-source",
+        )
+    if len(timestamps) == 1:
+        if nominal_rate is None or nominal_rate <= 0:
+            raise _source_error(
+                ErrorCode.SOURCE_FPS_UNSUPPORTED,
+                "source.probe.unknown-cadence",
+                "single-frame source has no provable cadence",
+                "convert-source",
+            )
+        return _DerivedTimeline(Fraction(1, nominal_rate), nominal_rate, 1)
+    deltas = tuple(
+        later - earlier for earlier, later in zip(timestamps, timestamps[1:])
+    )
+    peak_rate = max(Fraction(1, delta) for delta in deltas)
+    if peak_rate > MAX_SOURCE_FPS:
+        raise _source_error(
+            ErrorCode.SOURCE_FPS_UNSUPPORTED,
+            "source.probe.high-frame-rate",
+            "decoded source cadence exceeds the 60 fps V1 limit",
+            "convert-source-to-60fps",
+        )
+    duration = timestamps[-1] + deltas[-1]
+    return _DerivedTimeline(duration, peak_rate, len(timestamps))
+
+
+def _source_info(
+    source: Path,
+    revision: SourceRevision,
+    container: Any,
+    stream: Any,
+    frame: Any,
+) -> SourceInfo:
     coded_width = int(stream.width)
     coded_height = int(stream.height)
     if coded_width <= 0 or coded_height <= 0:
@@ -285,7 +549,23 @@ def _source_info(source: Path, container: Any, stream: Any, frame: Any) -> Sourc
             "video stream has no valid time base",
             "choose-another-file",
         )
-    duration = _duration(container, stream, time_base)
+    presentation_origin = _presentation_origin(stream, frame, time_base)
+    average_rate = _fraction_or_none(stream.average_rate)
+    base_rate = _fraction_or_none(getattr(stream, "base_rate", None))
+    guessed_rate = _fraction_or_none(getattr(stream, "guessed_rate", None))
+    validation_rates = tuple(
+        rate for rate in (average_rate, guessed_rate) if rate is not None and rate > 0
+    )
+    validation_rate = max(validation_rates) if validation_rates else None
+    duration = _duration(container, stream, time_base, presentation_origin)
+    derived: _DerivedTimeline | None = None
+    if duration <= 0 or validation_rate is None or validation_rate <= 0:
+        derived = _derive_timeline(
+            container, stream, presentation_origin, validation_rate
+        )
+        if duration <= 0:
+            duration = derived.duration
+        validation_rate = max(validation_rate or Fraction(0), derived.peak_rate)
     if duration <= 0:
         raise _source_error(
             ErrorCode.SOURCE_ZERO_DURATION,
@@ -300,16 +580,6 @@ def _source_info(source: Path, container: Any, stream: Any, frame: Any) -> Sourc
             "video duration exceeds the 10 minute V1 limit",
             "trim-or-convert-source",
         )
-
-    average_rate = _fraction_or_none(stream.average_rate)
-    base_rate = _fraction_or_none(getattr(stream, "base_rate", None))
-    guessed_rate = _fraction_or_none(getattr(stream, "guessed_rate", None))
-    validation_rates = tuple(
-        rate
-        for rate in (average_rate, guessed_rate)
-        if rate is not None and rate > 0
-    )
-    validation_rate = max(validation_rates) if validation_rates else base_rate
     if validation_rate is not None and validation_rate > MAX_SOURCE_FPS:
         raise _source_error(
             ErrorCode.SOURCE_FPS_UNSUPPORTED,
@@ -318,8 +588,7 @@ def _source_info(source: Path, container: Any, stream: Any, frame: Any) -> Sourc
             "convert-source-to-60fps",
         )
 
-    pixel_aspect = _pixel_aspect(stream)
-    rotation = _rotation(stream, frame)
+    rotation, pixel_aspect = _orientation(stream, frame, frame)
     width, height = _display_dimensions(
         coded_width, coded_height, pixel_aspect, rotation
     )
@@ -337,11 +606,14 @@ def _source_info(source: Path, container: Any, stream: Any, frame: Any) -> Sourc
     color_space = _metadata_name(getattr(frame, "colorspace", None))
     color_primaries = _metadata_name(getattr(codec, "color_primaries", None))
     color_transfer = _metadata_name(getattr(codec, "color_trc", None))
-    _validate_sdr_8bit(frame, codec, pixel_format)
+    _validate_frame_color(stream, frame)
 
     frames = int(stream.frames) if getattr(stream, "frames", 0) > 0 else None
+    if frames is None and derived is not None:
+        frames = derived.frame_count
     return SourceInfo(
         path=source,
+        revision=revision,
         width=width,
         height=height,
         duration=duration,
@@ -349,6 +621,7 @@ def _source_info(source: Path, container: Any, stream: Any, frame: Any) -> Sourc
         average_rate=average_rate,
         base_rate=base_rate,
         guessed_rate=guessed_rate,
+        peak_rate=(derived.peak_rate if derived is not None else validation_rate),
         frame_count=frames,
         rotation=rotation,
         pixel_aspect=pixel_aspect,
@@ -362,23 +635,33 @@ def _source_info(source: Path, container: Any, stream: Any, frame: Any) -> Sourc
     )
 
 
-def _duration(container: Any, stream: Any, time_base: Fraction) -> Fraction:
+def _duration(
+    container: Any,
+    stream: Any,
+    time_base: Fraction,
+    presentation_origin: Fraction,
+) -> Fraction:
     if stream.duration is not None:
-        return Fraction(stream.duration) * time_base
+        duration = Fraction(stream.duration) * time_base
+        if stream.start_time is None:
+            duration -= presentation_origin
+        return duration
     if container.duration is not None:
-        return Fraction(container.duration, int(av.time_base))
+        duration = Fraction(container.duration, int(av.time_base))
+        if stream.start_time is None:
+            duration -= presentation_origin
+        return duration
     return Fraction(0)
+
+
+def _presentation_origin(stream: Any, frame: Any, time_base: Fraction) -> Fraction:
+    if stream.start_time is not None:
+        return Fraction(stream.start_time) * time_base
+    return _frame_timestamp(frame)
 
 
 def _frame_timestamp(frame: Any) -> Fraction:
     return Fraction(frame.pts) * Fraction(frame.time_base)
-
-
-def _pixel_aspect(stream: Any) -> Fraction:
-    aspect = _fraction_or_none(getattr(stream, "sample_aspect_ratio", None))
-    if aspect is None or aspect <= 0:
-        return Fraction(1)
-    return aspect
 
 
 def _display_dimensions(
@@ -394,11 +677,51 @@ def _display_dimensions(
     return square_width, square_height
 
 
-def _rotation(stream: Any, frame: Any) -> int:
-    metadata_rotation = _rotation_from_metadata(getattr(stream, "metadata", {}))
-    if metadata_rotation:
-        return metadata_rotation
-    return _rotation_from_display_matrix(frame)
+def _orientation(stream: Any, frame: Any, metadata_frame: Any) -> tuple[int, Fraction]:
+    """Resolve frame > first-frame > stream > legacy orientation surfaces.
+
+    Lower-precedence metadata may fill an absent value, but any two explicit
+    values must agree so stale legacy tags cannot silently override display data.
+    Pixel aspect follows frame > first-frame > stream > codec with the same rule.
+    """
+    rotations = [
+        _display_matrix_candidate(frame),
+        _display_matrix_candidate(metadata_frame),
+        _display_matrix_candidate(
+            SimpleNamespace(side_data=getattr(stream, "side_data", ()))
+        ),
+        _rotation_metadata_candidate(getattr(stream, "metadata", {})),
+    ]
+    explicit_rotations = {value for value in rotations if value is not None}
+    if len(explicit_rotations) > 1:
+        raise _source_error(
+            ErrorCode.SOURCE_CORRUPT,
+            "source.orientation.conflict",
+            "frame, stream, and legacy rotation metadata conflict",
+            "convert-source",
+        )
+    rotation = next((value for value in rotations if value is not None), 0)
+
+    codec = stream.codec_context
+    aspects = [
+        _fraction_or_none(getattr(frame, "sample_aspect_ratio", None)),
+        _fraction_or_none(getattr(metadata_frame, "sample_aspect_ratio", None)),
+        _fraction_or_none(getattr(stream, "sample_aspect_ratio", None)),
+        _fraction_or_none(getattr(codec, "sample_aspect_ratio", None)),
+    ]
+    explicit_aspects = {value for value in aspects if value is not None and value > 0}
+    if len(explicit_aspects) > 1:
+        raise _source_error(
+            ErrorCode.SOURCE_CORRUPT,
+            "source.orientation.pixel-aspect-conflict",
+            "frame, stream, and codec pixel aspect ratios conflict",
+            "convert-source",
+        )
+    pixel_aspect = next(
+        (value for value in aspects if value is not None and value > 0),
+        Fraction(1),
+    )
+    return rotation, pixel_aspect
 
 
 def _rotation_from_metadata(metadata: Mapping[str, object]) -> int:
@@ -407,28 +730,66 @@ def _rotation_from_metadata(metadata: Mapping[str, object]) -> int:
         (value for key, value in metadata.items() if key.casefold() == "rotate"),
         None,
     )
-    if raw is None:
+    try:
+        return _normalized_quarter_turn(-float(str(raw))) if raw is not None else 0
+    except (TypeError, ValueError):
         return 0
+
+
+def _rotation_metadata_candidate(
+    metadata: Mapping[str, object],
+) -> int | None:
+    raw = next(
+        (value for key, value in metadata.items() if key.casefold() == "rotate"),
+        None,
+    )
+    if raw is None:
+        return None
     try:
         degrees = float(str(raw))
     except (TypeError, ValueError):
-        return 0
-    return _normalized_quarter_turn(-degrees)
+        return None
+    rotation = _normalized_quarter_turn(-degrees)
+    if rotation == 0 and not math.isclose(degrees % 360, 0, abs_tol=0.01):
+        raise _source_error(
+            ErrorCode.SOURCE_CORRUPT,
+            "source.orientation.non-quarter-turn",
+            "legacy orientation must be a 0/90/180/270 degree rotation",
+            "convert-source",
+        )
+    return rotation
 
 
 def _rotation_from_display_matrix(frame: Any) -> int:
+    return _display_matrix_candidate(frame) or 0
+
+
+def _display_matrix_candidate(frame: Any) -> int | None:
     for side_data in getattr(frame, "side_data", ()):
         if getattr(getattr(side_data, "type", None), "name", "") != "DISPLAYMATRIX":
             continue
         raw = bytes(side_data)
         if len(raw) < 36:
-            return 0
+            raise _source_error(
+                ErrorCode.SOURCE_CORRUPT,
+                "source.orientation.invalid-display-matrix",
+                "display orientation matrix is truncated",
+                "convert-source",
+            )
         matrix = struct.unpack("=9i", raw[:36])
         # Match av_display_rotation_get: the matrix coefficients use the
         # opposite sign from Pillow's counter-clockwise transpose operations.
         degrees = math.degrees(math.atan2(-matrix[1], matrix[0]))
-        return _normalized_quarter_turn(degrees)
-    return 0
+        rotation = _normalized_quarter_turn(degrees)
+        if rotation == 0 and not math.isclose(degrees % 360, 0, abs_tol=0.01):
+            raise _source_error(
+                ErrorCode.SOURCE_CORRUPT,
+                "source.orientation.non-quarter-turn",
+                "display orientation must be a 0/90/180/270 degree rotation",
+                "convert-source",
+            )
+        return rotation
+    return None
 
 
 def _normalized_quarter_turn(degrees: float) -> int:
@@ -444,9 +805,8 @@ def _normalized_quarter_turn(degrees: float) -> int:
 def _validate_sdr_8bit(frame: Any, codec: Any, pixel_format: str) -> None:
     components = tuple(getattr(frame.format, "components", ()))
     component_depths = [int(component.bits) for component in components]
-    if (
-        any(depth > 8 for depth in component_depths)
-        or _pixel_format_is_high_depth(pixel_format)
+    if any(depth > 8 for depth in component_depths) or _pixel_format_is_high_depth(
+        pixel_format
     ):
         raise _source_error(
             ErrorCode.SOURCE_HDR_UNSUPPORTED,
@@ -454,23 +814,110 @@ def _validate_sdr_8bit(frame: Any, codec: Any, pixel_format: str) -> None:
             "10-bit and higher-depth video is unsupported in V1",
             "convert-source-to-8bit-srgb",
         )
-    transfer = _metadata_int(getattr(codec, "color_trc", None))
-    primaries = _metadata_int(getattr(codec, "color_primaries", None))
+
+
+def _validate_frame_color(stream: Any, frame: Any) -> None:
+    codec = stream.codec_context
+    pixel_format = _pixel_format(frame, codec)
+    _validate_sdr_8bit(frame, codec, pixel_format)
     side_data_names = {
         getattr(getattr(item, "type", None), "name", "")
-        for item in getattr(frame, "side_data", ())
+        for owner in (frame, stream, codec)
+        for item in getattr(owner, "side_data", ())
     }
-    if (
-        transfer in _HDR_TRANSFERS
-        or primaries in _HDR_PRIMARIES
-        or side_data_names & _HDR_SIDE_DATA
-    ):
-        raise _source_error(
-            ErrorCode.SOURCE_HDR_UNSUPPORTED,
-            "source.probe.hdr",
-            "HDR and wide-gamut BT.2020 video is unsupported in V1",
-            "convert-source-to-8bit-srgb",
-        )
+    if side_data_names & _HDR_SIDE_DATA:
+        raise _unsupported_color("HDR side data is unsupported")
+    _color_profile(stream, frame)
+
+
+@dataclass(frozen=True, slots=True)
+class _ColorProfile:
+    matrix: int
+    color_range: int
+    transfer: int
+    primaries: int
+    rgb_input: bool
+
+
+def _color_profile(stream: Any, frame: Any) -> _ColorProfile:
+    codec = stream.codec_context
+    pixel_format = _pixel_format(frame, codec).lower()
+    rgb_input = pixel_format.startswith(("rgb", "rgba", "gbr", "bgr"))
+    primaries = _resolved_color_value(
+        "primaries",
+        getattr(frame, "color_primaries", None),
+        getattr(codec, "color_primaries", None),
+        unspecified=2,
+    )
+    transfer = _resolved_color_value(
+        "transfer",
+        getattr(frame, "color_trc", None),
+        getattr(codec, "color_trc", None),
+        unspecified=2,
+    )
+    matrix = _resolved_color_value(
+        "matrix",
+        getattr(frame, "colorspace", None),
+        getattr(codec, "colorspace", None),
+        unspecified=2,
+    )
+    color_range = _resolved_color_value(
+        "range",
+        getattr(frame, "color_range", None),
+        getattr(codec, "color_range", None),
+        unspecified=0,
+    )
+    if primaries in {9, 11, 12, 22}:
+        raise _unsupported_color("P3, BT.2020, and other wide-gamut primaries")
+    if primaries not in {1, 2, 5, 6}:
+        raise _unsupported_color(f"unsupported color primaries {primaries}")
+    if transfer not in {1, 2, 6, 13}:
+        raise _unsupported_color(f"unsupported transfer characteristic {transfer}")
+    if matrix not in {0, 1, 2, 5, 6}:
+        raise _unsupported_color(f"unsupported YUV matrix {matrix}")
+    if color_range not in {0, 1, 2}:
+        raise _unsupported_color(f"unsupported color range {color_range}")
+    if rgb_input and matrix not in {0, 2}:
+        raise _unsupported_color("RGB input declares a YUV matrix")
+    if not rgb_input and matrix == 0:
+        raise _unsupported_color("YUV input declares the RGB identity matrix")
+    if matrix == 2:
+        matrix = 1 if int(getattr(frame, "height", 0)) >= 720 else 5
+    if color_range == 0:
+        color_range = 2 if rgb_input else 1
+    return _ColorProfile(matrix, color_range, transfer, primaries, rgb_input)
+
+
+def _resolved_color_value(
+    name: str,
+    frame_value: object,
+    codec_value: object,
+    *,
+    unspecified: int,
+) -> int:
+    frame_int = _metadata_int(frame_value)
+    codec_int = _metadata_int(codec_value)
+    explicit = {
+        value
+        for value in (frame_int, codec_int)
+        if value is not None and value != unspecified
+    }
+    if len(explicit) > 1:
+        raise _unsupported_color(f"frame and codec {name} metadata conflict")
+    if frame_int is not None and frame_int != unspecified:
+        return frame_int
+    if codec_int is not None and codec_int != unspecified:
+        return codec_int
+    return unspecified
+
+
+def _unsupported_color(detail: str) -> AppError:
+    return _source_error(
+        ErrorCode.SOURCE_HDR_UNSUPPORTED,
+        "source.probe.unsupported-color",
+        detail,
+        "convert-source-to-8bit-srgb",
+    )
 
 
 def _pixel_format(frame: Any, codec: Any) -> str:
@@ -488,8 +935,32 @@ def _pixel_format_is_high_depth(name: str) -> bool:
 
 def _normalized_image(frame: Any, stream: Any, metadata_frame: Any) -> Image.Image:
     try:
-        image = frame.to_image().convert("RGBA")
-        pixel_aspect = _pixel_aspect(stream)
+        profile = _color_profile(stream, frame)
+        _validate_frame_color(stream, frame)
+        if profile.rgb_input:
+            converted = (
+                frame.reformat(format="rgba") if hasattr(frame, "reformat") else frame
+            )
+        else:
+            colorspace = {
+                1: Colorspace.ITU709,
+                5: Colorspace.ITU601,
+                6: Colorspace.ITU601,
+            }[profile.matrix]
+            converted = VideoReformatter().reformat(
+                frame,
+                format="rgba",
+                src_colorspace=colorspace,
+                dst_colorspace=Colorspace.ITU709,
+                src_color_range=(
+                    ColorRange.JPEG if profile.color_range == 2 else ColorRange.MPEG
+                ),
+                dst_color_range=ColorRange.JPEG,
+            )
+        image = converted.to_image().convert("RGBA")
+        if profile.transfer in {1, 6}:
+            image = _convert_bt709_transfer_to_srgb(image)
+        rotation, pixel_aspect = _orientation(stream, frame, metadata_frame)
         if pixel_aspect != 1:
             display_width = max(
                 1, _round_fraction(Fraction(image.width) * pixel_aspect)
@@ -497,7 +968,6 @@ def _normalized_image(frame: Any, stream: Any, metadata_frame: Any) -> Image.Ima
             image = image.resize(
                 (display_width, image.height), Image.Resampling.LANCZOS
             )
-        rotation = _rotation(stream, metadata_frame)
         transpose = {
             90: Image.Transpose.ROTATE_90,
             180: Image.Transpose.ROTATE_180,
@@ -520,6 +990,27 @@ def _normalized_image(frame: Any, stream: Any, metadata_frame: Any) -> Image.Ima
             f"frame could not be normalized to sRGB RGBA: {error}",
             "convert-source-to-8bit-srgb",
         ) from error
+
+
+def _convert_bt709_transfer_to_srgb(image: Image.Image) -> Image.Image:
+    lut: list[int] = []
+    for value in range(256):
+        encoded = value / 255
+        linear = (
+            encoded / 4.5
+            if encoded < 0.081
+            else ((encoded + 0.099) / 1.099) ** (1 / 0.45)
+        )
+        srgb = (
+            linear * 12.92
+            if linear <= 0.0031308
+            else 1.055 * linear ** (1 / 2.4) - 0.055
+        )
+        lut.append(min(255, max(0, math.floor(srgb * 255 + 0.5))))
+    red, green, blue, alpha = image.split()
+    return Image.merge(
+        "RGBA", (red.point(lut), green.point(lut), blue.point(lut), alpha)
+    )
 
 
 def _fraction_or_none(value: object) -> Fraction | None:
