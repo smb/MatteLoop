@@ -177,7 +177,7 @@ def test_local_prepare_downloads_before_start_with_exact_safe_launch_payload(
 
 
 def test_cloth_launch_uses_internal_full_default_and_preserves_source_shape(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     manager, _downloader, clients, _events = _manager(tmp_path)
 
@@ -195,6 +195,9 @@ def test_cloth_launch_uses_internal_full_default_and_preserves_source_shape(
     source = np.zeros((4, 7, 3), dtype=np.uint8)
     prepared = _PreparedRembgSession(FakeClothSession(), (("cloth_category", "full"),))
 
+    # The pinned ORT import creates a telemetry session marker in its current
+    # directory on macOS; keep that third-party test artifact in pytest's temp.
+    monkeypatch.chdir(tmp_path)
     result = _run_rembg(source, prepared)
 
     assert result.shape == (4, 7, 4)

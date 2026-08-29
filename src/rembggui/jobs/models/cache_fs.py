@@ -83,6 +83,21 @@ class BoundDirectoryCloseError(Exception):
         super().__init__(f"could not close bound model cache: {close_error}")
 
 
+class FileDescriptorCloseError(OSError):
+    """An fd-wrapper failure whose attempted descriptor cleanup also failed."""
+
+    __slots__ = ("close_error", "primary_error")
+
+    def __init__(
+        self, close_error: BaseException, primary_error: BaseException
+    ) -> None:
+        self.close_error = close_error
+        self.primary_error = primary_error
+        super().__init__(
+            "could not close model-cache descriptor after file wrapper failure"
+        )
+
+
 class BoundModelDirectory:
     """A model directory whose namespace cannot be redirected while bound."""
 
@@ -178,7 +193,16 @@ class BoundModelDirectory:
             descriptor = api.open_new_at(self._windows_handles[-1], filename)
         else:
             descriptor = os.open(self.path / filename, flags, 0o600)
-        return os.fdopen(descriptor, "wb")
+        try:
+            return os.fdopen(descriptor, "wb")
+        except BaseException as primary_error:
+            try:
+                os.close(descriptor)
+            except BaseException as close_error:
+                raise FileDescriptorCloseError(
+                    close_error, primary_error
+                ) from primary_error
+            raise
 
     def unlink_regular(self, filename: str) -> bool:
         _validate_filename(filename)
@@ -771,6 +795,10 @@ class _CtypesWindowsDirectoryApi:
     def flush_directory(self, directory_handle: int) -> None:
         import ctypes
 
+        # The artifact file itself was already flushed through its CRT fd.
+        # Windows may reject FlushFileBuffers on our read-only directory handle;
+        # directory durability is best-effort rather than weakening the binding
+        # by reopening this handle with GENERIC_WRITE.
         if self._flush_file_buffers(directory_handle):
             return
         last_error = getattr(ctypes, "get_last_error")()

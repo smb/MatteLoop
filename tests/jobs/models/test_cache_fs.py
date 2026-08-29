@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import errno
 import os
 import sys
 from pathlib import Path, PureWindowsPath
@@ -364,6 +365,143 @@ def test_windows_bound_file_lifecycle_stays_relative_to_original_handle(
     )
     assert api.flushed_handles == [model_handle]
     bound.close()
+
+
+def test_open_new_fdopen_failure_closes_transferred_fd_and_allows_windows_unlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _version, model = _namespace(tmp_path)
+    api = FakeWindowsDirectoryApi()
+    bound = _bind_windows(root, "2.0.72", "u2net", create=False, api=api)
+    assert bound is not None
+    primary = RuntimeError("synthetic fdopen failure")
+    captured: list[int] = []
+
+    def fail_fdopen(descriptor: int, *_args: object, **_kwargs: object) -> object:
+        captured.append(descriptor)
+        raise primary
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "fdopen", fail_fdopen)
+            with pytest.raises(RuntimeError) as caught:
+                bound.open_new("failed.part")
+
+        assert caught.value is primary
+        descriptor = captured[0]
+        with pytest.raises(OSError) as closed:
+            os.fstat(descriptor)
+        assert closed.value.errno == errno.EBADF
+        assert bound.unlink_regular("failed.part") is True
+        assert not (model / "failed.part").exists()
+    finally:
+        if captured:
+            try:
+                os.close(captured[0])
+            except OSError:
+                pass
+        bound.close()
+
+
+def test_open_new_fdopen_and_fd_close_failure_preserves_both_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _version, _model = _namespace(tmp_path)
+    api = FakeWindowsDirectoryApi()
+    bound = _bind_windows(root, "2.0.72", "u2net", create=False, api=api)
+    assert bound is not None
+    real_close = os.close
+    primary = RuntimeError("synthetic fdopen failure")
+    cleanup = OSError("synthetic fd cleanup failure")
+    captured: list[int] = []
+    close_calls: list[int] = []
+
+    def fail_fdopen(descriptor: int, *_args: object, **_kwargs: object) -> object:
+        captured.append(descriptor)
+        raise primary
+
+    def fail_close(descriptor: int) -> None:
+        close_calls.append(descriptor)
+        raise cleanup
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "fdopen", fail_fdopen)
+            patch.setattr(os, "close", fail_close)
+            with pytest.raises(BaseException) as caught:
+                bound.open_new("failed.part")
+
+        descriptor = captured[0]
+        failure = caught.value
+        assert isinstance(failure, cache_fs.FileDescriptorCloseError)
+        assert failure is not primary
+        assert failure.__cause__ is primary
+        assert failure.primary_error is primary
+        assert failure.close_error is cleanup
+        assert close_calls == [descriptor]
+    finally:
+        if captured:
+            real_close(captured[0])
+            bound.unlink_regular("failed.part")
+        bound.close()
+
+
+def test_windows_native_open_new_validation_failure_closes_before_transfer() -> None:
+    closed: list[int] = []
+    primary = UnsafeCacheError("synthetic validation failure")
+
+    class TestApi(cache_fs._CtypesWindowsDirectoryApi):
+        def _open_relative(self, *_args: object, **_kwargs: object) -> int:
+            return 321
+
+        def _require_regular_file_handle(self, handle: int) -> None:
+            assert handle == 321
+            raise primary
+
+        def _handle_to_fd(self, _handle: int, _flags: int) -> int:
+            raise AssertionError("CRT ownership transfer must not run")
+
+        def close_handle(self, handle: int) -> None:
+            closed.append(handle)
+
+    api = object.__new__(TestApi)
+
+    with pytest.raises(UnsafeCacheError) as caught:
+        api.open_new_at(123, "model.onnx.part")
+
+    assert caught.value is primary
+    assert closed == [321]
+
+
+def test_open_new_success_transfers_fd_ownership_to_file_object(
+    tmp_path: Path,
+) -> None:
+    root, _version, model = _namespace(tmp_path)
+    api = FakeWindowsDirectoryApi()
+    opened_descriptors: list[int] = []
+    original_open_new = api.open_new_at
+
+    def capture_open_new(directory_handle: int, filename: str) -> int:
+        descriptor = original_open_new(directory_handle, filename)
+        opened_descriptors.append(descriptor)
+        return descriptor
+
+    api.open_new_at = capture_open_new  # type: ignore[method-assign]
+    bound = _bind_windows(root, "2.0.72", "u2net", create=False, api=api)
+    assert bound is not None
+
+    try:
+        with bound.open_new("success.part") as output:
+            output.write(b"verified")
+            os.fstat(opened_descriptors[0])
+
+        with pytest.raises(OSError) as closed:
+            os.fstat(opened_descriptors[0])
+        assert closed.value.errno == errno.EBADF
+        assert (model / "success.part").read_bytes() == b"verified"
+    finally:
+        bound.unlink_regular("success.part")
+        bound.close()
 
 
 def test_windows_binding_midway_native_open_error_closes_all_prior_handles(

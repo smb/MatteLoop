@@ -47,27 +47,31 @@ replacement lifecycle, and the manifest-bound Task 8 child launch boundary.
   full-path `CreateFileW` operation. Every descendant directory is opened or
   created with `NtCreateFile` and `OBJECT_ATTRIBUTES.RootDirectory` set to its
   already-validated parent handle.
-  Immediately after each `CreateFileW`,
+  Immediately after every anchor or handle-relative directory open,
   `GetFileInformationByHandleEx(FileAttributeTagInfo)` proves that the opened
   object has `FILE_ATTRIBUTE_DIRECTORY` and not
   `FILE_ATTRIBUTE_REPARSE_POINT`; all validated handles remain held while the
-  next full-path component is opened/created and until the file operation
-  finishes. There is no pre-binding `resolve`, `lstat`, or recursive directory
-  creation window. Missing-component early returns and all exceptions close
-  every already-opened handle exactly once in reverse order.
+  next handle-relative child component is opened/created and until the file
+  operation finishes. There is no pre-binding `resolve`, `lstat`, or recursive
+  directory creation window. Missing-component early returns and all exceptions
+  close every already-opened handle exactly once in reverse order.
 - On Windows, model-file stat/open/create/unlink/atomic-replace/directory-flush
   and identity checks are also handle-relative. Reads and new files use
-  `NtCreateFile` from the bound model handle; deletion and replacement use
-  `SetFileInformationByHandle`, with rename destinations rooted at that same
-  handle. A later in-place reparse mutation of a lexical directory name can be
+  `NtCreateFile` from the bound model handle. Deletion uses
+  `SetFileInformationByHandle`; replacement uses `NtSetInformationFile` on the
+  bound-opened source with a null root and validated same-directory simple
+  name. A later in-place reparse mutation of a lexical directory name can be
   detected but cannot redirect these operations to the new target.
 - Streams only bounded native chunks, enforces manifest size on both overrun
   and EOF, emits progress only when a valid known total exists, and checks
   cancellation before/between/after reads and before promotion.
 - Verifies SHA-256, re-proves the promoted entry is the same written inode,
-  fsyncs the file and directory where supported, closes the
-  transport before promotion, and exposes cleanup failures instead of hiding
-  them.
+  mandatorily flushes and fsyncs the artifact file, then attempts a directory
+  flush where supported. On Windows, `ERROR_ACCESS_DENIED` from
+  `FlushFileBuffers` on the read-only bound directory handle is an explicit
+  best-effort limitation; the handle is never reopened with `GENERIC_WRITE`.
+  The downloader closes the transport before promotion and exposes cleanup
+  failures instead of hiding them.
 - Reuses a cache entry only after a fresh descriptor-bound size/SHA proof;
   invalid cache entries are never reused. A process-wide path lock provides
   same-target single flight across downloader instances. Its key is an
@@ -394,6 +398,64 @@ All checks passed!
 
 uv run mypy src
 Success: no issues found in 23 source files
+
+git diff --check
+clean
+```
+
+### Fix round 5
+
+RED evidence:
+
+```text
+uv run pytest \
+  tests/jobs/models/test_cache_fs.py::test_open_new_fdopen_failure_closes_transferred_fd_and_allows_windows_unlink \
+  tests/jobs/models/test_cache_fs.py::test_open_new_fdopen_and_fd_close_failure_preserves_both_once \
+  tests/jobs/models/test_cache_fs.py::test_windows_native_open_new_validation_failure_closes_before_transfer \
+  tests/jobs/models/test_cache_fs.py::test_open_new_success_transfers_fd_ownership_to_file_object -q
+2 failed, 2 passed: os.fdopen failure leaked the transferred descriptor and no combined cleanup error existed
+```
+
+`BoundModelDirectory.open_new` now treats the raw descriptor as its property
+until `os.fdopen` succeeds. Any `BaseException` from that transfer closes the
+descriptor exactly once before re-raising the original error. If descriptor
+close also fails, `FileDescriptorCloseError` retains both `primary_error` and
+`close_error` and chains directly from the primary error. As an `OSError`, it
+also follows the downloader's existing structured storage-error mapping. The
+regression uses a real OS descriptor behind the Windows cache abstraction: it
+proves `EBADF` after wrapper failure, then removes the `.part` entry through the
+bound handle. Separate ownership cases cover validation failure before CRT
+transfer and a successful file object close.
+
+The one test that lazily imports pinned ORT now changes into pytest's temporary
+directory first. This contains ORT's macOS `:memory:.ses` telemetry marker in
+test-owned storage; both the focused and full gates leave the workspace clean.
+
+The artifact descriptor's `flush` plus `fsync` remains mandatory. Directory
+flush remains a best-effort durability enhancement on the read-only Windows
+directory handle; `ERROR_ACCESS_DENIED` is treated as unsupported rather than
+requesting `GENERIC_WRITE`. Task 17 must qualify actual artifact and directory
+durability across supported Windows filesystems and power-loss boundaries.
+
+GREEN evidence:
+
+```text
+uv run pytest tests/jobs/models -q
+124 passed in 0.70s
+
+uv run pytest -q
+643 passed in 40.09s (exit 0, outside the filesystem sandbox so POSIX shared memory is available)
+
+uv run ruff check .
+All checks passed!
+
+uv run mypy src
+Success: no issues found in 23 source files
+
+uv run ruff format --check \
+  src/rembggui/jobs/models/cache_fs.py tests/jobs/models/test_cache_fs.py \
+  tests/jobs/models/test_session.py
+3 files already formatted
 
 git diff --check
 clean
