@@ -78,14 +78,15 @@ type JsonValue = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
 type CancellationCheck = Callable[[], bool]
 
 
+@dataclass(frozen=True, slots=True, init=False, eq=False)
 class FrozenJsonMap(Mapping[str, FrozenJsonValue]):
     """Small recursively immutable mapping used by frozen manifests."""
 
-    __slots__ = ("_items",)
+    _items: tuple[tuple[str, FrozenJsonValue], ...]
 
     def __init__(self, items: Sequence[tuple[str, FrozenJsonValue]]) -> None:
         ordered = tuple(sorted(items, key=lambda item: item[0]))
-        self._items = ordered
+        object.__setattr__(self, "_items", ordered)
 
     def __getitem__(self, key: str) -> FrozenJsonValue:
         for candidate, value in self._items:
@@ -592,7 +593,7 @@ class CutWorkspace:
         try:
             with _BoundDirectory.open(self.path) as bound:
                 descriptor = bound.open_read(expected.filename)
-                with os.fdopen(descriptor, "rb") as source:
+                with _fdopen_owned(descriptor, "rb") as source:
                     with Image.open(source) as opened:
                         opened.load()
                         result = opened.copy()
@@ -613,6 +614,8 @@ class CutWorkspace:
     def set_pinned(self, pinned: bool, *, now_ns: int | None = None) -> CutManifest:
         if type(pinned) is not bool:
             raise TypeError("pinned must be a bool")
+        if self.lifecycle is not WorkspaceLifecycle.PROMOTED:
+            raise _set_error("pin updates require a promoted cut workspace")
         with _promotion_lock(str(self.cuts_root / self.cache_key)):
             detect_external_edits(self, now_ns=now_ns)
             manifest, identity = _read_manifest(self.path)
@@ -893,8 +896,8 @@ def detect_external_edits(
 ) -> CutManifest:
     """Rescan valid cuts, persist current hashes, and invalidate derived union data."""
     _require_workspace(workspace)
-    if workspace.lifecycle is WorkspaceLifecycle.STAGING:
-        raise _set_error("external edit detection requires durable cuts")
+    if workspace.lifecycle is not WorkspaceLifecycle.PROMOTED:
+        raise _set_error("external edit detection requires promoted durable cuts")
     with _promotion_lock(str(workspace.cuts_root / workspace.cache_key)):
         manifest, manifest_identity = _read_manifest(workspace.path)
         frames, _identities = _scan_cut_set(
@@ -1265,7 +1268,7 @@ def _inspect_frame(
     try:
         with _BoundDirectory.open(directory) as bound:
             descriptor = bound.open_read(expected.filename)
-            with os.fdopen(descriptor, "rb") as source:
+            with _fdopen_owned(descriptor, "rb") as source:
                 before = os.fstat(source.fileno())
                 if not stat.S_ISREG(before.st_mode):
                     raise _unsafe_error(f"frame {expected.filename} is not regular")
@@ -1597,17 +1600,39 @@ class _BoundDirectory:
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        self.close()
+        try:
+            self.close()
+        except AppError as error:
+            if exc_value is not None:
+                error.add_note(
+                    f"bound-directory close failed while handling: {exc_value}"
+                )
+            raise
 
     def close(self) -> None:
+        failures: list[OSError] = []
         descriptor = self.descriptor
-        self.descriptor = None
         if descriptor is not None:
-            os.close(descriptor)
+            try:
+                os.close(descriptor)
+            except OSError as error:
+                failures.append(error)
+            else:
+                self.descriptor = None
         handles = self._windows_handles
-        self._windows_handles = ()
+        failed_handles: set[int] = set()
         for handle in reversed(handles):
-            self._windows_api.close_handle(handle)
+            try:
+                self._windows_api.close_handle(handle)
+            except OSError as error:
+                failures.append(error)
+                failed_handles.add(handle)
+        self._windows_handles = tuple(
+            handle for handle in handles if handle in failed_handles
+        )
+        if failures:
+            detail = "; ".join(str(error) for error in failures)
+            raise _unsafe_error(f"cannot close bound workspace resources: {detail}")
 
     def assert_still_named(self) -> None:
         if self._windows_handles:
@@ -1639,6 +1664,10 @@ class _BoundDirectory:
         try:
             if self.descriptor is not None:
                 os.mkdir(name, mode=0o700, dir_fd=self.descriptor)
+            elif self._windows_handles:
+                self._windows_api.mkdir_at(
+                    self._windows_handles[-1], name, exist_ok=exist_ok
+                )
             else:
                 os.mkdir(self.path / name, mode=0o700)
         except FileExistsError:
@@ -1666,16 +1695,16 @@ class _BoundDirectory:
             from rembggui.jobs.models.cache_fs import (
                 _FILE_ATTRIBUTE_DIRECTORY,
                 _FILE_ATTRIBUTE_REPARSE_POINT,
-                _WINDOWS_DIRECTORY_ACCESS,
                 _WINDOWS_DIRECTORY_FLAGS,
                 _WINDOWS_DIRECTORY_SHARE,
+                _WINDOWS_WRITABLE_DIRECTORY_ACCESS,
             )
 
             handle = self._windows_api.open_child_directory(
                 self._windows_handles[-1],
                 name,
                 create=False,
-                desired_access=_WINDOWS_DIRECTORY_ACCESS,
+                desired_access=_WINDOWS_WRITABLE_DIRECTORY_ACCESS,
                 share_mode=_WINDOWS_DIRECTORY_SHARE,
                 flags=_WINDOWS_DIRECTORY_FLAGS,
             )
@@ -1751,11 +1780,7 @@ class _BoundDirectory:
 
     def open_new(self, name: str) -> BinaryIO:
         descriptor = self.open_new_fd(name)
-        try:
-            return os.fdopen(descriptor, "wb")
-        except BaseException:
-            os.close(descriptor)
-            raise
+        return _fdopen_owned(descriptor, "wb")
 
     def replace(self, source: str, destination: str) -> None:
         _validate_component(source)
@@ -1809,12 +1834,29 @@ class _BoundDirectory:
         else:
             os.rmdir(self.path / name)
 
-    def iter_entries(self) -> Iterator[tuple[str, os.stat_result]]:
+    def iter_entries(
+        self, *, max_entries: int | None = None
+    ) -> Iterator[tuple[str, os.stat_result]]:
+        if max_entries is None:
+            max_entries = MAX_FRAME_COUNT + 16
+        _bounded_int(
+            max_entries,
+            "directory enumeration count",
+            minimum=1,
+            maximum=MAX_FRAME_COUNT + 16,
+        )
+        if self._windows_handles:
+            yield from self._windows_api.iter_entries_at(
+                self._windows_handles[-1], max_entries=max_entries
+            )
+            return
         target: int | Path = (
             self.descriptor if self.descriptor is not None else self.path
         )
         with os.scandir(target) as entries:
-            for entry in entries:
+            for count, entry in enumerate(entries, start=1):
+                if count > max_entries:
+                    raise _unsafe_error("directory entry count exceeds its bound")
                 yield entry.name, entry.stat(follow_symlinks=False)
 
     def fsync(self) -> None:
@@ -1968,20 +2010,39 @@ def _windows_drive_type_is_local(drive_type: int) -> bool:
 
 
 def _linux_mount_is_local(device: int) -> bool:
-    network_types = {
-        "9p",
-        "afs",
-        "ceph",
-        "cifs",
-        "fuse.sshfs",
-        "glusterfs",
-        "nfs",
-        "nfs4",
-        "smb3",
-    }
     major_minor = f"{os.major(device)}:{os.minor(device)}"
     with open("/proc/self/mountinfo", "rb") as source:
         encoded = source.read(MAX_MOUNTINFO_BYTES + 1)
+    return _linux_mountinfo_is_local(encoded, major_minor)
+
+
+def _linux_mountinfo_is_local(encoded: bytes, major_minor: str) -> bool:
+    local_types = {
+        "aufs",
+        "btrfs",
+        "erofs",
+        "exfat",
+        "ext2",
+        "ext3",
+        "ext4",
+        "f2fs",
+        "hfsplus",
+        "iso9660",
+        "jfs",
+        "nilfs2",
+        "ntfs",
+        "ntfs3",
+        "overlay",
+        "ramfs",
+        "reiserfs",
+        "squashfs",
+        "tmpfs",
+        "udf",
+        "ufs",
+        "vfat",
+        "xfs",
+        "zfs",
+    }
     if len(encoded) > MAX_MOUNTINFO_BYTES:
         raise OSError(errno.EOVERFLOW, "mount table exceeds its parsing bound")
     matches: list[str] = []
@@ -2001,14 +2062,14 @@ def _linux_mount_is_local(device: int) -> bool:
             raise OSError(errno.EOVERFLOW, "device has too many mount bindings")
     if not matches:
         raise OSError(errno.ENODEV, "workspace mount identity is unavailable")
-    return all(filesystem not in network_types for filesystem in matches)
+    return all(filesystem in local_types for filesystem in matches)
 
 
 def _read_manifest(path: Path) -> tuple[CutManifest, tuple[int, int, int, int, int]]:
     try:
         with _BoundDirectory.open(path) as bound:
             descriptor = bound.open_read(MANIFEST_FILENAME)
-            with os.fdopen(descriptor, "rb") as source:
+            with _fdopen_owned(descriptor, "rb") as source:
                 before = os.fstat(source.fileno())
                 if not stat.S_ISREG(before.st_mode):
                     raise _unsafe_error("manifest is not a regular file")
@@ -2125,7 +2186,7 @@ def _recover_promotion(cuts_root: Path, cache_key: str) -> None:
                 ):
                     raise _unsafe_error("promotion recovery marker is redirected")
                 descriptor = bound.open_read(marker.name)
-                with os.fdopen(descriptor, "rb") as source:
+                with _fdopen_owned(descriptor, "rb") as source:
                     opened_before = os.fstat(source.fileno())
                     if not 1 <= opened_before.st_size <= 16 * 1024:
                         raise _promotion_error(
@@ -2666,6 +2727,20 @@ def _hash_file(source: BinaryIO) -> str:
     while chunk := source.read(COPY_CHUNK_BYTES):
         digest.update(chunk)
     return digest.hexdigest()
+
+
+def _fdopen_owned(descriptor: int, mode: str) -> BinaryIO:
+    """Transfer one descriptor to a file object or close it exactly once."""
+    try:
+        return cast(BinaryIO, os.fdopen(descriptor, mode))
+    except BaseException as primary_error:
+        try:
+            os.close(descriptor)
+        except BaseException as close_error:
+            primary_error.add_note(
+                f"additional descriptor cleanup failure: {close_error}"
+            )
+        raise
 
 
 def _sha256_fd(descriptor: int) -> str:

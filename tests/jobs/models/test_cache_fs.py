@@ -19,6 +19,7 @@ _FILE_SHARE_WRITE = 0x00000002
 _FILE_WRITE_DATA = 0x00000002
 _FILE_WRITE_ATTRIBUTES = 0x00000100
 _GENERIC_READ = 0x80000000
+_GENERIC_WRITE = 0x40000000
 _HARDENED_DIRECTORY_FLAGS = 0x02000000 | 0x00200000
 
 
@@ -874,3 +875,146 @@ def test_windows_early_return_attempts_every_close_after_one_close_failure(
         _bind_windows(root, "2.0.72", "u2net", create=False, api=api)
 
     assert api.closed == list(reversed(handles))
+
+
+def test_windows_native_mkdir_is_relative_and_flushes_bound_parent() -> None:
+    opened: list[tuple[int, str, int, int, int]] = []
+    closed: list[int] = []
+    flushed: list[int] = []
+
+    class TestApi(cache_fs._CtypesWindowsDirectoryApi):
+        def _open_relative(
+            self,
+            parent_handle: int,
+            name: str,
+            *,
+            desired_access: int,
+            share_mode: int,
+            disposition: int,
+            options: int,
+        ) -> int:
+            opened.append((parent_handle, name, desired_access, disposition, options))
+            assert share_mode == _FILE_SHARE_READ
+            return 77
+
+        def file_attributes(self, handle: int) -> int:
+            assert handle == 77
+            return _FILE_ATTRIBUTE_DIRECTORY
+
+        def close_handle(self, handle: int) -> None:
+            closed.append(handle)
+
+        def flush_directory_strict(self, handle: int) -> None:
+            flushed.append(handle)
+
+    api = object.__new__(TestApi)
+
+    api.mkdir_at(12, "child", exist_ok=False)
+
+    assert opened == [
+        (
+            12,
+            "child",
+            _GENERIC_READ | _GENERIC_WRITE,
+            2,
+            0x00000001 | 0x00000020 | 0x00200000,
+        )
+    ]
+    assert closed == [77]
+    assert flushed == [12]
+
+
+def test_windows_native_mkdir_removes_new_child_when_parent_flush_fails() -> None:
+    removed: list[tuple[int, str]] = []
+
+    class TestApi(cache_fs._CtypesWindowsDirectoryApi):
+        def _open_relative(self, *_args: object, **_kwargs: object) -> int:
+            return 77
+
+        def file_attributes(self, _handle: int) -> int:
+            return _FILE_ATTRIBUTE_DIRECTORY
+
+        def close_handle(self, _handle: int) -> None:
+            pass
+
+        def flush_directory_strict(self, _handle: int) -> None:
+            raise OSError("injected directory flush failure")
+
+        def rmdir_at(self, handle: int, name: str) -> None:
+            removed.append((handle, name))
+
+    api = object.__new__(TestApi)
+
+    with pytest.raises(OSError, match="flush failure"):
+        api.mkdir_at(12, "child", exist_ok=False)
+
+    assert removed == [(12, "child")]
+
+
+def test_windows_native_enumeration_parses_names_from_bound_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queries: list[int] = []
+    regular = os.stat_result((0o100600, 1, 1, 1, 0, 0, 1, 0, 0, 0))
+
+    class FileIdBothDirectoryInfo(ctypes.Structure):
+        _fields_ = (
+            ("NextEntryOffset", ctypes.c_uint32),
+            ("FileIndex", ctypes.c_uint32),
+            ("CreationTime", ctypes.c_int64),
+            ("LastAccessTime", ctypes.c_int64),
+            ("LastWriteTime", ctypes.c_int64),
+            ("ChangeTime", ctypes.c_int64),
+            ("EndOfFile", ctypes.c_int64),
+            ("AllocationSize", ctypes.c_int64),
+            ("FileAttributes", ctypes.c_uint32),
+            ("FileNameLength", ctypes.c_uint32),
+            ("EaSize", ctypes.c_uint32),
+            ("ShortNameLength", ctypes.c_ubyte),
+            ("ShortName", ctypes.c_uint16 * 12),
+            ("FileId", ctypes.c_int64),
+            ("FileName", ctypes.c_uint16 * 1),
+        )
+
+    class TestApi(cache_fs._CtypesWindowsDirectoryApi):
+        def _get_information(
+            self, handle: int, info_class: int, buffer: object, size: int
+        ) -> int:
+            assert handle == 88
+            queries.append(info_class)
+            if len(queries) > 1:
+                return 0
+            ctypes.memset(ctypes.addressof(buffer), 0, size)
+            offset = 0
+            for index, name in enumerate(("alpha.bin", "beta.bin")):
+                encoded = name.encode("utf-16-le")
+                address = ctypes.addressof(buffer) + offset
+                info = ctypes.cast(
+                    address, ctypes.POINTER(FileIdBothDirectoryInfo)
+                ).contents
+                info.FileNameLength = len(encoded)
+                ctypes.memmove(
+                    address + FileIdBothDirectoryInfo.FileName.offset,
+                    encoded,
+                    len(encoded),
+                )
+                if index == 0:
+                    record_size = (
+                        FileIdBothDirectoryInfo.FileName.offset + len(encoded) + 7
+                    ) & ~7
+                    info.NextEntryOffset = record_size
+                    offset += record_size
+            return 1
+
+        def lstat_at(self, directory_handle: int, filename: str) -> os.stat_result:
+            assert directory_handle == 88
+            assert filename in {"alpha.bin", "beta.bin"}
+            return regular
+
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 18, raising=False)
+    api = object.__new__(TestApi)
+
+    entries = list(api.iter_entries_at(88, max_entries=2))
+
+    assert [name for name, _info in entries] == ["alpha.bin", "beta.bin"]
+    assert queries == [11, 10]

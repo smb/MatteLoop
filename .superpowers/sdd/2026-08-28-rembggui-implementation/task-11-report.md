@@ -85,11 +85,40 @@ layer's tests:
 81 passed in 1.35s
 ```
 
+### Review fix round 2 RED/GREEN
+
+The second review found that several Windows operations still fell back to a
+lexical path after a directory handle had been bound, and identified four
+related contract gaps. Focused RED tests first proved that a redirected lexical
+path could receive Windows directory creation, enumeration, and recursive
+deletion; that `FrozenJsonMap._items` could be reassigned or deleted; that one
+failed handle close prevented later closes; that an `os.fdopen` failure leaked
+its transferred descriptor; that snapshot manifests remained writable through
+the pin/edit APIs; and that unknown and arbitrary FUSE Linux filesystems were
+admitted. Native-API unit tests also established the handle-relative Windows
+creation, enumeration, flush, and failed-flush cleanup contract.
+
+The initial focused RED was:
+
+```text
+.venv/bin/pytest -q tests/jobs/test_workspace.py -k \
+  'slot_reassignment or windows_bound_mkdir or windows_bound_enumeration or windows_close_attempts or mountinfo_uses or snapshot_rejects_every_manifest_mutator or fdopen_failure'
+15 failed, 51 deselected
+```
+
+Final review-fix focused GREEN:
+
+```text
+.venv/bin/pytest -q tests/jobs/models/test_cache_fs.py tests/jobs/test_workspace.py
+100 passed in 1.72s
+```
+
 ## Architecture and safety decisions
 
 - `CutManifest`, `CutFrame`, `CutUnionMetadata`, workspace summaries, listings,
   and cleanup results are frozen. Cache-key JSON is recursively frozen through
-  `FrozenJsonMap`; nested mutation is impossible.
+  a frozen, slotted `FrozenJsonMap` whose only stored collection is an immutable
+  tuple; nested mutation and ordinary slot reassignment/deletion are impossible.
 - Manifest JSON is UTF-8, canonical, sorted, compact, newline-terminated,
   deterministic, versioned, duplicate-key rejecting, non-finite rejecting,
   exact-key strict, and atomically fsync/replace persisted. Parsing is capped at
@@ -110,15 +139,24 @@ layer's tests:
   directory. POSIX walks every component with no-follow directory descriptors;
   Windows reuses the native handle-relative, no-reparse binding from the model
   cache and keeps ancestor handles open without delete/write sharing. Creation,
-  file I/O, promotion rename, and recursive deletion are relative to a bound
-  parent. Traversal and symlink/junction/reparse redirection are rejected, and
-  every exceptional bind path closes all acquired descriptors/handles.
+  enumeration, file I/O, promotion rename, and recursive deletion are relative
+  to a bound parent. Windows directory enumeration consumes the bound handle,
+  and directory creation uses a relative native create followed by strict parent
+  durability and handle-relative cleanup on failure. Traversal and
+  symlink/junction/reparse redirection are rejected. Every exceptional bind path
+  closes all acquired descriptors/handles; multi-handle close attempts all
+  owners, retains any failed ownership for retry, and reports one structured
+  combined failure. Descriptor-to-file-object transfers close the descriptor
+  exactly once if `os.fdopen` fails.
 - Local-filesystem admission is descriptor-bound: macOS uses native `fstatfs`
-  `MNT_LOCAL`, Linux binds `st_dev` to bounded `/proc/self/mountinfo` parsing and
-  rejects known remote filesystem types, and Windows rejects remote/unknown
-  drive types while accepting removable local volumes. Workspace directory
-  flushes on Windows are strict: inability to confirm durability is a structured
-  failure instead of an unreported best-effort success.
+  `MNT_LOCAL`; Linux binds `st_dev` to bounded `/proc/self/mountinfo` parsing and
+  admits only an explicit reviewed set of local, memory, image, and container
+  filesystem types; and Windows rejects remote/unknown drive types while
+  accepting removable local volumes. The Linux policy deliberately fails closed
+  for unknown local filesystems and arbitrary FUSE subtypes until they are
+  reviewed and added. Workspace directory flushes on Windows are strict:
+  inability to confirm durability is a structured failure instead of an
+  unreported best-effort success.
 - Staging directories are siblings of `cuts/<cache-key>`. Invalid stages are
   removed. First promotion is one atomic rename. Replacement prefers native
   directory exchange (`renamex_np(RENAME_SWAP)` on macOS and
@@ -130,7 +168,9 @@ layer's tests:
 - External edit detection rescans the entire namespace and every frame's
   readability, dimensions, metadata, and hash. Valid content or metadata changes
   atomically update frame records, set `edited`, invalidate union metadata, and
-  retain `pinned`. Corrupt edits remain file-specific structured failures.
+  retain `pinned`. Corrupt edits remain file-specific structured failures. All
+  manifest-mutating APIs require a promoted workspace; staging and private
+  snapshot manifests are read-only through the public contract.
 - Manifest read/scan/compare-and-swap writes, pin updates, promotion recovery,
   open, listing, and promotion share the same per-output/cache-key reentrant
   lock. Last-use timestamps are monotone, pin state is freshly read, changed
@@ -168,10 +208,8 @@ codes remain the snapshot race and cancellation contracts.
 
 ## Verification
 
-- Focused Task 11 plus native handle suite: `81 passed in 1.35s`.
-- Sandboxed full suite: `736 passed`, plus exactly 34 existing POSIX
-  `SharedMemory` failures caused by sandbox `PermissionError`.
-- Permitted identical full suite: `770 passed in 45.16s`.
+- Focused Task 11 plus native handle suite: `100 passed in 1.72s`.
+- Permitted full suite: `789 passed in 48.62s`.
 - `.venv/bin/ruff check .` — passed.
 - `.venv/bin/mypy src` — passed for 28 source files.
 - Ruff format check over Task 11 Python files — passed.
@@ -182,7 +220,9 @@ codes remain the snapshot race and cancellation contracts.
 Native directory exchange, descriptor walking, mount admission, and
 descriptor-bound reflink were exercised on the current macOS host; portable
 descriptor copy and the journaled two-rename fallback were forced by tests.
-Windows handle acquisition, relative rename/deletion, reparse rejection,
-handle cleanup, removable/remote policy, and strict durability failure paths
-have deterministic tests, but a Windows-native run remains release
-qualification and is not claimed by this macOS task.
+Windows handle acquisition, handle-relative creation/enumeration/rename/deletion,
+reparse rejection, handle cleanup, removable/remote policy, and strict durability
+failure paths have deterministic tests, but a Windows-native run remains release
+qualification and is not claimed by this macOS task. The Linux allowlist may
+need an explicit reviewed addition for an uncommon but legitimate local
+filesystem; this is the intended fail-closed tradeoff.

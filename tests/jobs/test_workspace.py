@@ -156,6 +156,21 @@ def test_manifest_frozen_json_has_no_reachable_mutable_lookup(tmp_path: Path) ->
     assert CutManifest.cache_key_for(frozen) == before
 
 
+def test_manifest_frozen_json_rejects_slot_reassignment_and_deletion(
+    tmp_path: Path,
+) -> None:
+    _staged, manifest = _completed_staging(tmp_path)
+    frozen = manifest.cache_key_inputs
+    original_key = manifest.cache_key
+
+    with pytest.raises(FrozenInstanceError):
+        frozen._items = ()  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        del frozen._items  # type: ignore[misc]
+
+    assert CutManifest.cache_key_for(frozen) == original_key
+
+
 def test_manifest_rejects_non_authoritative_cache_key_inputs() -> None:
     inputs = _cache_inputs()
     inputs["provisional_source_fingerprint"] = "d" * 64
@@ -280,6 +295,28 @@ def test_local_filesystem_policy_is_injectable_and_removable_is_local(
     assert workspace_module._windows_drive_type_is_local(4) is False
 
 
+@pytest.mark.parametrize(
+    ("filesystem", "expected"),
+    [
+        ("ext4", True),
+        ("xfs", True),
+        ("btrfs", True),
+        ("tmpfs", True),
+        ("overlay", True),
+        ("nfs4", False),
+        ("cifs", False),
+        ("fuse.rclone", False),
+        ("futurefs", False),
+    ],
+)
+def test_linux_mountinfo_uses_a_fail_closed_local_filesystem_allowlist(
+    filesystem: str, expected: bool
+) -> None:
+    encoded = f"36 25 8:1 / /workspace rw,relatime - {filesystem} device rw\n".encode()
+
+    assert workspace_module._linux_mountinfo_is_local(encoded, "8:1") is expected
+
+
 def test_windows_component_binding_rejects_reparse_and_closes_all_handles(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -317,6 +354,164 @@ def test_windows_component_binding_rejects_reparse_and_closes_all_handles(
 
     assert exc.value.code is ErrorCode.CUT_WORKSPACE_UNSAFE
     assert api.closed == [3, 2, 1]
+
+
+def test_windows_bound_mkdir_never_uses_redirected_lexical_path(
+    tmp_path: Path,
+) -> None:
+    lexical = tmp_path / "redirected"
+    lexical.mkdir()
+
+    class FakeApi:
+        def __init__(self) -> None:
+            self.created: list[tuple[int, str, bool]] = []
+
+        def mkdir_at(self, handle: int, name: str, *, exist_ok: bool) -> None:
+            self.created.append((handle, name, exist_ok))
+
+        def close_handle(self, _handle: int) -> None:
+            pass
+
+    api = FakeApi()
+    bound = workspace_module._BoundDirectory(
+        lexical, None, windows_handles=(41,), windows_api=api
+    )
+    bound.mkdir("native-child", exist_ok=False)
+
+    assert api.created == [(41, "native-child", False)]
+    assert not (lexical / "native-child").exists()
+    bound.close()
+
+
+def test_windows_bound_enumeration_and_recursive_delete_ignore_lexical_redirect(
+    tmp_path: Path,
+) -> None:
+    lexical = tmp_path / "redirected"
+    lexical.mkdir()
+    (lexical / "outside-sentinel").write_bytes(b"outside")
+    regular = os.stat_result((0o100600, 1, 1, 1, 0, 0, 1, 0, 0, 0))
+    directory = os.stat_result((0o040700, 2, 1, 1, 0, 0, 0, 0, 0, 0))
+
+    class FakeApi:
+        def __init__(self) -> None:
+            self.trees: dict[int, dict[str, os.stat_result]] = {
+                50: {"inside.bin": regular, "nested": directory},
+                51: {"leaf.bin": regular},
+            }
+            self.closed: list[int] = []
+
+        def iter_entries_at(self, handle: int, *, max_entries: int) -> object:
+            assert len(self.trees[handle]) <= max_entries
+            return iter(tuple(self.trees[handle].items()))
+
+        def open_child_directory(
+            self, parent: int, name: str, **_kwargs: object
+        ) -> int:
+            assert (parent, name) == (50, "nested")
+            return 51
+
+        def file_attributes(self, handle: int) -> int:
+            from rembggui.jobs.models import cache_fs
+
+            assert handle == 51
+            return cache_fs._FILE_ATTRIBUTE_DIRECTORY
+
+        def unlink_at(self, handle: int, name: str, *, require_regular: bool) -> None:
+            assert require_regular is False
+            del self.trees[handle][name]
+
+        def rmdir_at(self, handle: int, name: str) -> None:
+            assert (handle, name) == (50, "nested")
+            assert not self.trees[51]
+            del self.trees[50][name]
+
+        def close_handle(self, handle: int) -> None:
+            self.closed.append(handle)
+
+    api = FakeApi()
+    bound = workspace_module._BoundDirectory(
+        lexical, None, windows_handles=(50,), windows_api=api
+    )
+
+    assert {name for name, _info in bound.iter_entries()} == {
+        "inside.bin",
+        "nested",
+    }
+    workspace_module._remove_bound_contents(bound, [0])
+
+    assert api.trees[50] == {}
+    assert (lexical / "outside-sentinel").read_bytes() == b"outside"
+    bound.close()
+
+
+def test_windows_bound_promotion_and_durability_ignore_lexical_redirect(
+    tmp_path: Path,
+) -> None:
+    lexical = tmp_path / "redirected"
+    lexical.mkdir()
+    (lexical / "old").mkdir()
+    (lexical / "new").mkdir()
+
+    class FakeApi:
+        def __init__(self) -> None:
+            self.renames: list[tuple[int, str, str]] = []
+            self.flushes: list[int] = []
+
+        def replace_directory_at(
+            self, handle: int, source: str, destination: str
+        ) -> None:
+            self.renames.append((handle, source, destination))
+
+        def flush_directory_strict(self, handle: int) -> None:
+            self.flushes.append(handle)
+
+        def close_handle(self, _handle: int) -> None:
+            pass
+
+    api = FakeApi()
+    bound = workspace_module._BoundDirectory(
+        lexical, None, windows_handles=(61,), windows_api=api
+    )
+
+    bound.replace_directory("old", "new")
+    bound.fsync()
+
+    assert api.renames == [(61, "old", "new")]
+    assert api.flushes == [61]
+    assert (lexical / "old").is_dir()
+    assert (lexical / "new").is_dir()
+    bound.close()
+
+
+def test_windows_close_attempts_every_handle_and_retains_failed_ownership(
+    tmp_path: Path,
+) -> None:
+    class FakeApi:
+        def __init__(self) -> None:
+            self.attempts: list[int] = []
+            self.fail = {3, 1}
+
+        def close_handle(self, handle: int) -> None:
+            self.attempts.append(handle)
+            if handle in self.fail:
+                raise OSError(handle, f"close-{handle}")
+
+    api = FakeApi()
+    bound = workspace_module._BoundDirectory(
+        tmp_path, None, windows_handles=(1, 2, 3), windows_api=api
+    )
+
+    with pytest.raises(AppError) as exc:
+        bound.close()
+
+    assert exc.value.code is ErrorCode.CUT_WORKSPACE_UNSAFE
+    assert api.attempts == [3, 2, 1]
+    assert bound._windows_handles == (1, 3)
+
+    api.fail.clear()
+    bound.close()
+    assert api.attempts == [3, 2, 1, 3, 1]
+    assert bound._windows_handles == ()
 
 
 def test_stage_cut_writes_only_sequential_rgba_pngs(tmp_path: Path) -> None:
@@ -728,6 +923,24 @@ def test_completed_snapshot_is_private_and_later_edits_wait_for_next_job(
     assert validate_cut_set(snapshot).frame_count == 3
 
 
+def test_snapshot_rejects_every_manifest_mutator_without_changing_bytes(
+    tmp_path: Path,
+) -> None:
+    cuts = _promoted(tmp_path)
+    snapshot = snapshot_for_rebuild(cuts, cuts.scratch_root / "immutable")
+    before = (snapshot.path / MANIFEST_FILENAME).read_bytes()
+
+    with pytest.raises(AppError) as pin_error:
+        snapshot.set_pinned(True, now_ns=99_000)
+    with pytest.raises(AppError) as edit_error:
+        detect_external_edits(snapshot, now_ns=99_000)
+
+    assert pin_error.value.code is ErrorCode.CUT_SET_INVALID
+    assert edit_error.value.code is ErrorCode.CUT_SET_INVALID
+    assert (snapshot.path / MANIFEST_FILENAME).read_bytes() == before
+    assert validate_cut_set(snapshot).to_json_bytes() == before
+
+
 def test_snapshot_descriptor_copy_fallback_is_verified(tmp_path: Path) -> None:
     cuts = _promoted(tmp_path)
     scratch = cuts.scratch_root / "copy-fallback"
@@ -784,6 +997,46 @@ def test_validation_and_reads_do_not_leak_file_descriptors(tmp_path: Path) -> No
         image.close()
 
     assert process.num_fds() <= before + 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor ownership probe")
+def test_fdopen_failure_closes_transferred_manifest_descriptor_exactly_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cuts = _promoted(tmp_path)
+    original_open_read = workspace_module._BoundDirectory.open_read
+    original_close = workspace_module.os.close
+    transferred: list[int] = []
+    closed: list[int] = []
+
+    def observed_open_read(bound: object, name: str) -> int:
+        descriptor = original_open_read(bound, name)  # type: ignore[arg-type]
+        if name == MANIFEST_FILENAME:
+            transferred.append(descriptor)
+        return descriptor
+
+    def fail_fdopen(_descriptor: int, _mode: str) -> object:
+        raise OSError("injected fdopen failure")
+
+    def observed_close(descriptor: int) -> None:
+        if descriptor in transferred:
+            closed.append(descriptor)
+        original_close(descriptor)
+
+    monkeypatch.setattr(
+        workspace_module._BoundDirectory, "open_read", observed_open_read
+    )
+    monkeypatch.setattr(workspace_module.os, "fdopen", fail_fdopen)
+    monkeypatch.setattr(workspace_module.os, "close", observed_close)
+
+    with pytest.raises(AppError) as exc:
+        workspace_module._read_manifest(cuts.path)
+
+    assert exc.value.code is ErrorCode.CUT_MANIFEST_INVALID
+    assert len(transferred) == 1
+    assert closed == transferred
+    with pytest.raises(OSError):
+        os.fstat(transferred[0])
 
 
 def test_listing_reports_size_warning_and_stable_metadata(tmp_path: Path) -> None:

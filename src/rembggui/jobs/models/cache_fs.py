@@ -11,6 +11,7 @@ from __future__ import annotations
 import errno
 import os
 import stat
+from collections.abc import Iterator
 from pathlib import Path, PurePath, PureWindowsPath
 from types import TracebackType
 from typing import Protocol
@@ -55,6 +56,12 @@ class _WindowsDirectoryApi(Protocol):
     def open_new_at(self, directory_handle: int, filename: str) -> int: ...
 
     def open_new_read_write_at(self, directory_handle: int, filename: str) -> int: ...
+
+    def mkdir_at(self, directory_handle: int, name: str, *, exist_ok: bool) -> None: ...
+
+    def iter_entries_at(
+        self, directory_handle: int, *, max_entries: int
+    ) -> Iterator[tuple[str, os.stat_result]]: ...
 
     def unlink_at(
         self, directory_handle: int, filename: str, *, require_regular: bool
@@ -690,6 +697,125 @@ class _CtypesWindowsDirectoryApi:
     def open_new_read_write_at(self, directory_handle: int, filename: str) -> int:
         return self._open_new_at(directory_handle, filename, os.O_RDWR)
 
+    def mkdir_at(self, directory_handle: int, name: str, *, exist_ok: bool) -> None:
+        _validate_windows_component(name)
+        handle = self._open_relative(
+            directory_handle,
+            name,
+            desired_access=_WINDOWS_WRITABLE_DIRECTORY_ACCESS,
+            share_mode=_WINDOWS_DIRECTORY_SHARE,
+            disposition=3 if exist_ok else 2,
+            options=0x00000001 | 0x00000020 | 0x00200000,
+        )
+        try:
+            _validate_windows_directory_handle(self, handle)
+        finally:
+            self.close_handle(handle)
+        try:
+            self.flush_directory_strict(directory_handle)
+        except OSError as error:
+            if not exist_ok:
+                try:
+                    self.rmdir_at(directory_handle, name)
+                except OSError as cleanup_error:
+                    error.add_note(
+                        f"additional directory-create cleanup failure: {cleanup_error}"
+                    )
+            raise
+
+    def iter_entries_at(
+        self, directory_handle: int, *, max_entries: int
+    ) -> Iterator[tuple[str, os.stat_result]]:
+        import ctypes
+
+        if not 1 <= max_entries <= 1_000_000:
+            raise ValueError("directory enumeration bound is invalid")
+
+        class FileIdBothDirectoryInfo(ctypes.Structure):
+            _fields_ = (
+                ("NextEntryOffset", ctypes.c_uint32),
+                ("FileIndex", ctypes.c_uint32),
+                ("CreationTime", ctypes.c_int64),
+                ("LastAccessTime", ctypes.c_int64),
+                ("LastWriteTime", ctypes.c_int64),
+                ("ChangeTime", ctypes.c_int64),
+                ("EndOfFile", ctypes.c_int64),
+                ("AllocationSize", ctypes.c_int64),
+                ("FileAttributes", ctypes.c_uint32),
+                ("FileNameLength", ctypes.c_uint32),
+                ("EaSize", ctypes.c_uint32),
+                ("ShortNameLength", ctypes.c_ubyte),
+                ("ShortName", ctypes.c_uint16 * 12),
+                ("FileId", ctypes.c_int64),
+                ("FileName", ctypes.c_uint16 * 1),
+            )
+
+        buffer_size = 64 * 1024
+        buffer = ctypes.create_string_buffer(buffer_size)
+        restart = True
+        yielded = 0
+        while True:
+            info_class = 11 if restart else 10
+            restart = False
+            if not self._get_information(
+                directory_handle, info_class, buffer, buffer_size
+            ):
+                code = int(getattr(ctypes, "get_last_error")())
+                if code == 18:
+                    return
+                raise OSError(code, "could not enumerate bound cache directory")
+            offset = 0
+            while True:
+                header_end = offset + FileIdBothDirectoryInfo.FileName.offset
+                if header_end > buffer_size:
+                    raise OSError(
+                        errno.EOVERFLOW, "directory entry header is truncated"
+                    )
+                address = ctypes.addressof(buffer) + offset
+                info = ctypes.cast(
+                    address, ctypes.POINTER(FileIdBothDirectoryInfo)
+                ).contents
+                name_bytes = int(info.FileNameLength)
+                if (
+                    name_bytes <= 0
+                    or name_bytes > 510
+                    or name_bytes % 2
+                    or header_end + name_bytes > buffer_size
+                ):
+                    raise OSError(
+                        errno.EOVERFLOW, "directory entry name exceeds its bound"
+                    )
+                encoded_name = ctypes.string_at(
+                    address + FileIdBothDirectoryInfo.FileName.offset,
+                    name_bytes,
+                )
+                try:
+                    name = encoded_name.decode("utf-16-le", "strict")
+                except UnicodeDecodeError as error:
+                    raise OSError(
+                        errno.EINVAL, "directory entry name is not valid UTF-16"
+                    ) from error
+                if name not in {".", ".."}:
+                    _validate_windows_component(name)
+                    yielded += 1
+                    if yielded > max_entries:
+                        raise OSError(
+                            errno.EOVERFLOW, "directory entry count exceeds its bound"
+                        )
+                    yield name, self.lstat_at(directory_handle, name)
+                next_offset = int(info.NextEntryOffset)
+                if next_offset == 0:
+                    break
+                if next_offset < FileIdBothDirectoryInfo.FileName.offset:
+                    raise OSError(
+                        errno.EOVERFLOW, "directory entry offset is malformed"
+                    )
+                offset += next_offset
+                if offset >= buffer_size:
+                    raise OSError(
+                        errno.EOVERFLOW, "directory entry offset exceeds its buffer"
+                    )
+
     def _open_new_at(
         self, directory_handle: int, filename: str, descriptor_flags: int
     ) -> int:
@@ -1055,7 +1181,8 @@ class _CtypesWindowsDirectoryApi:
         desired_access: int, share_mode: int, flags: int
     ) -> None:
         if (
-            desired_access != _WINDOWS_DIRECTORY_ACCESS
+            desired_access
+            not in {_WINDOWS_DIRECTORY_ACCESS, _WINDOWS_WRITABLE_DIRECTORY_ACCESS}
             or share_mode != _WINDOWS_DIRECTORY_SHARE
             or flags != _WINDOWS_DIRECTORY_FLAGS
         ):
