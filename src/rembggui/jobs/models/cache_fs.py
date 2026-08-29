@@ -18,6 +18,7 @@ from typing import Protocol
 _FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 _WINDOWS_DIRECTORY_ACCESS = 0x80000000
+_WINDOWS_WRITABLE_DIRECTORY_ACCESS = 0xC0000000
 _WINDOWS_DIRECTORY_SHARE = 0x00000001
 _WINDOWS_DIRECTORY_FLAGS = 0x02000000 | 0x00200000
 
@@ -53,6 +54,8 @@ class _WindowsDirectoryApi(Protocol):
 
     def open_new_at(self, directory_handle: int, filename: str) -> int: ...
 
+    def open_new_read_write_at(self, directory_handle: int, filename: str) -> int: ...
+
     def unlink_at(
         self, directory_handle: int, filename: str, *, require_regular: bool
     ) -> None: ...
@@ -61,7 +64,15 @@ class _WindowsDirectoryApi(Protocol):
         self, directory_handle: int, source: str, destination: str
     ) -> None: ...
 
+    def replace_directory_at(
+        self, directory_handle: int, source: str, destination: str
+    ) -> None: ...
+
+    def rmdir_at(self, directory_handle: int, name: str) -> None: ...
+
     def flush_directory(self, directory_handle: int) -> None: ...
+
+    def flush_directory_strict(self, directory_handle: int) -> None: ...
 
     def assert_directory_handle(self, directory_handle: int) -> None: ...
 
@@ -592,7 +603,8 @@ class _CtypesWindowsDirectoryApi:
         import ctypes
 
         if (
-            desired_access != _WINDOWS_DIRECTORY_ACCESS
+            desired_access
+            not in {_WINDOWS_DIRECTORY_ACCESS, _WINDOWS_WRITABLE_DIRECTORY_ACCESS}
             or share_mode != _WINDOWS_DIRECTORY_SHARE
             or flags != _WINDOWS_DIRECTORY_FLAGS
         ):
@@ -673,6 +685,14 @@ class _CtypesWindowsDirectoryApi:
             raise
 
     def open_new_at(self, directory_handle: int, filename: str) -> int:
+        return self._open_new_at(directory_handle, filename, os.O_WRONLY)
+
+    def open_new_read_write_at(self, directory_handle: int, filename: str) -> int:
+        return self._open_new_at(directory_handle, filename, os.O_RDWR)
+
+    def _open_new_at(
+        self, directory_handle: int, filename: str, descriptor_flags: int
+    ) -> int:
         _validate_windows_component(filename)
         handle = self._open_relative(
             directory_handle,
@@ -684,7 +704,7 @@ class _CtypesWindowsDirectoryApi:
         )
         try:
             self._require_regular_file_handle(handle)
-            return self._handle_to_fd(handle, os.O_WRONLY)
+            return self._handle_to_fd(handle, descriptor_flags)
         except BaseException:
             self.close_handle(handle)
             raise
@@ -731,6 +751,21 @@ class _CtypesWindowsDirectoryApi:
             self.close_handle(handle)
 
     def replace_at(self, directory_handle: int, source: str, destination: str) -> None:
+        self._replace_at(directory_handle, source, destination, require_directory=False)
+
+    def replace_directory_at(
+        self, directory_handle: int, source: str, destination: str
+    ) -> None:
+        self._replace_at(directory_handle, source, destination, require_directory=True)
+
+    def _replace_at(
+        self,
+        directory_handle: int,
+        source: str,
+        destination: str,
+        *,
+        require_directory: bool,
+    ) -> None:
         import ctypes
 
         _validate_windows_component(source)
@@ -741,7 +776,11 @@ class _CtypesWindowsDirectoryApi:
             desired_access=0x00010000 | 0x00000080 | 0x00100000,
             share_mode=0x00000001,
             disposition=1,
-            options=0x00000020 | 0x00000040 | 0x00200000,
+            options=(
+                0x00000020
+                | (0x00000001 if require_directory else 0x00000040)
+                | 0x00200000
+            ),
         )
 
         class IoStatusBlock(ctypes.Structure):
@@ -759,7 +798,16 @@ class _CtypesWindowsDirectoryApi:
             )
 
         try:
-            self._require_regular_file_handle(source_handle)
+            if require_directory:
+                attributes = self.file_attributes(source_handle)
+                if not attributes & _FILE_ATTRIBUTE_DIRECTORY or attributes & (
+                    _FILE_ATTRIBUTE_REPARSE_POINT
+                ):
+                    raise UnsafeCacheError(
+                        "cache rename source is not a safe directory"
+                    )
+            else:
+                self._require_regular_file_handle(source_handle)
             encoded = destination.encode("utf-16-le")
             filename_offset = FileRenameInformation.FileName.offset
             buffer = ctypes.create_string_buffer(
@@ -792,6 +840,36 @@ class _CtypesWindowsDirectoryApi:
         finally:
             self.close_handle(source_handle)
 
+    def rmdir_at(self, directory_handle: int, name: str) -> None:
+        import ctypes
+
+        _validate_windows_component(name)
+        handle = self._open_relative(
+            directory_handle,
+            name,
+            desired_access=0x00010000 | 0x00000080 | 0x00100000,
+            share_mode=0x00000001 | 0x00000002 | 0x00000004,
+            disposition=1,
+            options=0x00000001 | 0x00000020 | 0x00200000,
+        )
+
+        class FileDispositionInfo(ctypes.Structure):
+            _fields_ = (("DeleteFile", ctypes.c_ubyte),)
+
+        try:
+            attributes = self.file_attributes(handle)
+            if not attributes & _FILE_ATTRIBUTE_DIRECTORY or attributes & (
+                _FILE_ATTRIBUTE_REPARSE_POINT
+            ):
+                raise UnsafeCacheError("cache removal target is not a directory")
+            info = FileDispositionInfo(True)
+            if not self._set_file_information(
+                handle, 4, ctypes.byref(info), ctypes.sizeof(info)
+            ):
+                self._raise_last_error("could not remove bound cache directory")
+        finally:
+            self.close_handle(handle)
+
     def flush_directory(self, directory_handle: int) -> None:
         import ctypes
 
@@ -805,6 +883,18 @@ class _CtypesWindowsDirectoryApi:
         if last_error in {1, 5, 6, 50}:
             return
         raise OSError(last_error, "could not flush bound cache directory")
+
+    def flush_directory_strict(self, directory_handle: int) -> None:
+        """Require an acknowledged directory flush for crash-durable callers."""
+        import ctypes
+
+        if self._flush_file_buffers(directory_handle):
+            return
+        last_error = getattr(ctypes, "get_last_error")()
+        raise OSError(
+            last_error,
+            "Windows filesystem cannot confirm bound-directory durability",
+        )
 
     def assert_directory_handle(self, directory_handle: int) -> None:
         _validate_windows_directory_handle(self, directory_handle)

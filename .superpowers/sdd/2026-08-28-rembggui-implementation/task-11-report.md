@@ -11,8 +11,8 @@ The public contract is implemented in `src/rembggui/jobs/workspace.py`:
 `CutManifest`, `CutWorkspace`, `stage_cut`, `promote_cut_set`,
 `validate_cut_set`, `detect_external_edits`, `snapshot_for_rebuild`,
 `CutWorkspace.read_promoted_cut`, `list_workspaces`, and `delete_workspace`.
-`cleanup_abandoned_scratch` is the explicit bounded cleanup surface required by
-the workspace lifecycle contract.
+`cleanup_scratch` is the immediate successful-job/cancellation cleanup surface;
+`cleanup_abandoned_scratch` remains the bounded age-gated cleanup surface.
 
 User-owned `.agents/`, `AGENTS.md`, and `emoteScript` were not edited or staged.
 No remote, cloud, provider, GUI, model, decode, segmentation, or encode behavior
@@ -65,6 +65,26 @@ Final focused GREEN:
 38 passed in 0.97s
 ```
 
+### Review fix round 1 RED/GREEN
+
+The initial implementation review identified one Critical and eight Important
+gaps. Focused RED tests reproduced reachable mutable manifest state, lost-update
+and timestamp-regression races, observer recovery during a live fallback
+exchange, unstructured journal creation failure, an ancestor-swap binding race,
+post-open descriptor leakage, unenforceable filesystem-policy decisions,
+post-materialization namespace limits, and missing immediate/corrupt cleanup
+contracts. The first RED stopped at collection because `cleanup_scratch` did not
+exist; after exposing that API, the remaining tests failed at their specific
+boundaries before the fixes were applied.
+
+Final review-fix focused GREEN, including the reused Windows native handle
+layer's tests:
+
+```text
+.venv/bin/pytest -q tests/jobs/models/test_cache_fs.py tests/jobs/test_workspace.py
+81 passed in 1.35s
+```
+
 ## Architecture and safety decisions
 
 - `CutManifest`, `CutFrame`, `CutUnionMetadata`, workspace summaries, listings,
@@ -86,11 +106,19 @@ Final focused GREEN:
   and complete SHA-256. Validation rejects missing, extra, nonsequential,
   corrupt, wrong-mode, mismatched-dimension, linked, or concurrently replaced
   entries.
-- Workspace roots are canonicalized beneath the selected existing output
-  directory. Traversal, symlink/junction/reparse-style redirection, UNC/network
-  syntax on Windows, and non-local filesystems where the host exposes a local
-  mount flag are rejected. POSIX file access is no-follow and descriptor-relative
-  to a bound directory, with named/open identity checks before release.
+- Workspace roots are bound anchor-to-leaf beneath the selected output
+  directory. POSIX walks every component with no-follow directory descriptors;
+  Windows reuses the native handle-relative, no-reparse binding from the model
+  cache and keeps ancestor handles open without delete/write sharing. Creation,
+  file I/O, promotion rename, and recursive deletion are relative to a bound
+  parent. Traversal and symlink/junction/reparse redirection are rejected, and
+  every exceptional bind path closes all acquired descriptors/handles.
+- Local-filesystem admission is descriptor-bound: macOS uses native `fstatfs`
+  `MNT_LOCAL`, Linux binds `st_dev` to bounded `/proc/self/mountinfo` parsing and
+  rejects known remote filesystem types, and Windows rejects remote/unknown
+  drive types while accepting removable local volumes. Workspace directory
+  flushes on Windows are strict: inability to confirm durability is a structured
+  failure instead of an unreported best-effort success.
 - Staging directories are siblings of `cuts/<cache-key>`. Invalid stages are
   removed. First promotion is one atomic rename. Replacement prefers native
   directory exchange (`renamex_np(RENAME_SWAP)` on macOS and
@@ -103,6 +131,11 @@ Final focused GREEN:
   readability, dimensions, metadata, and hash. Valid content or metadata changes
   atomically update frame records, set `edited`, invalidate union metadata, and
   retain `pinned`. Corrupt edits remain file-specific structured failures.
+- Manifest read/scan/compare-and-swap writes, pin updates, promotion recovery,
+  open, listing, and promotion share the same per-output/cache-key reentrant
+  lock. Last-use timestamps are monotone, pin state is freshly read, changed
+  union metadata cannot be restored by a stale writer, and a manifest identity
+  mismatch aborts rather than overwriting an external update.
 - Rebuild snapshotting establishes a fully validated source baseline, prefers
   descriptor-bound proven reflink/COW (`FICLONE`/`fclonefileat`), and otherwise
   streams through descriptor-bound copies. It compares source identity,
@@ -114,8 +147,12 @@ Final focused GREEN:
 - Durable `cuts/<cache-key>` directories are never automatically deleted.
   Inventory exposes source, last use, edited/pinned state, exact validated size,
   aggregate size, and the 20 GiB warning decision. Deletion is explicit and a
-  pinned cache requires an explicit override. Scratch cleanup is age gated at
-  more than 24 hours and count bounded.
+  pinned cache requires an explicit override. A cache with readable unpinned
+  metadata can be explicitly removed even when its frames are corrupt; an
+  unreadable pin state requires `allow_pinned=True`. Scratch cleanup supports
+  exact immediate job cleanup and age-gated abandonment cleanup. Namespace,
+  tree-size, listing, recovery, and deletion walks enforce bounds while
+  iterating, before materializing attacker-controlled collections.
 - `read_promoted_cut(index)` reconciles valid external edits, validates the one
   requested record, returns a distinct owned Pillow RGBA image, and optionally
   registers it with the existing `RgbaOwnershipTracker`. It never materializes or
@@ -131,10 +168,10 @@ codes remain the snapshot race and cancellation contracts.
 
 ## Verification
 
-- Focused Task 11 suite: `38 passed in 0.97s`.
-- Sandboxed full suite: `723 passed`, plus exactly 34 existing POSIX
+- Focused Task 11 plus native handle suite: `81 passed in 1.35s`.
+- Sandboxed full suite: `736 passed`, plus exactly 34 existing POSIX
   `SharedMemory` failures caused by sandbox `PermissionError`.
-- Controller-permitted identical full suite: `757 passed in 45.51s`.
+- Permitted identical full suite: `770 passed in 45.16s`.
 - `.venv/bin/ruff check .` — passed.
 - `.venv/bin/mypy src` — passed for 28 source files.
 - Ruff format check over Task 11 Python files — passed.
@@ -142,8 +179,10 @@ codes remain the snapshot race and cancellation contracts.
 
 ## Residual platform qualification
 
-Native directory exchange and descriptor-bound reflink were exercised on the
-current macOS host, and the portable descriptor-copy and two-rename journal
-fallbacks were forced by tests. Windows reparse and rename behavior is coded
-defensively but remains part of the planned native Windows release
-qualification; no Windows-native execution is claimed by this local task.
+Native directory exchange, descriptor walking, mount admission, and
+descriptor-bound reflink were exercised on the current macOS host; portable
+descriptor copy and the journaled two-rename fallback were forced by tests.
+Windows handle acquisition, relative rename/deletion, reparse rejection,
+handle cleanup, removable/remote policy, and strict durability failure paths
+have deterministic tests, but a Windows-native run remains release
+qualification and is not claimed by this macOS task.

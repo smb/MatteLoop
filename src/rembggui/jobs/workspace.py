@@ -31,9 +31,9 @@ from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from pathlib import Path, PurePath, PureWindowsPath
-from threading import Lock
+from threading import Lock, RLock
 from types import TracebackType
-from typing import BinaryIO, Final, Self, cast, overload
+from typing import Any, BinaryIO, Final, Self, cast, overload
 
 from PIL import Image, UnidentifiedImageError
 
@@ -61,6 +61,7 @@ MAX_SCRATCH_ENTRIES: Final = 10_000
 WORKSPACE_WARNING_BYTES: Final = 20 * 1024**3
 ABANDONED_SCRATCH_AGE_NS: Final = 24 * 60 * 60 * 1_000_000_000
 COPY_CHUNK_BYTES: Final = 1024 * 1024
+MAX_MOUNTINFO_BYTES: Final = 4 * 1024 * 1024
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _CACHE_KEY_RE = re.compile(r"[0-9a-f]{64}\Z")
@@ -80,15 +81,17 @@ type CancellationCheck = Callable[[], bool]
 class FrozenJsonMap(Mapping[str, FrozenJsonValue]):
     """Small recursively immutable mapping used by frozen manifests."""
 
-    __slots__ = ("_items", "_lookup")
+    __slots__ = ("_items",)
 
     def __init__(self, items: Sequence[tuple[str, FrozenJsonValue]]) -> None:
         ordered = tuple(sorted(items, key=lambda item: item[0]))
         self._items = ordered
-        self._lookup = {key: value for key, value in ordered}
 
     def __getitem__(self, key: str) -> FrozenJsonValue:
-        return self._lookup[key]
+        for candidate, value in self._items:
+            if candidate == key:
+                return value
+        raise KeyError(key)
 
     def __iter__(self) -> Iterator[str]:
         return (key for key, _value in self._items)
@@ -527,11 +530,14 @@ class CutWorkspace:
         _validate_cache_key(cache_key)
         _validate_job_id(job_id)
         output, root, cuts, scratch = _workspace_layout(output_directory, create=True)
-        _recover_promotion(cuts, cache_key)
+        with _promotion_lock(str(cuts / cache_key)):
+            _recover_promotion(cuts, cache_key)
         stage = cuts / f".stage-{cache_key}-{job_id}"
         try:
-            os.mkdir(stage, 0o700)
-            _assert_safe_directory(stage)
+            with _BoundDirectory.open(cuts) as bound:
+                bound.mkdir(stage.name, exist_ok=False)
+                with bound.open_child(stage.name):
+                    pass
         except FileExistsError as error:
             raise _stage_error(
                 f"staging directory already exists for job {job_id!r}"
@@ -550,8 +556,9 @@ class CutWorkspace:
     def open(cls, output_directory: Path, cache_key: str) -> Self:
         _validate_cache_key(cache_key)
         output, root, cuts, scratch = _workspace_layout(output_directory, create=False)
-        if cuts.exists():
-            _recover_promotion(cuts, cache_key)
+        with _promotion_lock(str(cuts / cache_key)):
+            if cuts.exists():
+                _recover_promotion(cuts, cache_key)
         return cls(
             output,
             root,
@@ -606,10 +613,12 @@ class CutWorkspace:
     def set_pinned(self, pinned: bool, *, now_ns: int | None = None) -> CutManifest:
         if type(pinned) is not bool:
             raise TypeError("pinned must be a bool")
-        manifest = detect_external_edits(self, now_ns=now_ns)
-        updated = replace(manifest, pinned=pinned)
-        _write_manifest_atomic(self.path, updated)
-        return validate_cut_set(self)
+        with _promotion_lock(str(self.cuts_root / self.cache_key)):
+            detect_external_edits(self, now_ns=now_ns)
+            manifest, identity = _read_manifest(self.path)
+            updated = replace(manifest, pinned=pinned)
+            _write_manifest_atomic(self.path, updated, expected_identity=identity)
+            return validate_cut_set(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -747,72 +756,109 @@ def promote_cut_set(
     lock = _promotion_lock(str(target))
     with lock:
         _recover_promotion(workspace.cuts_root, workspace.cache_key)
-        previous_hash: str | None = None
-        target_exists = _entry_exists_no_follow(target)
-        if target_exists:
-            previous, _identity = _read_manifest(target)
-            previous_hash = hashlib.sha256(previous.to_json_bytes()).hexdigest()
-        journal: dict[str, object] = {
-            "backup_name": backup.name,
-            "cache_key": workspace.cache_key,
-            "candidate_manifest_sha256": hashlib.sha256(
-                candidate.to_json_bytes()
-            ).hexdigest(),
-            "phase": "prepared",
-            "previous_manifest_sha256": previous_hash,
-            "stage_name": workspace.path.name,
-            "used_exchange": False,
-            "version": 1,
-        }
-        _write_journal(marker, journal)
-        old_location: Path | None = None
-        try:
-            if target_exists:
-                exchanged = _atomic_directory_exchange(workspace.path, target)
-                if exchanged:
-                    old_location = workspace.path
-                    journal["phase"] = "new-active"
-                    journal["used_exchange"] = True
-                    _write_journal(marker, journal)
-                else:
-                    os.replace(target, backup)
-                    old_location = backup
-                    journal["phase"] = "old-moved"
-                    _write_journal(marker, journal)
-                    os.replace(workspace.path, target)
-                    journal["phase"] = "new-active"
-                    _write_journal(marker, journal)
+        with _BoundDirectory.open(workspace.cuts_root) as cuts_bound:
+            previous_hash: str | None = None
+            try:
+                target_info = cuts_bound.lstat(target.name)
+            except FileNotFoundError:
+                target_exists = False
             else:
-                os.replace(workspace.path, target)
-                journal["phase"] = "new-active"
+                if stat.S_ISLNK(target_info.st_mode) or not stat.S_ISDIR(
+                    target_info.st_mode
+                ):
+                    raise _unsafe_error(
+                        f"workspace entry {target.name!r} is redirected"
+                    )
+                target_exists = True
+            if target_exists:
+                previous, _identity = _read_manifest(target)
+                previous_hash = hashlib.sha256(previous.to_json_bytes()).hexdigest()
+            journal: dict[str, object] = {
+                "backup_name": backup.name,
+                "cache_key": workspace.cache_key,
+                "candidate_manifest_sha256": hashlib.sha256(
+                    candidate.to_json_bytes()
+                ).hexdigest(),
+                "phase": "prepared",
+                "previous_manifest_sha256": previous_hash,
+                "stage_name": workspace.path.name,
+                "used_exchange": False,
+                "version": 1,
+            }
+            try:
                 _write_journal(marker, journal)
-            # Do not call ``open`` while this operation owns the journal: open()
-            # performs crash recovery for observers and would correctly consume
-            # the still-live marker before this transaction has finished.
-            promoted = CutWorkspace(
-                workspace.output_directory,
-                workspace.workspace_root,
-                workspace.cuts_root,
-                workspace.scratch_root,
-                workspace.cache_key,
-                target,
-                WorkspaceLifecycle.PROMOTED,
-            )
-            validated = validate_cut_set(promoted)
-            if validated.to_json_bytes() != candidate.to_json_bytes():
-                raise _promotion_error("promoted manifest changed during replacement")
-            _fsync_directory(workspace.cuts_root)
-            if old_location is not None and old_location.exists():
-                _remove_tree(old_location)
-            _unlink_regular(marker)
-            _fsync_directory(workspace.cuts_root)
-            return promoted
-        except AppError:
-            raise
-        except OSError as error:
-            raise _promotion_error(f"atomic cut promotion failed: {error}") from error
-        finally:
-            if marker.exists():
+            except AppError as error:
+                try:
+                    if workspace.path.exists():
+                        _remove_tree(workspace.path)
+                except OSError as cleanup_error:
+                    error.add_note(
+                        f"additional staged-cut cleanup failure: {cleanup_error}"
+                    )
+                raise
+            except OSError as error:
+                failure = _promotion_error(
+                    f"cannot create cut promotion journal: {error}"
+                )
+                try:
+                    if workspace.path.exists():
+                        _remove_tree(workspace.path)
+                except OSError as cleanup_error:
+                    failure.add_note(
+                        f"additional staged-cut cleanup failure: {cleanup_error}"
+                    )
+                raise failure from error
+            old_location: Path | None = None
+            try:
+                if target_exists:
+                    exchanged = _atomic_directory_exchange(workspace.path, target)
+                    if exchanged:
+                        old_location = workspace.path
+                        journal["phase"] = "new-active"
+                        journal["used_exchange"] = True
+                        _write_journal(marker, journal)
+                    else:
+                        cuts_bound.replace_directory(target.name, backup.name)
+                        old_location = backup
+                        journal["phase"] = "old-moved"
+                        _write_journal(marker, journal)
+                        cuts_bound.replace_directory(workspace.path.name, target.name)
+                        journal["phase"] = "new-active"
+                        _write_journal(marker, journal)
+                else:
+                    cuts_bound.replace_directory(workspace.path.name, target.name)
+                    journal["phase"] = "new-active"
+                    _write_journal(marker, journal)
+                # Do not call ``open`` while this operation owns the journal: open()
+                # performs crash recovery for observers and would correctly consume
+                # the still-live marker before this transaction has finished.
+                promoted = CutWorkspace(
+                    workspace.output_directory,
+                    workspace.workspace_root,
+                    workspace.cuts_root,
+                    workspace.scratch_root,
+                    workspace.cache_key,
+                    target,
+                    WorkspaceLifecycle.PROMOTED,
+                )
+                validated = validate_cut_set(promoted)
+                if validated.to_json_bytes() != candidate.to_json_bytes():
+                    raise _promotion_error(
+                        "promoted manifest changed during replacement"
+                    )
+                cuts_bound.fsync()
+                if old_location is not None and old_location.exists():
+                    _remove_tree(old_location)
+                _unlink_regular(marker)
+                cuts_bound.fsync()
+                return promoted
+            except AppError:
+                raise
+            except OSError as error:
+                raise _promotion_error(
+                    f"atomic cut promotion failed: {error}"
+                ) from error
+            finally:
                 try:
                     _recover_promotion(workspace.cuts_root, workspace.cache_key)
                 except AppError:
@@ -824,21 +870,22 @@ def promote_cut_set(
 def validate_cut_set(workspace: CutWorkspace) -> CutManifest:
     """Validate manifest, namespace, frame bytes, metadata, and exact hashes."""
     _require_workspace(workspace)
-    try:
-        manifest, manifest_identity = _read_manifest(workspace.path)
-        if manifest.cache_key != workspace.cache_key:
-            raise _set_error("manifest cache key does not match workspace")
-        _scan_cut_set(
-            workspace.path,
-            manifest,
-            manifest_identity,
-            compare_recorded=True,
-        )
-        return manifest
-    except AppError:
-        raise
-    except OSError as error:
-        raise _set_error(f"cannot validate cut workspace: {error}") from error
+    with _promotion_lock(str(workspace.cuts_root / workspace.cache_key)):
+        try:
+            manifest, manifest_identity = _read_manifest(workspace.path)
+            if manifest.cache_key != workspace.cache_key:
+                raise _set_error("manifest cache key does not match workspace")
+            _scan_cut_set(
+                workspace.path,
+                manifest,
+                manifest_identity,
+                compare_recorded=True,
+            )
+            return manifest
+        except AppError:
+            raise
+        except OSError as error:
+            raise _set_error(f"cannot validate cut workspace: {error}") from error
 
 
 def detect_external_edits(
@@ -848,26 +895,31 @@ def detect_external_edits(
     _require_workspace(workspace)
     if workspace.lifecycle is WorkspaceLifecycle.STAGING:
         raise _set_error("external edit detection requires durable cuts")
-    manifest, manifest_identity = _read_manifest(workspace.path)
-    frames, _identities = _scan_cut_set(
-        workspace.path,
-        manifest,
-        manifest_identity,
-        compare_recorded=False,
-    )
-    timestamp = time.time_ns() if now_ns is None else now_ns
-    _bounded_int(timestamp, "last-use timestamp", minimum=0, maximum=_MAX_INT64)
-    changed = frames != manifest.frames
-    updated = replace(
-        manifest,
-        frames=frames,
-        edited=manifest.edited or changed,
-        union_metadata=None if changed else manifest.union_metadata,
-        last_used_at_ns=max(timestamp, manifest.created_at_ns),
-    )
-    if updated != manifest:
-        _write_manifest_atomic(workspace.path, updated)
-    return validate_cut_set(workspace)
+    with _promotion_lock(str(workspace.cuts_root / workspace.cache_key)):
+        manifest, manifest_identity = _read_manifest(workspace.path)
+        frames, _identities = _scan_cut_set(
+            workspace.path,
+            manifest,
+            manifest_identity,
+            compare_recorded=False,
+        )
+        timestamp = time.time_ns() if now_ns is None else now_ns
+        _bounded_int(timestamp, "last-use timestamp", minimum=0, maximum=_MAX_INT64)
+        changed = frames != manifest.frames
+        updated = replace(
+            manifest,
+            frames=frames,
+            edited=manifest.edited or changed,
+            union_metadata=None if changed else manifest.union_metadata,
+            last_used_at_ns=max(
+                timestamp, manifest.created_at_ns, manifest.last_used_at_ns
+            ),
+        )
+        if updated != manifest:
+            _write_manifest_atomic(
+                workspace.path, updated, expected_identity=manifest_identity
+            )
+        return validate_cut_set(workspace)
 
 
 def snapshot_for_rebuild(
@@ -908,10 +960,13 @@ def snapshot_for_rebuild(
             compare_recorded=True,
         )
         _raise_if_cancelled(check_cancelled)
-        _assert_safe_directory(workspace.scratch_root)
-        os.mkdir(scratch_directory, 0o700)
-        started = True
-        os.mkdir(snapshot_path, 0o700)
+        with _BoundDirectory.open(workspace.scratch_root) as scratch_bound:
+            scratch_bound.mkdir(scratch_directory.name, exist_ok=False)
+            started = True
+            with scratch_bound.open_child(scratch_directory.name) as job_bound:
+                job_bound.mkdir(snapshot_path.name, exist_ok=False)
+                with job_bound.open_child(snapshot_path.name):
+                    pass
         for frame in baseline.frames:
             _raise_if_cancelled(check_cancelled)
             _copy_frame_descriptor_bound(
@@ -987,10 +1042,9 @@ def list_workspaces(
     summaries: list[WorkspaceSummary] = []
     with _BoundDirectory.open(cuts) as bound:
         seen = 0
-        entries = list(bound.iter_entries())
-        if len(entries) > MAX_WORKSPACE_ENTRIES * 3:
-            raise _unsafe_error("workspace namespace exceeds the listing bound")
-        for name, info in entries:
+        for scanned, (name, info) in enumerate(bound.iter_entries(), start=1):
+            if scanned > MAX_WORKSPACE_ENTRIES * 3:
+                raise _unsafe_error("workspace namespace exceeds the listing bound")
             if _CACHE_KEY_RE.fullmatch(name) is None:
                 continue
             seen += 1
@@ -1009,7 +1063,7 @@ def list_workspaces(
             )
             manifest = validate_cut_set(workspace)
             size_bytes = sum(frame.size_bytes for frame in manifest.frames)
-            size_bytes += (workspace.path / MANIFEST_FILENAME).stat().st_size
+            size_bytes += len(manifest.to_json_bytes())
             summaries.append(WorkspaceSummary(workspace, manifest, size_bytes))
         bound.assert_still_named()
     summaries.sort(key=lambda item: (-item.last_used_at_ns, item.workspace.cache_key))
@@ -1032,8 +1086,19 @@ def delete_workspace(workspace: CutWorkspace, *, allow_pinned: bool = False) -> 
     lock = _promotion_lock(str(workspace.path))
     with lock:
         _recover_promotion(workspace.cuts_root, workspace.cache_key)
-        manifest = validate_cut_set(workspace)
-        if manifest.pinned and not allow_pinned:
+        try:
+            manifest, _identity = _read_manifest(workspace.path)
+        except AppError as error:
+            if not allow_pinned:
+                raise AppError(
+                    ErrorCode.CUT_WORKSPACE_PINNED,
+                    "cut-workspace-delete",
+                    "error.cuts.pin-unknown",
+                    "corrupt manifest prevents a reliable pinned-state check",
+                    "confirm-delete-pinned-workspace",
+                ) from error
+            manifest = None
+        if manifest is not None and manifest.pinned and not allow_pinned:
             raise AppError(
                 ErrorCode.CUT_WORKSPACE_PINNED,
                 "cut-workspace-delete",
@@ -1046,6 +1111,30 @@ def delete_workspace(workspace: CutWorkspace, *, allow_pinned: bool = False) -> 
             _fsync_directory(workspace.cuts_root)
         except OSError as error:
             raise _delete_error(f"cannot delete cut workspace: {error}") from error
+
+
+def cleanup_scratch(output_directory: Path, job_id: str) -> bool:
+    """Immediately remove one exact scratch job after success or cancellation."""
+    _validate_job_id(job_id)
+    _output, _root, _cuts, scratch = _workspace_layout(output_directory, create=False)
+    target = scratch / job_id
+    try:
+        with _BoundDirectory.open(scratch) as bound:
+            try:
+                info = bound.lstat(job_id)
+            except FileNotFoundError:
+                return False
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                raise _unsafe_error(f"scratch entry {job_id!r} is redirected")
+        _remove_tree(target)
+        _fsync_directory(scratch)
+        return True
+    except FileNotFoundError:
+        return False
+    except AppError:
+        raise
+    except OSError as error:
+        raise _delete_error(f"cannot clean scratch job {job_id!r}: {error}") from error
 
 
 def cleanup_abandoned_scratch(
@@ -1371,29 +1460,133 @@ def _try_reflink(
 
 
 class _BoundDirectory:
-    __slots__ = ("descriptor", "path")
+    __slots__ = ("_windows_api", "_windows_handles", "descriptor", "path")
 
-    def __init__(self, path: Path, descriptor: int | None) -> None:
+    def __init__(
+        self,
+        path: Path,
+        descriptor: int | None,
+        *,
+        windows_handles: tuple[int, ...] = (),
+        windows_api: Any = None,
+    ) -> None:
         self.path = path
         self.descriptor = descriptor
+        self._windows_handles = windows_handles
+        self._windows_api = windows_api
 
     @classmethod
     def open(cls, path: Path) -> Self:
-        _assert_safe_directory(path)
+        _validate_path_value(path)
+        if ".." in path.parts:
+            raise _unsafe_error("workspace directory traversal is not allowed")
+        absolute = Path(os.path.abspath(path))
+        if not absolute.is_absolute() or not absolute.parts:
+            raise _unsafe_error("workspace directory must be absolute")
+        if os.name == "nt":
+            return cls._open_windows(absolute)
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
         descriptor: int | None = None
-        if os.name != "nt":
-            flags = os.O_RDONLY
-            if hasattr(os, "O_DIRECTORY"):
-                flags |= os.O_DIRECTORY
-            if hasattr(os, "O_NOFOLLOW"):
-                flags |= os.O_NOFOLLOW
-            descriptor = os.open(path, flags)
-            opened = os.fstat(descriptor)
-            named = path.lstat()
-            if _directory_identity(opened) != _directory_identity(named):
+        try:
+            descriptor = os.open(absolute.anchor, flags)
+            for component in absolute.parts[1:]:
+                _validate_component(component)
+                child = os.open(component, flags, dir_fd=descriptor)
+                try:
+                    opened = os.fstat(child)
+                    if not stat.S_ISDIR(opened.st_mode):
+                        raise _unsafe_error(
+                            f"workspace component {component!r} is not a directory"
+                        )
+                except BaseException:
+                    os.close(child)
+                    raise
                 os.close(descriptor)
-                raise _unsafe_error("workspace directory changed while binding")
-        return cls(path, descriptor)
+                descriptor = child
+            return cls(absolute, descriptor)
+        except OSError as error:
+            if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+                failure = _unsafe_error("workspace namespace contains redirection")
+                if descriptor is not None:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+                raise failure from error
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            raise
+        except BaseException:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            raise
+
+    @classmethod
+    def _open_windows(cls, path: Path) -> Self:
+        from rembggui.jobs.models.cache_fs import (
+            _FILE_ATTRIBUTE_DIRECTORY,
+            _FILE_ATTRIBUTE_REPARSE_POINT,
+            _WINDOWS_DIRECTORY_ACCESS,
+            _WINDOWS_DIRECTORY_FLAGS,
+            _WINDOWS_DIRECTORY_SHARE,
+            _WINDOWS_WRITABLE_DIRECTORY_ACCESS,
+            _CtypesWindowsDirectoryApi,
+        )
+
+        api = _CtypesWindowsDirectoryApi()
+        handles: list[int] = []
+        try:
+            anchor = Path(path.anchor)
+            handle = api.open_anchor(
+                anchor,
+                desired_access=_WINDOWS_DIRECTORY_ACCESS,
+                share_mode=_WINDOWS_DIRECTORY_SHARE,
+                flags=_WINDOWS_DIRECTORY_FLAGS,
+            )
+            handles.append(handle)
+            components = path.parts[1:]
+            for index, component in enumerate(components):
+                _validate_component(component)
+                handle = api.open_child_directory(
+                    handles[-1],
+                    component,
+                    create=False,
+                    desired_access=(
+                        _WINDOWS_WRITABLE_DIRECTORY_ACCESS
+                        if index == len(components) - 1
+                        else _WINDOWS_DIRECTORY_ACCESS
+                    ),
+                    share_mode=_WINDOWS_DIRECTORY_SHARE,
+                    flags=_WINDOWS_DIRECTORY_FLAGS,
+                )
+                handles.append(handle)
+                attributes = api.file_attributes(handle)
+                if not attributes & _FILE_ATTRIBUTE_DIRECTORY or attributes & (
+                    _FILE_ATTRIBUTE_REPARSE_POINT
+                ):
+                    raise _unsafe_error(
+                        f"workspace component {component!r} is redirected"
+                    )
+            return cls(
+                path,
+                None,
+                windows_handles=tuple(handles),
+                windows_api=api,
+            )
+        except BaseException:
+            for handle in reversed(handles):
+                try:
+                    api.close_handle(handle)
+                except OSError:
+                    pass
+            raise
 
     def __enter__(self) -> Self:
         return self
@@ -1411,12 +1604,22 @@ class _BoundDirectory:
         self.descriptor = None
         if descriptor is not None:
             os.close(descriptor)
+        handles = self._windows_handles
+        self._windows_handles = ()
+        for handle in reversed(handles):
+            self._windows_api.close_handle(handle)
 
     def assert_still_named(self) -> None:
-        _assert_safe_directory(self.path)
+        if self._windows_handles:
+            for handle in self._windows_handles:
+                self._windows_api.assert_directory_handle(handle)
+            return
         if self.descriptor is not None:
             opened = os.fstat(self.descriptor)
-            named = self.path.lstat()
+            try:
+                named = self.path.lstat()
+            except OSError as error:
+                raise _unsafe_error("bound workspace directory was renamed") from error
             if _directory_identity(opened) != _directory_identity(named):
                 raise _unsafe_error("bound workspace directory was redirected")
 
@@ -1424,7 +1627,74 @@ class _BoundDirectory:
         _validate_component(name)
         if self.descriptor is not None:
             return os.stat(name, dir_fd=self.descriptor, follow_symlinks=False)
+        if self._windows_handles:
+            return cast(
+                os.stat_result,
+                self._windows_api.lstat_at(self._windows_handles[-1], name),
+            )
         return (self.path / name).lstat()
+
+    def mkdir(self, name: str, *, exist_ok: bool) -> None:
+        _validate_component(name)
+        try:
+            if self.descriptor is not None:
+                os.mkdir(name, mode=0o700, dir_fd=self.descriptor)
+            else:
+                os.mkdir(self.path / name, mode=0o700)
+        except FileExistsError:
+            if not exist_ok:
+                raise
+            info = self.lstat(name)
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                raise _unsafe_error(f"workspace entry {name!r} is redirected")
+
+    def open_child(self, name: str) -> _BoundDirectory:
+        _validate_component(name)
+        if self.descriptor is not None:
+            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(name, flags, dir_fd=self.descriptor)
+            try:
+                info = os.fstat(descriptor)
+                if not stat.S_ISDIR(info.st_mode):
+                    raise _unsafe_error(f"workspace entry {name!r} is not a directory")
+                return _BoundDirectory(self.path / name, descriptor)
+            except BaseException:
+                os.close(descriptor)
+                raise
+        if self._windows_handles:
+            from rembggui.jobs.models.cache_fs import (
+                _FILE_ATTRIBUTE_DIRECTORY,
+                _FILE_ATTRIBUTE_REPARSE_POINT,
+                _WINDOWS_DIRECTORY_ACCESS,
+                _WINDOWS_DIRECTORY_FLAGS,
+                _WINDOWS_DIRECTORY_SHARE,
+            )
+
+            handle = self._windows_api.open_child_directory(
+                self._windows_handles[-1],
+                name,
+                create=False,
+                desired_access=_WINDOWS_DIRECTORY_ACCESS,
+                share_mode=_WINDOWS_DIRECTORY_SHARE,
+                flags=_WINDOWS_DIRECTORY_FLAGS,
+            )
+            try:
+                attributes = self._windows_api.file_attributes(handle)
+                if not attributes & _FILE_ATTRIBUTE_DIRECTORY or attributes & (
+                    _FILE_ATTRIBUTE_REPARSE_POINT
+                ):
+                    raise _unsafe_error(f"workspace entry {name!r} is redirected")
+                return _BoundDirectory(
+                    self.path / name,
+                    None,
+                    windows_handles=(handle,),
+                    windows_api=self._windows_api,
+                )
+            except BaseException:
+                self._windows_api.close_handle(handle)
+                raise
+        return _BoundDirectory.open(self.path / name)
 
     def open_read(self, name: str) -> int:
         _validate_component(name)
@@ -1434,6 +1704,11 @@ class _BoundDirectory:
         try:
             if self.descriptor is not None:
                 return os.open(name, flags, dir_fd=self.descriptor)
+            if self._windows_handles:
+                return cast(
+                    int,
+                    self._windows_api.open_read_at(self._windows_handles[-1], name),
+                )
             return os.open(self.path / name, flags)
         except OSError as error:
             if error.errno in {errno.ELOOP, errno.ENOTDIR}:
@@ -1449,6 +1724,11 @@ class _BoundDirectory:
             flags |= os.O_NOFOLLOW
         if self.descriptor is not None:
             return os.open(name, flags, dir_fd=self.descriptor)
+        if self._windows_handles:
+            return cast(
+                int,
+                self._windows_api.open_read_at(self._windows_handles[-1], name),
+            )
         return os.open(self.path / name, flags)
 
     def open_new_fd(self, name: str) -> int:
@@ -1460,6 +1740,13 @@ class _BoundDirectory:
             flags |= os.O_NOFOLLOW
         if self.descriptor is not None:
             return os.open(name, flags, 0o600, dir_fd=self.descriptor)
+        if self._windows_handles:
+            return cast(
+                int,
+                self._windows_api.open_new_read_write_at(
+                    self._windows_handles[-1], name
+                ),
+            )
         return os.open(self.path / name, flags, 0o600)
 
     def open_new(self, name: str) -> BinaryIO:
@@ -1480,6 +1767,25 @@ class _BoundDirectory:
                 src_dir_fd=self.descriptor,
                 dst_dir_fd=self.descriptor,
             )
+        elif self._windows_handles:
+            self._windows_api.replace_at(self._windows_handles[-1], source, destination)
+        else:
+            os.replace(self.path / source, self.path / destination)
+
+    def replace_directory(self, source: str, destination: str) -> None:
+        _validate_component(source)
+        _validate_component(destination)
+        if self.descriptor is not None:
+            os.replace(
+                source,
+                destination,
+                src_dir_fd=self.descriptor,
+                dst_dir_fd=self.descriptor,
+            )
+        elif self._windows_handles:
+            self._windows_api.replace_directory_at(
+                self._windows_handles[-1], source, destination
+            )
         else:
             os.replace(self.path / source, self.path / destination)
 
@@ -1487,8 +1793,21 @@ class _BoundDirectory:
         _validate_component(name)
         if self.descriptor is not None:
             os.unlink(name, dir_fd=self.descriptor)
+        elif self._windows_handles:
+            self._windows_api.unlink_at(
+                self._windows_handles[-1], name, require_regular=False
+            )
         else:
             (self.path / name).unlink()
+
+    def rmdir(self, name: str) -> None:
+        _validate_component(name)
+        if self.descriptor is not None:
+            os.rmdir(name, dir_fd=self.descriptor)
+        elif self._windows_handles:
+            self._windows_api.rmdir_at(self._windows_handles[-1], name)
+        else:
+            os.rmdir(self.path / name)
 
     def iter_entries(self) -> Iterator[tuple[str, os.stat_result]]:
         target: int | Path = (
@@ -1501,6 +1820,8 @@ class _BoundDirectory:
     def fsync(self) -> None:
         if self.descriptor is not None:
             _fsync_fd(self.descriptor)
+        elif self._windows_handles:
+            self._windows_api.flush_directory_strict(self._windows_handles[-1])
 
 
 def _workspace_layout(
@@ -1511,16 +1832,22 @@ def _workspace_layout(
     cuts = root / "cuts"
     scratch = root / "scratch"
     if create:
-        for path in (root, cuts, scratch):
-            try:
-                path.mkdir(mode=0o700)
-            except FileExistsError:
-                pass
-            except OSError as error:
-                raise _unsafe_error(
-                    f"cannot create workspace directory: {error}"
-                ) from error
-            _assert_safe_directory(path)
+        try:
+            with _BoundDirectory.open(output) as output_bound:
+                output_bound.mkdir(root.name, exist_ok=True)
+                with output_bound.open_child(root.name) as root_bound:
+                    root_bound.mkdir(cuts.name, exist_ok=True)
+                    root_bound.mkdir(scratch.name, exist_ok=True)
+                    with root_bound.open_child(cuts.name):
+                        pass
+                    with root_bound.open_child(scratch.name):
+                        pass
+        except AppError:
+            raise
+        except OSError as error:
+            raise _unsafe_error(
+                f"cannot create workspace directory: {error}"
+            ) from error
         _assert_local_filesystem(root)
     elif root.exists():
         _assert_safe_directory(root)
@@ -1538,62 +1865,143 @@ def _canonical_output_directory(path: Path) -> Path:
     _validate_path_value(path)
     if ".." in path.parts:
         raise _unsafe_error("output directory traversal is not allowed")
+    absolute = Path(os.path.abspath(path))
     try:
-        absolute = Path(os.path.abspath(path))
-        resolved = path.resolve(strict=True)
+        with _BoundDirectory.open(absolute):
+            pass
     except OSError as error:
         raise _unsafe_error("output directory must exist locally") from error
-    if not _same_lexical_path(absolute, resolved):
-        raise _unsafe_error("output directory may not contain symbolic links")
-    _assert_safe_directory(absolute)
     _assert_local_filesystem(absolute)
     return absolute
 
 
 def _assert_safe_directory(path: Path) -> None:
-    _validate_path_value(path)
-    absolute = Path(os.path.abspath(path))
-    current = Path(absolute.anchor)
     try:
-        for component in absolute.parts[1:]:
-            _validate_component(component)
-            current /= component
-            info = current.lstat()
-            if (
-                stat.S_ISLNK(info.st_mode)
-                or current.is_symlink()
-                or current.is_junction()
-                or not stat.S_ISDIR(info.st_mode)
-            ):
-                raise _unsafe_error(f"workspace component {component!r} is redirected")
+        with _BoundDirectory.open(path):
+            pass
     except AppError:
         raise
     except OSError as error:
         raise _unsafe_error(f"workspace directory is unavailable: {error}") from error
 
 
-def _assert_local_filesystem(path: Path) -> None:
-    if os.name == "nt":
-        text = str(path)
-        if text.startswith(("\\\\", "//")):
-            raise _unsafe_error(
-                "network workspaces are outside the local-filesystem contract"
-            )
-        try:
-            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-            drive = Path(path.anchor)
-            drive_type = int(kernel32.GetDriveTypeW(str(drive)))
-            if drive_type == 4:
+def _assert_local_filesystem(
+    path: Path,
+    *,
+    probe: Callable[[_BoundDirectory], bool] | None = None,
+) -> None:
+    try:
+        with _BoundDirectory.open(path) as bound:
+            checker = _default_local_filesystem_probe if probe is None else probe
+            if not checker(bound):
                 raise _unsafe_error(
                     "network workspaces are outside the local-filesystem contract"
                 )
-        except AttributeError:
-            return
-    else:
-        flags = os.statvfs(path).f_flag
-        local_flag = getattr(os, "ST_LOCAL", None)
-        if local_flag is not None and not flags & local_flag:
-            raise _unsafe_error("workspace filesystem is not local")
+    except AppError:
+        raise
+    except OSError as error:
+        raise _unsafe_error(
+            f"cannot prove the workspace filesystem is local: {error}"
+        ) from error
+
+
+def _default_local_filesystem_probe(bound: _BoundDirectory) -> bool:
+    if os.name == "nt":
+        text = str(bound.path)
+        if text.startswith(("\\\\", "//")):
+            return False
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        return _windows_drive_type_is_local(
+            int(kernel32.GetDriveTypeW(str(Path(bound.path.anchor))))
+        )
+    descriptor = bound.descriptor
+    if descriptor is None:
+        return False
+    flags = os.fstatvfs(descriptor).f_flag
+    local_flag = getattr(os, "ST_LOCAL", None)
+    if local_flag is not None:
+        return bool(flags & local_flag)
+    if sys.platform == "darwin":
+        return _darwin_descriptor_is_local(descriptor)
+    if sys.platform.startswith("linux"):
+        info = os.fstat(descriptor)
+        return _linux_mount_is_local(info.st_dev)
+    raise OSError(errno.ENOTSUP, "host has no local-filesystem identity probe")
+
+
+def _darwin_descriptor_is_local(descriptor: int) -> bool:
+    class DarwinStatfs(ctypes.Structure):
+        _fields_ = (
+            ("f_bsize", ctypes.c_uint32),
+            ("f_iosize", ctypes.c_int32),
+            ("f_blocks", ctypes.c_uint64),
+            ("f_bfree", ctypes.c_uint64),
+            ("f_bavail", ctypes.c_uint64),
+            ("f_files", ctypes.c_uint64),
+            ("f_ffree", ctypes.c_uint64),
+            ("f_fsid", ctypes.c_int32 * 2),
+            ("f_owner", ctypes.c_uint32),
+            ("f_type", ctypes.c_uint32),
+            ("f_flags", ctypes.c_uint32),
+            ("f_fssubtype", ctypes.c_uint32),
+            ("f_fstypename", ctypes.c_char * 16),
+            ("f_mntonname", ctypes.c_char * 1024),
+            ("f_mntfromname", ctypes.c_char * 1024),
+            ("f_reserved", ctypes.c_uint32 * 8),
+        )
+
+    filesystem = DarwinStatfs()
+    libc = ctypes.CDLL(None, use_errno=True)
+    fstatfs = libc.fstatfs
+    fstatfs.argtypes = [ctypes.c_int, ctypes.POINTER(DarwinStatfs)]
+    fstatfs.restype = ctypes.c_int
+    if fstatfs(descriptor, ctypes.byref(filesystem)) != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code))
+    return bool(filesystem.f_flags & 0x00001000)
+
+
+def _windows_drive_type_is_local(drive_type: int) -> bool:
+    # DRIVE_REMOVABLE, FIXED, CDROM, and RAMDISK are local. UNKNOWN,
+    # NO_ROOT_DIR, and REMOTE cannot satisfy the durable-workspace contract.
+    return drive_type in {2, 3, 5, 6}
+
+
+def _linux_mount_is_local(device: int) -> bool:
+    network_types = {
+        "9p",
+        "afs",
+        "ceph",
+        "cifs",
+        "fuse.sshfs",
+        "glusterfs",
+        "nfs",
+        "nfs4",
+        "smb3",
+    }
+    major_minor = f"{os.major(device)}:{os.minor(device)}"
+    with open("/proc/self/mountinfo", "rb") as source:
+        encoded = source.read(MAX_MOUNTINFO_BYTES + 1)
+    if len(encoded) > MAX_MOUNTINFO_BYTES:
+        raise OSError(errno.EOVERFLOW, "mount table exceeds its parsing bound")
+    matches: list[str] = []
+    for raw_line in encoded.splitlines():
+        if len(raw_line) > MAX_PATH_CHARS * 4:
+            raise OSError(errno.EOVERFLOW, "mount table line exceeds its bound")
+        fields = raw_line.split(b" ")
+        if len(fields) < 10 or fields[2].decode("ascii", "strict") != major_minor:
+            continue
+        try:
+            separator = fields.index(b"-")
+            filesystem = fields[separator + 1].decode("ascii", "strict").lower()
+        except (ValueError, IndexError, UnicodeDecodeError) as error:
+            raise OSError(errno.EINVAL, "mount table entry is malformed") from error
+        matches.append(filesystem)
+        if len(matches) > 64:
+            raise OSError(errno.EOVERFLOW, "device has too many mount bindings")
+    if not matches:
+        raise OSError(errno.ENODEV, "workspace mount identity is unavailable")
+    return all(filesystem not in network_types for filesystem in matches)
 
 
 def _read_manifest(path: Path) -> tuple[CutManifest, tuple[int, int, int, int, int]]:
@@ -1624,7 +2032,12 @@ def _read_manifest(path: Path) -> tuple[CutManifest, tuple[int, int, int, int, i
     return CutManifest.from_json_bytes(encoded), identity
 
 
-def _write_manifest_atomic(path: Path, manifest: CutManifest) -> None:
+def _write_manifest_atomic(
+    path: Path,
+    manifest: CutManifest,
+    *,
+    expected_identity: tuple[int, int, int, int, int] | None = None,
+) -> None:
     if type(manifest) is not CutManifest:
         raise _manifest_error("manifest must be an exact CutManifest")
     encoded = manifest.to_json_bytes()
@@ -1633,27 +2046,32 @@ def _write_manifest_atomic(path: Path, manifest: CutManifest) -> None:
     temporary = f".manifest-{uuid.uuid4().hex}.tmp"
     try:
         with _BoundDirectory.open(path) as bound:
-            output = bound.open_new(temporary)
             try:
-                output.write(encoded)
-                output.flush()
-                os.fsync(output.fileno())
+                output = bound.open_new(temporary)
+                try:
+                    output.write(encoded)
+                    output.flush()
+                    os.fsync(output.fileno())
+                finally:
+                    output.close()
+                if expected_identity is not None:
+                    current = bound.lstat(MANIFEST_FILENAME)
+                    if _stat_identity(current) != expected_identity:
+                        raise _manifest_error(
+                            "manifest changed before the atomic update committed"
+                        )
+                bound.replace(temporary, MANIFEST_FILENAME)
+                bound.fsync()
+                bound.assert_still_named()
             finally:
-                output.close()
-            bound.replace(temporary, MANIFEST_FILENAME)
-            bound.fsync()
-            bound.assert_still_named()
+                try:
+                    bound.unlink(temporary)
+                except FileNotFoundError:
+                    pass
     except AppError:
         raise
     except OSError as error:
         raise _manifest_error(f"cannot atomically write manifest: {error}") from error
-    finally:
-        temporary_path = path / temporary
-        if temporary_path.exists():
-            try:
-                _unlink_regular(temporary_path)
-            except OSError:
-                pass
 
 
 def _write_journal(path: Path, payload: Mapping[str, object]) -> None:
@@ -1662,15 +2080,21 @@ def _write_journal(path: Path, payload: Mapping[str, object]) -> None:
         raise _promotion_error("promotion journal exceeds its byte bound")
     temporary = f".{path.name}-{uuid.uuid4().hex}.tmp"
     with _BoundDirectory.open(path.parent) as bound:
-        output = bound.open_new(temporary)
         try:
-            output.write(encoded)
-            output.flush()
-            os.fsync(output.fileno())
+            output = bound.open_new(temporary)
+            try:
+                output.write(encoded)
+                output.flush()
+                os.fsync(output.fileno())
+            finally:
+                output.close()
+            bound.replace(temporary, path.name)
+            bound.fsync()
         finally:
-            output.close()
-        bound.replace(temporary, path.name)
-        bound.fsync()
+            try:
+                bound.unlink(temporary)
+            except FileNotFoundError:
+                pass
 
 
 def _recover_all_promotions(cuts_root: Path) -> None:
@@ -1682,11 +2106,12 @@ def _recover_all_promotions(cuts_root: Path) -> None:
                 continue
             if not stat.S_ISREG(info.st_mode):
                 raise _unsafe_error("promotion recovery marker is redirected")
-            keys.append(match.group(1))
-            if len(keys) > MAX_WORKSPACE_ENTRIES:
+            if len(keys) >= MAX_WORKSPACE_ENTRIES:
                 raise _unsafe_error("promotion recovery marker count is unbounded")
+            keys.append(match.group(1))
     for key in keys:
-        _recover_promotion(cuts_root, key)
+        with _promotion_lock(str(cuts_root / key)):
+            _recover_promotion(cuts_root, key)
 
 
 def _recover_promotion(cuts_root: Path, cache_key: str) -> None:
@@ -1786,7 +2211,8 @@ def _recover_promotion(cuts_root: Path, cache_key: str) -> None:
         if old_location is not None and old_location != target:
             if target.exists():
                 _remove_tree(target)
-            os.replace(old_location, target)
+            with _BoundDirectory.open(cuts_root) as bound:
+                bound.replace_directory(old_location.name, target.name)
         if stage.exists() and stage != old_location:
             _remove_tree(stage)
         if backup.exists() and backup != old_location:
@@ -1823,38 +2249,66 @@ def _atomic_directory_exchange(left: Path, right: Path) -> bool:
     """Exchange two named sibling directories atomically when supported."""
     if left.parent != right.parent:
         raise OSError(errno.EXDEV, "directory exchange requires siblings")
-    if sys.platform == "darwin":
-        libc = ctypes.CDLL(None, use_errno=True)
-        renamex = getattr(libc, "renamex_np", None)
-        if renamex is None:
+    with _BoundDirectory.open(left.parent) as parent:
+        descriptor = parent.descriptor
+        if descriptor is None:
             return False
-        renamex.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
-        renamex.restype = ctypes.c_int
-        if renamex(os.fsencode(left), os.fsencode(right), 0x00000002) == 0:
-            return True
-        code = ctypes.get_errno()
-        if code in {errno.ENOTSUP, errno.EINVAL, errno.ENOSYS}:
-            return False
-        raise OSError(code, os.strerror(code))
-    if sys.platform.startswith("linux"):
-        libc = ctypes.CDLL(None, use_errno=True)
-        renameat2 = getattr(libc, "renameat2", None)
-        if renameat2 is None:
-            return False
-        renameat2.argtypes = [
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_uint,
-        ]
-        renameat2.restype = ctypes.c_int
-        if renameat2(-100, os.fsencode(left), -100, os.fsencode(right), 2) == 0:
-            return True
-        code = ctypes.get_errno()
-        if code in {errno.ENOTSUP, errno.EINVAL, errno.ENOSYS}:
-            return False
-        raise OSError(code, os.strerror(code))
+        if sys.platform == "darwin":
+            libc = ctypes.CDLL(None, use_errno=True)
+            renameatx = getattr(libc, "renameatx_np", None)
+            if renameatx is None:
+                return False
+            renameatx.argtypes = [
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_uint,
+            ]
+            renameatx.restype = ctypes.c_int
+            if (
+                renameatx(
+                    descriptor,
+                    os.fsencode(left.name),
+                    descriptor,
+                    os.fsencode(right.name),
+                    0x00000002,
+                )
+                == 0
+            ):
+                return True
+            code = ctypes.get_errno()
+            if code in {errno.ENOTSUP, errno.EINVAL, errno.ENOSYS}:
+                return False
+            raise OSError(code, os.strerror(code))
+        if sys.platform.startswith("linux"):
+            libc = ctypes.CDLL(None, use_errno=True)
+            renameat2 = getattr(libc, "renameat2", None)
+            if renameat2 is None:
+                return False
+            renameat2.argtypes = [
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_uint,
+            ]
+            renameat2.restype = ctypes.c_int
+            if (
+                renameat2(
+                    descriptor,
+                    os.fsencode(left.name),
+                    descriptor,
+                    os.fsencode(right.name),
+                    2,
+                )
+                == 0
+            ):
+                return True
+            code = ctypes.get_errno()
+            if code in {errno.ENOTSUP, errno.EINVAL, errno.ENOSYS}:
+                return False
+            raise OSError(code, os.strerror(code))
     return False
 
 
@@ -1862,97 +2316,61 @@ def _remove_tree(path: Path) -> None:
     """Remove one exact tree without ever traversing a link/reparse target."""
     if path.parent == path or not path.name:
         raise OSError("refusing to remove an unbounded path")
-    if os.name != "nt":
-        with _BoundDirectory.open(path.parent) as parent:
-            info = parent.lstat(path.name)
-            if stat.S_ISLNK(info.st_mode):
-                parent.unlink(path.name)
-                return
-            if not stat.S_ISDIR(info.st_mode):
-                raise OSError("tree target is not a directory")
-            flags = (
-                os.O_RDONLY
-                | getattr(os, "O_DIRECTORY", 0)
-                | getattr(os, "O_NOFOLLOW", 0)
-            )
-            descriptor = os.open(path.name, flags, dir_fd=parent.descriptor)
-            try:
-                _remove_fd_contents(descriptor)
-            finally:
-                os.close(descriptor)
-            os.rmdir(path.name, dir_fd=parent.descriptor)
-            parent.fsync()
-        return
-    _remove_tree_windows(path)
+    with _BoundDirectory.open(path.parent) as parent:
+        info = parent.lstat(path.name)
+        if stat.S_ISLNK(info.st_mode):
+            parent.unlink(path.name)
+            return
+        if not stat.S_ISDIR(info.st_mode):
+            raise OSError("tree target is not a directory")
+        with parent.open_child(path.name) as child:
+            _remove_bound_contents(child, [0])
+        parent.rmdir(path.name)
+        parent.fsync()
 
 
-def _remove_fd_contents(descriptor: int) -> None:
-    with os.scandir(descriptor) as entries:
-        names = [entry.name for entry in entries]
-    if len(names) > MAX_FRAME_COUNT + 16:
-        raise OSError("tree entry count exceeds cleanup bound")
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    for name in names:
+def _remove_bound_contents(bound: _BoundDirectory, removed: list[int]) -> None:
+    while True:
+        selected: tuple[str, os.stat_result] | None = None
+        for name, info in bound.iter_entries():
+            removed[0] += 1
+            if removed[0] > MAX_FRAME_COUNT + 16:
+                raise OSError("tree entry count exceeds cleanup bound")
+            selected = name, info
+            break
+        if selected is None:
+            return
+        name, info = selected
         _validate_component(name)
-        info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
         if stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode):
-            child = os.open(name, flags, dir_fd=descriptor)
-            try:
-                _remove_fd_contents(child)
-            finally:
-                os.close(child)
-            os.rmdir(name, dir_fd=descriptor)
+            with bound.open_child(name) as child:
+                _remove_bound_contents(child, removed)
+            bound.rmdir(name)
         else:
-            os.unlink(name, dir_fd=descriptor)
-
-
-def _remove_tree_windows(path: Path) -> None:
-    info = path.lstat()
-    if path.is_symlink() or path.is_junction() or stat.S_ISLNK(info.st_mode):
-        path.unlink()
-        return
-    if not stat.S_ISDIR(info.st_mode):
-        raise OSError("tree target is not a directory")
-    with os.scandir(path) as entries:
-        children = list(entries)
-    if len(children) > MAX_FRAME_COUNT + 16:
-        raise OSError("tree entry count exceeds cleanup bound")
-    for entry in children:
-        child = path / entry.name
-        child_info = child.lstat()
-        if (
-            stat.S_ISDIR(child_info.st_mode)
-            and not child.is_symlink()
-            and not child.is_junction()
-        ):
-            _remove_tree_windows(child)
-        else:
-            child.unlink()
-    path.rmdir()
+            bound.unlink(name)
 
 
 def _bounded_tree_size(path: Path) -> int:
+    with _BoundDirectory.open(path) as bound:
+        counter = [0]
+        return _bounded_bound_tree_size(bound, counter)
+
+
+def _bounded_bound_tree_size(bound: _BoundDirectory, counter: list[int]) -> int:
     total = 0
-    entries = 0
-    stack = [path]
-    while stack:
-        current = stack.pop()
-        with os.scandir(current) as children:
-            for child in children:
-                entries += 1
-                if entries > MAX_FRAME_COUNT + 16:
-                    raise _unsafe_error("scratch tree exceeds the size-scan bound")
-                info = child.stat(follow_symlinks=False)
-                if stat.S_ISLNK(info.st_mode):
-                    raise _unsafe_error("scratch tree contains a symbolic link")
-                if stat.S_ISDIR(info.st_mode):
-                    if (Path(current) / child.name).is_junction():
-                        raise _unsafe_error("scratch tree contains a junction")
-                    stack.append(Path(current) / child.name)
-                elif stat.S_ISREG(info.st_mode):
-                    total += info.st_size
-                else:
-                    raise _unsafe_error("scratch tree contains an unsafe entry")
+    for name, info in bound.iter_entries():
+        counter[0] += 1
+        if counter[0] > MAX_FRAME_COUNT + 16:
+            raise _unsafe_error("scratch tree exceeds the size-scan bound")
+        if stat.S_ISLNK(info.st_mode):
+            raise _unsafe_error("scratch tree contains a symbolic link")
+        if stat.S_ISDIR(info.st_mode):
+            with bound.open_child(name) as child:
+                total += _bounded_bound_tree_size(child, counter)
+        elif stat.S_ISREG(info.st_mode):
+            total += info.st_size
+        else:
+            raise _unsafe_error("scratch tree contains an unsafe entry")
     return total
 
 
@@ -2283,10 +2701,11 @@ def _directory_identity(info: os.stat_result) -> tuple[int, int]:
 
 def _entry_exists_no_follow(path: Path) -> bool:
     try:
-        info = path.lstat()
+        with _BoundDirectory.open(path.parent) as bound:
+            info = bound.lstat(path.name)
     except FileNotFoundError:
         return False
-    if stat.S_ISLNK(info.st_mode) or path.is_symlink() or path.is_junction():
+    if stat.S_ISLNK(info.st_mode):
         raise _unsafe_error(f"workspace entry {path.name!r} is redirected")
     if not stat.S_ISDIR(info.st_mode):
         raise _unsafe_error(f"workspace entry {path.name!r} is not a directory")
@@ -2294,10 +2713,11 @@ def _entry_exists_no_follow(path: Path) -> bool:
 
 
 def _unlink_regular(path: Path) -> None:
-    info = path.lstat()
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-        raise OSError("refusing to unlink a non-regular workspace entry")
-    path.unlink()
+    with _BoundDirectory.open(path.parent) as bound:
+        info = bound.lstat(path.name)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise OSError("refusing to unlink a non-regular workspace entry")
+        bound.unlink(path.name)
 
 
 def _fsync_fd(descriptor: int) -> None:
@@ -2309,8 +2729,6 @@ def _fsync_fd(descriptor: int) -> None:
 
 
 def _fsync_directory(path: Path) -> None:
-    if os.name == "nt":
-        return
     with _BoundDirectory.open(path) as bound:
         bound.fsync()
 
@@ -2322,12 +2740,12 @@ def _same_lexical_path(left: Path, right: Path) -> bool:
 
 
 _promotion_locks_guard = Lock()
-_promotion_locks: dict[str, Lock] = {}
+_promotion_locks: dict[str, RLock] = {}
 
 
-def _promotion_lock(key: str) -> Lock:
+def _promotion_lock(key: str) -> RLock:
     with _promotion_locks_guard:
-        return _promotion_locks.setdefault(key, Lock())
+        return _promotion_locks.setdefault(key, RLock())
 
 
 def _raise_if_cancelled(cancelled: CancellationCheck) -> None:

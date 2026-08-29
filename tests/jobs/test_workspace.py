@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import json
 import os
+import threading
 import time
 from dataclasses import FrozenInstanceError
 from decimal import Decimal
@@ -32,6 +33,7 @@ from rembggui.jobs.workspace import (
     CutUnionMetadata,
     CutWorkspace,
     cleanup_abandoned_scratch,
+    cleanup_scratch,
     delete_workspace,
     detect_external_edits,
     list_workspaces,
@@ -141,6 +143,19 @@ def test_manifest_is_deeply_immutable_strict_and_deterministic(tmp_path: Path) -
     assert staged.cache_key == manifest.cache_key
 
 
+def test_manifest_frozen_json_has_no_reachable_mutable_lookup(tmp_path: Path) -> None:
+    _staged, manifest = _completed_staging(tmp_path)
+
+    frozen = manifest.cache_key_inputs
+    assert frozen.__slots__ == ("_items",)
+    for slot in frozen.__slots__:
+        assert not isinstance(object.__getattribute__(frozen, slot), dict)
+    before = manifest.cache_key
+    with pytest.raises(AttributeError):
+        object.__getattribute__(frozen, "_lookup")
+    assert CutManifest.cache_key_for(frozen) == before
+
+
 def test_manifest_rejects_non_authoritative_cache_key_inputs() -> None:
     inputs = _cache_inputs()
     inputs["provisional_source_fingerprint"] = "d" * 64
@@ -194,6 +209,114 @@ def test_workspace_rejects_symlinked_root_component(tmp_path: Path) -> None:
 
     assert exc.value.code is ErrorCode.CUT_WORKSPACE_UNSAFE
     assert list(outside.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor-race probe")
+def test_component_binding_rejects_real_ancestor_swap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cuts = _promoted(tmp_path)
+    root = cuts.workspace_root
+    moved = tmp_path / "workspace-moved"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    original_open = workspace_module.os.open
+    swapped = False
+
+    def swap_before_component_open(
+        path: object, flags: int, *args: object, **kwargs: object
+    ) -> int:
+        nonlocal swapped
+        if (
+            path == ".rembggui-work"
+            and kwargs.get("dir_fd") is not None
+            and not swapped
+        ):
+            swapped = True
+            root.rename(moved)
+            root.symlink_to(outside, target_is_directory=True)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(workspace_module.os, "open", swap_before_component_open)
+    with pytest.raises(AppError) as exc:
+        validate_cut_set(cuts)
+
+    assert exc.value.code is ErrorCode.CUT_WORKSPACE_UNSAFE
+    assert not (outside / MANIFEST_FILENAME).exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor-count probe")
+def test_component_binding_closes_descriptors_when_fstat_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    process = psutil.Process()
+    before = process.num_fds()
+    original_fstat = workspace_module.os.fstat
+    expected = tmp_path.stat()
+
+    def fail_for_target(descriptor: int) -> os.stat_result:
+        info = original_fstat(descriptor)
+        if (info.st_dev, info.st_ino) == (expected.st_dev, expected.st_ino):
+            raise OSError("injected post-open identity failure")
+        return info
+
+    monkeypatch.setattr(workspace_module.os, "fstat", fail_for_target)
+    with pytest.raises(OSError, match="injected"):
+        workspace_module._BoundDirectory.open(tmp_path)
+
+    assert process.num_fds() <= before
+
+
+def test_local_filesystem_policy_is_injectable_and_removable_is_local(
+    tmp_path: Path,
+) -> None:
+    workspace_module._assert_local_filesystem(tmp_path, probe=lambda _bound: True)
+    with pytest.raises(AppError) as exc:
+        workspace_module._assert_local_filesystem(tmp_path, probe=lambda _bound: False)
+
+    assert exc.value.code is ErrorCode.CUT_WORKSPACE_UNSAFE
+    assert workspace_module._windows_drive_type_is_local(2) is True
+    assert workspace_module._windows_drive_type_is_local(3) is True
+    assert workspace_module._windows_drive_type_is_local(4) is False
+
+
+def test_windows_component_binding_rejects_reparse_and_closes_all_handles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rembggui.jobs.models import cache_fs
+
+    class FakeApi:
+        def __init__(self) -> None:
+            self.names: dict[int, str] = {1: "/"}
+            self.closed: list[int] = []
+
+        def open_anchor(self, _path: Path, **_kwargs: object) -> int:
+            return 1
+
+        def open_child_directory(
+            self, _parent: int, name: str, **_kwargs: object
+        ) -> int:
+            handle = len(self.names) + 1
+            self.names[handle] = name
+            return handle
+
+        def file_attributes(self, handle: int) -> int:
+            attributes = cache_fs._FILE_ATTRIBUTE_DIRECTORY
+            if self.names[handle] == "reparse":
+                attributes |= cache_fs._FILE_ATTRIBUTE_REPARSE_POINT
+            return attributes
+
+        def close_handle(self, handle: int) -> None:
+            self.closed.append(handle)
+
+    api = FakeApi()
+    monkeypatch.setattr(cache_fs, "_CtypesWindowsDirectoryApi", lambda: api)
+
+    with pytest.raises(AppError) as exc:
+        workspace_module._BoundDirectory._open_windows(Path("/trusted/reparse/leaf"))
+
+    assert exc.value.code is ErrorCode.CUT_WORKSPACE_UNSAFE
+    assert api.closed == [3, 2, 1]
 
 
 def test_stage_cut_writes_only_sequential_rgba_pngs(tmp_path: Path) -> None:
@@ -288,25 +411,90 @@ def test_journaled_fallback_restores_old_cache_when_second_rename_fails(
     old = _promoted(tmp_path, job_id="old")
     before = validate_cut_set(old).to_json_bytes()
     replacement, manifest = _completed_staging(tmp_path, job_id="new", image_offset=10)
-    original_replace = workspace_module.os.replace
+    original_replace = workspace_module._BoundDirectory.replace_directory
 
     monkeypatch.setattr(
         workspace_module, "_atomic_directory_exchange", lambda _left, _right: False
     )
 
-    def fail_candidate_activation(
-        source: object, destination: object, *args: object, **kwargs: object
-    ) -> None:
-        if source == replacement.path and destination == old.path:
+    def fail_candidate_activation(bound: object, source: str, destination: str) -> None:
+        if source == replacement.path.name and destination == old.path.name:
             raise OSError("injected candidate activation failure")
-        original_replace(source, destination, *args, **kwargs)
+        original_replace(bound, source, destination)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(workspace_module.os, "replace", fail_candidate_activation)
+    monkeypatch.setattr(
+        workspace_module._BoundDirectory,
+        "replace_directory",
+        fail_candidate_activation,
+    )
     with pytest.raises(AppError) as exc:
         promote_cut_set(replacement, manifest)
 
     assert exc.value.code is ErrorCode.CUT_PROMOTION_FAILED
     assert validate_cut_set(old).to_json_bytes() == before
+
+
+def test_open_and_listing_wait_for_in_progress_fallback_exchange(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    old = _promoted(tmp_path, job_id="old")
+    replacement, manifest = _completed_staging(tmp_path, job_id="new", image_offset=10)
+    original_replace = workspace_module._BoundDirectory.replace_directory
+    exchange_started = threading.Event()
+    release_exchange = threading.Event()
+
+    monkeypatch.setattr(
+        workspace_module, "_atomic_directory_exchange", lambda _left, _right: False
+    )
+
+    def pause_after_old_move(bound: object, source: str, destination: str) -> None:
+        original_replace(bound, source, destination)  # type: ignore[arg-type]
+        if source == old.path.name:
+            exchange_started.set()
+            assert release_exchange.wait(timeout=5)
+
+    monkeypatch.setattr(
+        workspace_module._BoundDirectory,
+        "replace_directory",
+        pause_after_old_move,
+    )
+    failures: list[BaseException] = []
+    observations: list[object] = []
+
+    def promote() -> None:
+        try:
+            promote_cut_set(replacement, manifest)
+        except BaseException as error:
+            failures.append(error)
+
+    def observe_open() -> None:
+        try:
+            observations.append(CutWorkspace.open(tmp_path, old.cache_key))
+        except BaseException as error:
+            failures.append(error)
+
+    def observe_list() -> None:
+        try:
+            observations.append(list_workspaces(tmp_path))
+        except BaseException as error:
+            failures.append(error)
+
+    promoting = threading.Thread(target=promote)
+    promoting.start()
+    assert exchange_started.wait(timeout=5)
+    opening = threading.Thread(target=observe_open)
+    listing = threading.Thread(target=observe_list)
+    opening.start()
+    listing.start()
+    time.sleep(0.05)
+    assert not observations
+    release_exchange.set()
+    for thread in (promoting, opening, listing):
+        thread.join(timeout=5)
+
+    assert not failures
+    assert len(observations) == 2
+    assert validate_cut_set(CutWorkspace.open(tmp_path, old.cache_key)).frame_count == 3
 
 
 def test_recovery_finishes_cleanup_after_promoted_exchange_crash(
@@ -633,6 +821,31 @@ def test_pinned_workspace_requires_explicit_delete_override(tmp_path: Path) -> N
     assert not cuts.path.exists()
 
 
+def test_corrupt_workspace_delete_requires_explicit_override_only_when_pin_unreadable(
+    tmp_path: Path,
+) -> None:
+    cuts = _promoted(tmp_path)
+    (cuts.path / MANIFEST_FILENAME).write_bytes(b"not-json\n")
+
+    with pytest.raises(AppError) as exc:
+        delete_workspace(cuts)
+
+    assert exc.value.code is ErrorCode.CUT_WORKSPACE_PINNED
+    delete_workspace(cuts, allow_pinned=True)
+    assert not cuts.path.exists()
+
+
+def test_corrupt_frames_can_be_deleted_when_readable_manifest_is_unpinned(
+    tmp_path: Path,
+) -> None:
+    cuts = _promoted(tmp_path)
+    (cuts.path / "frame-000000.png").write_bytes(b"broken")
+
+    delete_workspace(cuts)
+
+    assert not cuts.path.exists()
+
+
 def test_delete_workspace_is_explicit_and_does_not_touch_siblings(
     tmp_path: Path,
 ) -> None:
@@ -672,3 +885,117 @@ def test_abandoned_scratch_cleanup_is_age_and_count_bounded_and_never_deletes_cu
     assert second.has_more is False
     assert recent.is_dir()
     assert cuts.path.is_dir()
+
+
+def test_immediate_scratch_cleanup_is_idempotent_and_scoped(tmp_path: Path) -> None:
+    cuts = _promoted(tmp_path)
+    selected = cuts.scratch_root / "job-success"
+    sibling = cuts.scratch_root / "job-other"
+    selected.mkdir()
+    sibling.mkdir()
+    (selected / "partial.bin").write_bytes(b"partial")
+
+    assert cleanup_scratch(tmp_path, "job-success") is True
+    assert cleanup_scratch(tmp_path, "job-success") is False
+    assert sibling.is_dir()
+    assert cuts.path.is_dir()
+
+
+def test_listing_and_removal_stop_at_namespace_bounds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cuts = _promoted(tmp_path)
+    for index in range(4):
+        (cuts.cuts_root / f"junk-{index}").write_bytes(b"x")
+    monkeypatch.setattr(workspace_module, "MAX_WORKSPACE_ENTRIES", 1)
+    with pytest.raises(AppError) as listing_error:
+        list_workspaces(tmp_path)
+    assert listing_error.value.code is ErrorCode.CUT_WORKSPACE_UNSAFE
+
+    scratch = cuts.scratch_root / "bounded-remove"
+    scratch.mkdir()
+    for index in range(18):
+        (scratch / f"entry-{index}").write_bytes(b"x")
+    monkeypatch.setattr(workspace_module, "MAX_FRAME_COUNT", 1)
+    with pytest.raises(AppError) as cleanup_error:
+        cleanup_scratch(tmp_path, scratch.name)
+    assert cleanup_error.value.code is ErrorCode.CUT_WORKSPACE_DELETE_FAILED
+    assert cuts.path.is_dir()
+
+
+def test_detect_external_edits_never_regresses_last_use(tmp_path: Path) -> None:
+    cuts = _promoted(tmp_path)
+    future = cuts.set_pinned(False, now_ns=50_000)
+
+    detected = detect_external_edits(cuts, now_ns=20_000)
+
+    assert detected.last_used_at_ns == future.last_used_at_ns == 50_000
+
+
+def test_manifest_mutations_share_one_workspace_lock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cuts = _promoted(tmp_path)
+    _rewrite_frame(cuts.path / "frame-000000.png", (3, 4, 5, 6))
+    entered_scan = threading.Event()
+    release_scan = threading.Event()
+    original_scan = workspace_module._scan_cut_set
+    first_scan = True
+
+    def paused_scan(*args: object, **kwargs: object) -> object:
+        nonlocal first_scan
+        result = original_scan(*args, **kwargs)
+        if first_scan:
+            first_scan = False
+            entered_scan.set()
+            assert release_scan.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(workspace_module, "_scan_cut_set", paused_scan)
+    failures: list[BaseException] = []
+
+    def detect() -> None:
+        try:
+            detect_external_edits(cuts, now_ns=30_000)
+        except BaseException as error:
+            failures.append(error)
+
+    def pin() -> None:
+        try:
+            cuts.set_pinned(True, now_ns=40_000)
+        except BaseException as error:
+            failures.append(error)
+
+    detecting = threading.Thread(target=detect)
+    detecting.start()
+    assert entered_scan.wait(timeout=5)
+    pinning = threading.Thread(target=pin)
+    pinning.start()
+    release_scan.set()
+    detecting.join(timeout=5)
+    pinning.join(timeout=5)
+
+    assert not failures
+    manifest = validate_cut_set(cuts)
+    assert manifest.pinned is True
+    assert manifest.edited is True
+    assert manifest.union_metadata is None
+    assert manifest.last_used_at_ns == 40_000
+
+
+def test_initial_journal_failure_is_structured_and_cleans_stage(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    old = _promoted(tmp_path)
+    stage, manifest = _completed_staging(tmp_path, job_id="replacement", image_offset=8)
+
+    def fail_journal(*_args: object, **_kwargs: object) -> None:
+        raise OSError("injected journal failure")
+
+    monkeypatch.setattr(workspace_module, "_write_journal", fail_journal)
+    with pytest.raises(AppError) as exc:
+        promote_cut_set(stage, manifest)
+
+    assert exc.value.code is ErrorCode.CUT_PROMOTION_FAILED
+    assert not stage.path.exists()
+    assert validate_cut_set(old).frame_count == 3
