@@ -7,7 +7,7 @@ import shutil
 import stat
 import tempfile
 import warnings
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal
@@ -21,6 +21,7 @@ from PIL import Image, ImageChops
 
 from rembggui.core.errors import AppError, ErrorCode, ValidationError
 from rembggui.core.geometry import FramingPlan, solve_proportional_scale
+from rembggui.core.rgba import RgbaOwnershipTracker
 from rembggui.core.specs import (
     MIN_FINAL_DIMENSION,
     FramingSpec,
@@ -123,24 +124,50 @@ def encode_lossless_webp(
     delays_ms: Sequence[int],
     destination: Path,
     *,
-    rgba_ownership_observer: Callable[[int], None] | None = None,
+    rgba_ownership_tracker: RgbaOwnershipTracker | None = None,
 ) -> EncodeSummary:
     """Encode PNG-backed RGBA frames and atomically replace *destination*."""
-    frames = _validate_frame_inputs(frame_paths, delays_ms)
+    if rgba_ownership_tracker is None:
+        frames = _validate_frame_inputs(frame_paths, delays_ms)
+    else:
+        frames = _validate_frame_inputs(
+            frame_paths,
+            delays_ms,
+            rgba_ownership_tracker,
+        )
     destination = _validate_destination(destination)
     temporary = _sibling_temporary(destination)
     primary: BaseException | None = None
     try:
         if len(frames.paths) == 1:
-            _encode_still(frames.paths[0], frames.identities[0], temporary)
+            if rgba_ownership_tracker is None:
+                _encode_still(frames.paths[0], frames.identities[0], temporary)
+            else:
+                _encode_still(
+                    frames.paths[0],
+                    frames.identities[0],
+                    temporary,
+                    rgba_ownership_tracker,
+                )
         else:
-            _encode_animation(frames, temporary, rgba_ownership_observer)
+            if rgba_ownership_tracker is None:
+                _encode_animation(frames, temporary)
+            else:
+                _encode_animation(frames, temporary, rgba_ownership_tracker)
         _fsync_file(temporary)
-        info = validate_webp(
-            temporary,
-            expected_frames=len(frames.paths),
-            expected_duration_ms=frames.encoded_duration_ms,
-        )
+        if rgba_ownership_tracker is None:
+            info = validate_webp(
+                temporary,
+                expected_frames=len(frames.paths),
+                expected_duration_ms=frames.encoded_duration_ms,
+            )
+        else:
+            info = validate_webp(
+                temporary,
+                expected_frames=len(frames.paths),
+                expected_duration_ms=frames.encoded_duration_ms,
+                rgba_ownership_tracker=rgba_ownership_tracker,
+            )
         if (info.width, info.height) != frames.size:
             raise _invalid_output("encoded dimensions do not match the input frames")
         expected_delays = frames.delays_ms if len(frames.paths) > 1 else ()
@@ -152,7 +179,7 @@ def encode_lossless_webp(
             frames.paths,
             temporary,
             frames.identities,
-            rgba_ownership_observer,
+            rgba_ownership_tracker,
         )
         os.replace(temporary, destination)
     except AppError as error:
@@ -182,6 +209,8 @@ def validate_webp(
     path: Path,
     expected_frames: int,
     expected_duration_ms: int,
+    *,
+    rgba_ownership_tracker: RgbaOwnershipTracker | None = None,
 ) -> WebPInfo:
     """Validate WebP structure, timing, dimensions, losslessness, and decoding."""
     path = _require_path(path, "WebP path")
@@ -214,6 +243,8 @@ def validate_webp(
             for index in range(decoded_frames):
                 image.seek(index)
                 image.load()
+                if rgba_ownership_tracker is not None:
+                    rgba_ownership_tracker.register(image)
                 has_alpha = has_alpha or image.mode in {"RGBA", "LA"}
     except AppError:
         raise
@@ -349,7 +380,9 @@ def fit_webp_to_size(
 
 
 def _validate_frame_inputs(
-    frame_paths: Sequence[Path], delays_ms: Sequence[int]
+    frame_paths: Sequence[Path],
+    delays_ms: Sequence[int],
+    rgba_ownership_tracker: RgbaOwnershipTracker | None = None,
 ) -> _FrameSet:
     if not isinstance(frame_paths, Sequence) or isinstance(frame_paths, (str, bytes)):
         raise _invalid_output("frame_paths must be a finite path sequence")
@@ -383,6 +416,8 @@ def _validate_frame_inputs(
                     if image.format != "PNG" or image.mode != "RGBA":
                         raise _invalid_output(f"frame must be an RGBA PNG: {path}")
                     size = FramingSpec().validate_final_dimensions(*image.size)
+                    if rgba_ownership_tracker is not None:
+                        rgba_ownership_tracker.register(image)
                     if expected_size is None:
                         expected_size = size
                     elif size != expected_size:
@@ -403,10 +438,17 @@ def _validate_frame_inputs(
     return _FrameSet(tuple(paths), delays, expected_size, tuple(identities))
 
 
-def _encode_still(source: Path, identity: _FileIdentity, destination: Path) -> None:
+def _encode_still(
+    source: Path,
+    identity: _FileIdentity,
+    destination: Path,
+    rgba_ownership_tracker: RgbaOwnershipTracker | None = None,
+) -> None:
     with _open_stable_binary(source, identity) as (input_file, _opened_identity):
         with _open_pillow(input_file) as image:
             image.load()
+            if rgba_ownership_tracker is not None:
+                rgba_ownership_tracker.register(image)
             image.save(
                 destination,
                 format="WEBP",
@@ -424,7 +466,7 @@ def _encode_still(source: Path, identity: _FileIdentity, destination: Path) -> N
 def _encode_animation(
     frames: _FrameSet,
     destination: Path,
-    rgba_ownership_observer: Callable[[int], None] | None,
+    rgba_ownership_tracker: RgbaOwnershipTracker | None = None,
 ) -> None:
     width, height = frames.size
     container = av.open(
@@ -449,32 +491,53 @@ def _encode_animation(
         for path, identity, delay in zip(
             frames.paths, frames.identities, frames.delays_ms, strict=True
         ):
-            with _open_stable_binary(path, identity) as (
-                input_file,
-                _opened_identity,
-            ):
-                with _open_pillow(input_file) as image:
-                    image.load()
-                    pixels = np.asarray(image)
-                    frame = av.VideoFrame.from_ndarray(pixels, format="rgba")
-                    _observe_rgba_owners(
-                        rgba_ownership_observer,
-                        frames.size,
-                        image,
-                        pixels,
-                        frame,
-                    )
-            frame.pts = timestamp
-            frame.duration = delay
-            frame.time_base = Fraction(1, 1000)
+            _encode_animation_frame(
+                path,
+                identity,
+                delay,
+                timestamp,
+                frames.size,
+                stream,
+                container,
+                rgba_ownership_tracker,
+            )
             timestamp += delay
-            for packet in stream.encode(frame):
-                container.mux(packet)
         for packet in stream.encode():
             container.mux(packet)
     finally:
         container.close()
     _rewrite_animation_durations(destination, frames.delays_ms)
+
+
+def _encode_animation_frame(
+    path: Path,
+    identity: _FileIdentity,
+    delay: int,
+    timestamp: int,
+    size: tuple[int, int],
+    stream: av.video.stream.VideoStream,
+    container: av.container.OutputContainer,
+    rgba_ownership_tracker: RgbaOwnershipTracker | None,
+) -> None:
+    with _open_stable_binary(path, identity) as (input_file, _opened_identity):
+        with _open_pillow(input_file) as image:
+            image.load()
+            if rgba_ownership_tracker is not None:
+                rgba_ownership_tracker.register(image)
+            pixels = np.asarray(image)
+            if rgba_ownership_tracker is not None:
+                rgba_ownership_tracker.register(pixels)
+            frame = av.VideoFrame.from_ndarray(pixels, format="rgba")
+            if rgba_ownership_tracker is not None:
+                frame_owner = rgba_ownership_tracker.track_nonweak(frame)
+                frame = frame_owner.value
+    if (frame.width, frame.height) != size:
+        raise _invalid_output("encoder frame dimensions changed unexpectedly")
+    frame.pts = timestamp
+    frame.duration = delay
+    frame.time_base = Fraction(1, 1000)
+    for packet in stream.encode(frame):
+        container.mux(packet)
 
 
 def _rewrite_animation_durations(path: Path, delays_ms: tuple[int, ...]) -> None:
@@ -680,78 +743,65 @@ def _validate_encoded_pixels(
     source_paths: tuple[Path, ...],
     output: Path,
     expected_identities: tuple[_FileIdentity, ...] | None = None,
-    rgba_ownership_observer: Callable[[int], None] | None = None,
+    rgba_ownership_tracker: RgbaOwnershipTracker | None = None,
 ) -> None:
     try:
         with _open_pillow(output) as encoded:
             for index, source_path in enumerate(source_paths):
-                encoded.seek(index)
                 expected_identity = (
                     expected_identities[index]
                     if expected_identities is not None
                     else None
                 )
-                with _open_stable_binary(source_path, expected_identity) as (
-                    input_file,
-                    _opened_identity,
-                ):
-                    with _open_pillow(input_file) as source:
-                        source.load()
-                        if encoded.mode == "RGBA":
-                            difference = ImageChops.difference(source, encoded)
-                            _observe_rgba_owners(
-                                rgba_ownership_observer,
-                                source.size,
-                                source,
-                                encoded,
-                                difference,
-                            )
-                        else:
-                            converted = encoded.convert("RGBA")
-                            try:
-                                difference = ImageChops.difference(source, converted)
-                                _observe_rgba_owners(
-                                    rgba_ownership_observer,
-                                    source.size,
-                                    source,
-                                    converted,
-                                    difference,
-                                )
-                            finally:
-                                converted.close()
-                        with difference:
-                            if difference.getbbox(alpha_only=False) is not None:
-                                raise _invalid_output(
-                                    f"encoded frame {index} does not match its "
-                                    "RGBA source"
-                                )
+                _validate_encoded_frame(
+                    encoded,
+                    index,
+                    source_path,
+                    expected_identity,
+                    rgba_ownership_tracker,
+                )
     except AppError:
         raise
     except (OSError, EOFError, ValueError) as error:
         raise _invalid_output(f"cannot compare encoded WebP pixels: {error}") from error
 
 
-def _observe_rgba_owners(
-    observer: Callable[[int], None] | None,
-    size: tuple[int, int],
-    *owners: object,
+def _validate_encoded_frame(
+    encoded: Image.Image,
+    index: int,
+    source_path: Path,
+    expected_identity: _FileIdentity | None,
+    rgba_ownership_tracker: RgbaOwnershipTracker | None,
 ) -> None:
-    if observer is None:
-        return
-    width, height = size
-    count = 0
-    for owner in owners:
-        if isinstance(owner, Image.Image):
-            count += owner.mode == "RGBA" and owner.size == size
-        elif isinstance(owner, np.ndarray):
-            count += owner.shape == (height, width, 4)
-        elif isinstance(owner, av.VideoFrame):
-            count += (
-                owner.width == width
-                and owner.height == height
-                and owner.format.name in {"rgba", "bgra"}
-            )
-    observer(count)
+    encoded.seek(index)
+    encoded.load()
+    if rgba_ownership_tracker is not None:
+        rgba_ownership_tracker.register(encoded)
+    with _open_stable_binary(source_path, expected_identity) as (
+        input_file,
+        _opened_identity,
+    ):
+        with _open_pillow(input_file) as source:
+            source.load()
+            if rgba_ownership_tracker is not None:
+                rgba_ownership_tracker.register(source)
+            if encoded.mode == "RGBA":
+                difference = ImageChops.difference(source, encoded)
+            else:
+                converted = encoded.convert("RGBA")
+                if rgba_ownership_tracker is not None:
+                    rgba_ownership_tracker.register(converted)
+                try:
+                    difference = ImageChops.difference(source, converted)
+                finally:
+                    converted.close()
+            with difference:
+                if rgba_ownership_tracker is not None:
+                    rgba_ownership_tracker.register(difference)
+                if difference.getbbox(alpha_only=False) is not None:
+                    raise _invalid_output(
+                        f"encoded frame {index} does not match its RGBA source"
+                    )
 
 
 def _resize_from_sources(

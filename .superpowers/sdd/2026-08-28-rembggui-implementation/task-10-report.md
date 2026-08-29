@@ -8,17 +8,25 @@ The source-level and packaging-contract gates pass. A local macOS arm64 bundle w
 
 ## Audited scope
 
-- `pyproject.toml` and `uv.lock` pin Nuitka 2.8.10 and provide `pip`, which the installed `pyside6-deploy` invokes while validating its configured packages.
+- `pyproject.toml` and `uv.lock` pin Nuitka 2.8.10, `pip`, and the exact Linux-only patch-tool package required by the installed deploy helper.
 - `src/rembggui/app.py` calls `multiprocessing.freeze_support()` and exposes `--smoke-test` as stable JSON with a nonzero structured failure result.
 - `src/rembggui/smoke.py` exercises the installed Qt platform and PNG/WebP plugins, creates H.264 media with PyAV, decodes through the production source path, encodes and reopens a real two-frame alpha WebP through the production path, performs an actual `spawn` plus shared-memory round trip, verifies unlinking, optionally uses a deterministic local fake session, and measures at most three simultaneous full-resolution RGBA owners.
 - `src/rembggui/smoke_child.py` is an importable spawn target. It attaches to parent-owned shared memory, blocks sockets, optionally mutates bytes through the local fake session, and returns JSON-safe evidence.
-- `src/rembggui/core/webp.py` adds only an optional ownership observer to the existing production encoder/validator so the smoke measures the actual media path rather than a duplicate implementation.
+- `src/rembggui/core/rgba.py` and `src/rembggui/core/webp.py` provide an optional weak-lifetime ownership ledger across production encode and pixel validation. Identity de-duplication and per-frame scopes expose retained Python-side owners while adding no tracking work when the ledger is absent. Codec-native internal buffers remain opaque to Python and are not claimed as measured.
 - `src/rembggui/resources.py` and the small `ModelCatalog` change resolve the Task 9 manifest and provenance from source, standalone executable, or macOS `Contents/Resources` roots.
 - `packaging/entrypoint.py`, `packaging/pysidedeploy.spec`, and `packaging/smoke_child.py` define the native entry point, required Qt/image/native packages and resources, exclusions for tests/model weights/tokens/media, and frozen smoke launcher.
 - `.github/workflows/release.yml` is `workflow_dispatch` only and contains exactly Windows x64, macOS Intel, macOS arm64, and Ubuntu x64. It uses Python 3.13, pinned uv, frozen/no-cache dependency installation, unsigned builds, frozen smoke, and artifact upload. It contains no push, publish, signing, secret, or model-download step.
 - `tests/test_app_smoke.py` and `tests/release/test_frozen_smoke.py` cover CLI JSON/nonzero behavior, immutable result shape, real runtime boundaries, Qt PNG/WebP round trips, frozen resources, deploy-spec parsing/dry-run, bundle lookup, and workflow policy.
 
-No Task 10 diff adds cloud or withoutBG behavior. The pre-existing catalog cloud declarations remain unchanged; the catalog diff is limited to packaged manifest/provenance lookup. User-owned `.agents/`, `AGENTS.md`, and `emoteScript` were neither edited nor staged.
+User-owned `.agents/`, `AGENTS.md`, and `emoteScript` were neither edited nor staged.
+
+## Fix-round evidence
+
+- A six- and twelve-frame scaling test proves the normal production encode/validation path remains constant at three live full-resolution RGBA owners and releases all measured owners afterward.
+- A deliberately retaining ledger keeps owners from six frames alive and drives the observed peak above three, proving the measurement is based on actual object lifetime rather than observer argument count.
+- Shared-memory construction through child completion now has one cleanup scope. Injected pipe, start, send, receive, child, and timeout failures prove endpoints and processes are boundedly cleaned while the created segment is closed and unlinked once; injected close and unlink failures remain attached to the primary error without masking it.
+- Resource discovery rejects non-canonical and device-like names, fails when missing, rejects symlinked files/directories, and fails closed when standalone and macOS bundle copies are ambiguous. Production manifest reads are descriptor-bound and verify file and directory identity; returned paths are documented for trusted, read-only packaged resources.
+- The manual workflow verifies the exact Linux patch-tool version and executable before invoking the deploy helper with frozen, no-sync resolution.
 
 ## TDD and recovery evidence
 
@@ -27,18 +35,19 @@ The inherited recovery tree already contained most Task 10 implementation, so th
 1. The first focused run failed because PySide6 6.10 runtime rejects the bytes format token advertised by its stubs; using the runtime-supported string token changed the release suite from 1 failure / 6 passes to 7 passes.
 2. New contract tests then failed for the brief-level result accessors, real Qt PNG/WebP saves, and exact no-cache workflow command; implementation changed those 3 failures to a 9-pass release suite.
 3. A stricter native-package/resource specification test failed before recursive ONNX Runtime and explicit Pillow PNG/WebP plugin inclusion, then passed together with the installed `pyside6-deploy --dry-run` test.
-4. The first full-suite recovery run exposed a leaked `QGuiApplication` that made later `QApplication` tests fail. The smoke now creates `QApplication`; a direct smoke-then-thumbnail regression sequence leaves the downstream GUI cache test passing. The final sandbox full run improved from 612 passes / 40 failures to 618 passes / 34 failures, with every remaining failure caused by the controller sandbox denying POSIX shared-memory creation.
+4. The first full-suite recovery run exposed a leaked `QGuiApplication` that made later `QApplication` tests fail. The smoke now creates `QApplication`; a direct smoke-then-thumbnail regression sequence leaves the downstream GUI cache test passing.
+5. The fix round began with 4 ownership-ledger failures, 2 shared-memory cleanup failures, 11 resource-resolution failures, and 2 dependency/workflow failures. A later symlink-escape test also failed before descriptor-bound resource hardening. The focused final run passed all 131 sandbox-compatible release/core/resource/catalog tests; deliberate retention, construction and post-start cleanup failures, and missing/ambiguous/traversal resource cases are included.
 
 ## Verification
 
-- `UV_CACHE_DIR=/private/tmp/rembggui-task10-uv-cache uv lock --check` — passed, 54 packages resolved from the lock.
-- `QT_QPA_PLATFORM=offscreen .venv/bin/pytest -q` — 618 passed; 34 environment-blocked failures, all `PermissionError: Operation not permitted` from `multiprocessing.shared_memory` under the sandbox.
-- Focused Task 10 tests in the same sandbox — 11 passed; the 2 real spawn/shared-memory cases hit the same sandbox denial.
-- Before the final Qt lifecycle hardening, the controller-permitted shared-memory run had all 13 focused tests passing and the real CLI returned `ok: true`, two alpha WebP frames, a spawn/shared-memory round trip with unlink confirmation, fake local session use, and `peak_full_res_rgba_owners: 3`.
-- Final direct CLI in the restricted sandbox — correctly emitted structured JSON and exited nonzero at the shared-memory permission boundary.
+- `UV_CACHE_DIR=/private/tmp/rembggui-task10-fix-uv-cache uv lock --check` — passed, 55 packages resolved from the lock.
+- `QT_QPA_PLATFORM=offscreen .venv/bin/pytest -q` before the final resource-only hardening — 649 passed; 34 environment-blocked failures, all `PermissionError: Operation not permitted` from `multiprocessing.shared_memory` under the sandbox.
+- Post-hardening focused release/core/resource/catalog tests in the same sandbox — 131 passed; the 2 real spawn/shared-memory cases were separately exercised by the full run and hit the same sandbox denial.
+- An earlier controller-permitted run established the real Qt/PyAV/WebP/spawn/shared-memory path. The final weak-lifetime ledger and cleanup changes still require the controller's permitted CLI/full rerun; no post-fix native success is claimed here.
+- Final direct CLI in the restricted sandbox — emitted structured JSON and exited nonzero at the shared-memory permission boundary.
 - `.venv/bin/ruff check .` — passed.
-- `.venv/bin/mypy src` — passed for 26 source files.
-- Ruff format check over all 10 Task 10 Python files — passed. The whole repository still has 12 pre-existing formatting differences outside Task 10; they were intentionally not rewritten.
+- `.venv/bin/mypy src` — passed for 27 source files.
+- Ruff format check over the changed Python scope — passed. Pre-existing formatting differences outside Task 10 were intentionally not rewritten.
 - `git diff --check` — passed.
 - Installed `pyside6-deploy --dry-run --force` against the restored portable spec — passed.
 

@@ -60,23 +60,29 @@
           "run": "uv sync --frozen --all-groups --no-cache"
         },
         {
+          "name": "Verify pinned Linux patch tool",
+          "id": "verify-patchelf",
+          "if": "runner.os == 'Linux'",
+          "run": "uv run --frozen --no-sync python -c \"import shutil; from importlib.metadata import version; assert version('patchelf') == '0.17.2.4'; assert shutil.which('patchelf')\""
+        },
+        {
           "name": "Install Linux headless runtime",
           "if": "runner.os == 'Linux'",
           "run": "sudo apt-get update && sudo apt-get install --yes xvfb libegl1 libxkbcommon-x11-0"
         },
         {
           "name": "Build native standalone bundle",
-          "run": "uv run pyside6-deploy packaging/entrypoint.py -c packaging/pysidedeploy.spec --force"
+          "run": "uv run --frozen --no-sync pyside6-deploy packaging/entrypoint.py -c packaging/pysidedeploy.spec --force"
         },
         {
           "name": "Smoke native Linux bundle",
           "if": "runner.os == 'Linux'",
-          "run": "xvfb-run -a uv run python packaging/smoke_child.py dist"
+          "run": "xvfb-run -a uv run --frozen --no-sync python packaging/smoke_child.py dist"
         },
         {
           "name": "Smoke native macOS or Windows bundle",
           "if": "runner.os != 'Linux'",
-          "run": "uv run python packaging/smoke_child.py dist"
+          "run": "uv run --frozen --no-sync python packaging/smoke_child.py dist"
         },
         {
           "name": "Upload unsigned bundle",

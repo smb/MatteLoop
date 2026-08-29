@@ -10,6 +10,7 @@ import os
 import tempfile
 from dataclasses import asdict, dataclass
 from fractions import Fraction
+from multiprocessing.process import BaseProcess
 from multiprocessing.shared_memory import SharedMemory
 from pathlib import Path
 from typing import Any, cast
@@ -18,12 +19,14 @@ import av
 import numpy as np
 from PIL import Image, ImageDraw
 
+from rembggui.core.rgba import RgbaOwnershipTracker
 from rembggui.core.webp import encode_lossless_webp, validate_webp
 from rembggui.jobs.source import decode_frame, probe_source
 from rembggui.smoke_child import spawn_smoke_target
 
 _FRAME_SIZE = (128, 128)
 _SPAWN_TIMEOUT_SECONDS = 30.0
+_SPAWN_CLEANUP_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,24 +74,6 @@ class SmokeResult:
         return self.peak_full_res_rgba_owners
 
 
-@dataclass(slots=True)
-class _RgbaOwnershipMeter:
-    peak: int = 0
-
-    def observe(self, owners: int) -> None:
-        if not isinstance(owners, int) or isinstance(owners, bool) or owners < 0:
-            raise RuntimeError("invalid RGBA ownership observation")
-        self.peak = max(self.peak, owners)
-        if self.peak > 3:
-            raise RuntimeError("smoke exceeded three full-resolution RGBA owners")
-
-    def observe_images(self, *images: Image.Image) -> None:
-        owners = sum(
-            image.mode == "RGBA" and image.size == _FRAME_SIZE for image in images
-        )
-        self.observe(owners)
-
-
 def run_smoke(work_dir: Path, use_fake_model: bool = True) -> SmokeResult:
     """Exercise packaged runtime surfaces without weights, network, or CLI codecs."""
     if not isinstance(work_dir, Path):
@@ -96,50 +81,43 @@ def run_smoke(work_dir: Path, use_fake_model: bool = True) -> SmokeResult:
     if not isinstance(use_fake_model, bool):
         raise TypeError("use_fake_model must be a bool")
     work_dir.mkdir(parents=True, exist_ok=True)
-    meter = _RgbaOwnershipMeter()
+    rgba_owners = RgbaOwnershipTracker(_FRAME_SIZE)
 
     with tempfile.TemporaryDirectory(prefix="rembggui-smoke-", dir=work_dir) as raw:
         scratch = Path(raw)
         qt_platform, qt_image_formats = _check_qt_image_runtime()
         video_path = _generate_video_with_pyav(scratch / "source.mp4")
-        source_info = probe_source(video_path)
-        decoded = decode_frame(
-            video_path,
-            Fraction(0),
-            1,
-            expected_revision=source_info.revision,
-            validation_proof=source_info.validation_proof,
-        )
-        meter.observe_images(decoded.image)
-        try:
-            video_decoded = (
-                decoded.image.mode == "RGBA"
-                and decoded.image.size == _FRAME_SIZE
-                and decoded.source_revision == source_info.revision
-            )
-        finally:
-            decoded.image.close()
+        video_decoded = _decode_smoke_video(video_path, rgba_owners)
         if not video_decoded:
             raise RuntimeError("production source path did not decode an RGBA frame")
 
-        frame_paths = _write_alpha_frames(scratch, meter)
+        frame_paths = _write_alpha_frames(scratch, rgba_owners)
         output_path = scratch / "smoke.webp"
         summary = encode_lossless_webp(
             frame_paths,
             (80, 120),
             output_path,
-            rgba_ownership_observer=meter.observe,
+            rgba_ownership_tracker=rgba_owners,
         )
-        webp = validate_webp(output_path, expected_frames=2, expected_duration_ms=200)
-        _reopen_and_check_animation(output_path, meter)
+        webp = validate_webp(
+            output_path,
+            expected_frames=2,
+            expected_duration_ms=200,
+            rgba_ownership_tracker=rgba_owners,
+        )
+        _reopen_and_check_animation(output_path, rgba_owners)
         if summary.frames != 2 or webp.frames != 2 or not webp.has_alpha:
             raise RuntimeError("animated alpha WebP validation failed")
 
         child = _run_spawn_shared_memory(use_fake_model)
 
     gc.collect()
-    if meter.peak == 0:
+    if rgba_owners.peak == 0:
         raise RuntimeError("RGBA ownership was not measured")
+    if rgba_owners.peak > 3:
+        raise RuntimeError("smoke exceeded three full-resolution RGBA owners")
+    if rgba_owners.current != 0:
+        raise RuntimeError("smoke retained full-resolution RGBA owners")
     return SmokeResult(
         qt_platform=qt_platform,
         qt_image_formats=qt_image_formats,
@@ -150,7 +128,7 @@ def run_smoke(work_dir: Path, use_fake_model: bool = True) -> SmokeResult:
         shared_memory_roundtrip=cast(bool, child["shared_memory_roundtrip"]),
         shared_memory_unlinked=cast(bool, child["shared_memory_unlinked"]),
         fake_session_used=cast(bool, child["fake_session_used"]),
-        peak_full_res_rgba_owners=meter.peak,
+        peak_full_res_rgba_owners=rgba_owners.peak,
     )
 
 
@@ -229,51 +207,99 @@ def _generate_video_with_pyav(path: Path) -> Path:
     return path
 
 
-def _write_alpha_frames(scratch: Path, meter: _RgbaOwnershipMeter) -> tuple[Path, Path]:
+def _decode_smoke_video(path: Path, tracker: RgbaOwnershipTracker) -> bool:
+    source_info = probe_source(path)
+    decoded = decode_frame(
+        path,
+        Fraction(0),
+        1,
+        expected_revision=source_info.revision,
+        validation_proof=source_info.validation_proof,
+    )
+    tracker.register(decoded.image)
+    try:
+        return (
+            decoded.image.mode == "RGBA"
+            and decoded.image.size == _FRAME_SIZE
+            and decoded.source_revision == source_info.revision
+        )
+    finally:
+        decoded.image.close()
+
+
+def _write_alpha_frames(
+    scratch: Path, tracker: RgbaOwnershipTracker
+) -> tuple[Path, Path]:
     paths: list[Path] = []
     for index, alpha in enumerate((64, 192)):
-        image = Image.new("RGBA", _FRAME_SIZE, (0, 0, 0, 0))
-        try:
-            meter.observe_images(image)
-            draw = ImageDraw.Draw(image)
-            draw.ellipse((16, 16, 112, 112), fill=(240, 80, 30, alpha))
-            path = scratch / f"frame-{index}.png"
-            image.save(path, format="PNG")
-            paths.append(path)
-        finally:
-            image.close()
+        paths.append(_write_alpha_frame(scratch, index, alpha, tracker))
     return paths[0], paths[1]
 
 
-def _reopen_and_check_animation(path: Path, meter: _RgbaOwnershipMeter) -> None:
+def _write_alpha_frame(
+    scratch: Path,
+    index: int,
+    alpha: int,
+    tracker: RgbaOwnershipTracker,
+) -> Path:
+    image = Image.new("RGBA", _FRAME_SIZE, (0, 0, 0, 0))
+    tracker.register(image)
+    try:
+        draw = ImageDraw.Draw(image)
+        draw.ellipse((16, 16, 112, 112), fill=(240, 80, 30, alpha))
+        path = scratch / f"frame-{index}.png"
+        image.save(path, format="PNG")
+        return path
+    finally:
+        image.close()
+
+
+def _reopen_and_check_animation(path: Path, tracker: RgbaOwnershipTracker) -> None:
     with Image.open(path) as image:
         if getattr(image, "n_frames", 1) != 2:
             raise RuntimeError("WebP reopen did not expose two frames")
         for index in range(2):
-            image.seek(index)
-            rgba = image.convert("RGBA")
-            try:
-                meter.observe_images(rgba)
-                alpha = rgba.getchannel("A")
-                try:
-                    if alpha.getextrema()[0] == 255:
-                        raise RuntimeError("WebP frame lost alpha")
-                finally:
-                    alpha.close()
-            finally:
-                rgba.close()
+            _check_animation_frame(image, index, tracker)
+
+
+def _check_animation_frame(
+    image: Image.Image,
+    index: int,
+    tracker: RgbaOwnershipTracker,
+) -> None:
+    image.seek(index)
+    image.load()
+    tracker.register(image)
+    rgba = image.convert("RGBA")
+    tracker.register(rgba)
+    try:
+        alpha = rgba.getchannel("A")
+        try:
+            if alpha.getextrema()[0] == 255:
+                raise RuntimeError("WebP frame lost alpha")
+        finally:
+            alpha.close()
+    finally:
+        rgba.close()
 
 
 def _run_spawn_shared_memory(use_fake_model: bool) -> dict[str, object]:
     context = multiprocessing.get_context("spawn")
     byte_count = _FRAME_SIZE[0] * _FRAME_SIZE[1] * 4
-    segment = SharedMemory(create=True, size=byte_count)
-    shared_name = segment.name
+    segment: SharedMemory | None = None
+    shared_name: str | None = None
     unlinked = False
-    receive, send = context.Pipe(duplex=False)
-    process = None
+    receive: Any | None = None
+    send: Any | None = None
+    process: BaseProcess | None = None
+    process_started = False
     view: memoryview | None = None
+    result: dict[str, object]
+    primary: BaseException | None = None
     try:
+        segment = SharedMemory(create=True, size=byte_count)
+        shared_name = segment.name
+        receive, send = context.Pipe(duplex=False)
         raw_buffer = segment.buf
         if raw_buffer is None:
             raise RuntimeError("shared-memory buffer is unavailable")
@@ -281,23 +307,26 @@ def _run_spawn_shared_memory(use_fake_model: bool) -> dict[str, object]:
         view = attached_view
         attached_view[:] = bytes(range(256)) * (byte_count // 256)
         before = hashlib.sha256(attached_view).hexdigest()
-        process = context.Process(
+        child_process = context.Process(
             target=spawn_smoke_target,
             args=(send, shared_name, byte_count, before, use_fake_model),
             name="rembggui-smoke-child",
         )
-        process.start()
+        process = child_process
+        child_process.start()
+        process_started = True
         send.close()
+        send = None
         if not receive.poll(_SPAWN_TIMEOUT_SECONDS):
             raise RuntimeError("spawned smoke child timed out")
         payload = json.loads(receive.recv_bytes())
-        process.join(_SPAWN_TIMEOUT_SECONDS)
-        if process.is_alive():
-            process.terminate()
-            process.join()
+        child_process.join(_SPAWN_TIMEOUT_SECONDS)
+        if child_process.is_alive():
             raise RuntimeError("spawned smoke child did not exit")
-        if process.exitcode != 0:
-            raise RuntimeError(f"spawned smoke child exited with {process.exitcode}")
+        if child_process.exitcode != 0:
+            raise RuntimeError(
+                f"spawned smoke child exited with {child_process.exitcode}"
+            )
         if "error" in payload:
             raise RuntimeError(f"spawned smoke child failed: {payload['error']}")
         after = hashlib.sha256(attached_view).hexdigest()
@@ -306,28 +335,129 @@ def _run_spawn_shared_memory(use_fake_model: bool) -> dict[str, object]:
         if use_fake_model and after == before:
             raise RuntimeError("fake session did not transform shared RGBA bytes")
         result = dict(payload)
+    except BaseException as error:
+        primary = error
+        raise
     finally:
-        receive.close()
-        send.close()
-        if process is not None and process.is_alive():
-            process.terminate()
-            process.join()
+        cleanup_errors: list[Exception] = []
+        for endpoint_name, endpoint in (("receive", receive), ("send", send)):
+            if endpoint is None:
+                continue
+            try:
+                endpoint.close()
+            except Exception as error:
+                cleanup_errors.append(
+                    RuntimeError(
+                        f"pipe {endpoint_name} close failed: "
+                        f"{type(error).__name__}: {error}"
+                    )
+                )
+        if process is not None:
+            cleanup_errors.extend(
+                _cleanup_spawn_process(process, process_started=process_started)
+            )
         if view is not None:
-            view.release()
-        segment.close()
-        try:
-            segment.unlink()
-            unlinked = True
-        except FileNotFoundError:
-            unlinked = True
+            try:
+                view.release()
+            except Exception as error:
+                cleanup_errors.append(
+                    RuntimeError(
+                        f"shared-memory view release failed: "
+                        f"{type(error).__name__}: {error}"
+                    )
+                )
+        if segment is not None:
+            try:
+                segment.close()
+            except Exception as error:
+                cleanup_errors.append(
+                    RuntimeError(
+                        f"shared-memory close failed: {type(error).__name__}: {error}"
+                    )
+                )
+            try:
+                segment.unlink()
+                unlinked = True
+            except FileNotFoundError:
+                unlinked = True
+            except Exception as error:
+                cleanup_errors.append(
+                    RuntimeError(
+                        f"shared-memory unlink failed: {type(error).__name__}: {error}"
+                    )
+                )
+        if cleanup_errors:
+            if primary is not None:
+                for cleanup_error in cleanup_errors:
+                    primary.add_note(str(cleanup_error))
+            else:
+                raise ExceptionGroup("spawn smoke cleanup failed", cleanup_errors)
 
+    if shared_name is None:  # pragma: no cover - successful setup always assigns it
+        raise RuntimeError("shared memory name was not assigned")
     try:
         orphan = SharedMemory(name=shared_name, create=False)
     except FileNotFoundError:
         pass
     else:
         orphan.close()
-        orphan.unlink()
         raise RuntimeError("shared memory still exists after unlink")
     result["shared_memory_unlinked"] = unlinked
     return result
+
+
+def _cleanup_spawn_process(
+    process: BaseProcess,
+    *,
+    process_started: bool,
+) -> list[Exception]:
+    errors: list[Exception] = []
+    if process_started:
+        try:
+            alive = process.is_alive()
+        except Exception as error:
+            errors.append(_process_cleanup_error("status check", error))
+            alive = True
+        if alive:
+            try:
+                process.terminate()
+            except Exception as error:
+                errors.append(_process_cleanup_error("terminate", error))
+        try:
+            process.join(_SPAWN_CLEANUP_TIMEOUT_SECONDS)
+        except Exception as error:
+            errors.append(_process_cleanup_error("join", error))
+        try:
+            alive = process.is_alive()
+        except Exception as error:
+            errors.append(_process_cleanup_error("post-terminate status check", error))
+            alive = True
+        if alive:
+            try:
+                process.kill()
+            except Exception as error:
+                errors.append(_process_cleanup_error("kill", error))
+            try:
+                process.join(_SPAWN_CLEANUP_TIMEOUT_SECONDS)
+            except Exception as error:
+                errors.append(_process_cleanup_error("post-kill join", error))
+            try:
+                alive = process.is_alive()
+            except Exception as error:
+                errors.append(_process_cleanup_error("final status check", error))
+                alive = True
+            if alive:
+                errors.append(
+                    RuntimeError("spawned process cleanup failed: still alive")
+                )
+    try:
+        process.close()
+    except Exception as error:
+        errors.append(_process_cleanup_error("close", error))
+    return errors
+
+
+def _process_cleanup_error(operation: str, error: Exception) -> RuntimeError:
+    return RuntimeError(
+        f"spawned process {operation} failed: {type(error).__name__}: {error}"
+    )

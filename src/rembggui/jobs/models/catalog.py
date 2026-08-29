@@ -13,6 +13,7 @@ from typing import NoReturn
 from urllib.parse import unquote, urlsplit
 
 from rembggui.core.errors import AppError, ErrorCode
+from rembggui.resources import read_resource_bytes
 from rembggui.resources import resource_path as packaged_resource_path
 
 _SCHEMA_VERSION = 1
@@ -156,10 +157,12 @@ class ModelCatalog:
 
     @classmethod
     def load_resource(cls, *, runtime_root: Path | None = None) -> ModelCatalog:
-        path = cls.resource_path(runtime_root=runtime_root)
         try:
-            raw = path.read_bytes()
-        except OSError as error:
+            raw = read_resource_bytes(
+                "model-manifest.json",
+                runtime_root=runtime_root,
+            )
+        except (OSError, RuntimeError) as error:
             raise _manifest_error(
                 f"pinned model manifest could not be read: {type(error).__name__}"
             ) from error

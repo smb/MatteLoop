@@ -27,6 +27,7 @@ dev = [
   "build>=1.2,<2",
   "mypy>=1.15,<2",
   "Nuitka==2.8.10",
+  "patchelf==0.17.2.4; sys_platform == 'linux'",
   "pip>=25,<26",
   "psutil>=7,<8",
   "pytest>=8.3,<9",
