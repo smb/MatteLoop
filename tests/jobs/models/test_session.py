@@ -268,43 +268,42 @@ def test_replacement_failure_clears_active_state_truthfully(tmp_path: Path) -> N
     assert manager.active_spec is None
 
 
-def test_sam_returns_capability_without_starting_local_child(tmp_path: Path) -> None:
+def test_sam_is_not_found_before_any_side_effect(tmp_path: Path) -> None:
     manager, downloader, clients, _events = _manager(tmp_path)
 
-    result = manager.prepare("sam", {})
+    with pytest.raises(AppError) as exc:
+        manager.prepare("sam", {})
 
-    assert result.execution_class is ExecutionClass.SAM_PREVIEW
-    assert result.local_session_ready is False
-    assert result.artifact_path is None
+    assert exc.value.code is ErrorCode.MODEL_NOT_FOUND
     assert downloader.calls == []
     assert clients == []
     assert manager.active_id is None
 
 
-def test_switching_from_local_to_sam_closes_local_exactly_once(
-    tmp_path: Path,
-) -> None:
-    manager, _downloader, clients, _events = _manager(tmp_path)
-    manager.prepare("u2net", {})
-
-    manager.prepare("sam", {})
-
-    assert clients[0].closes == 1
-    assert manager.active_id is None
-
-
-def test_unknown_former_model_id_starts_no_download_or_client(
+def test_unknown_sam_id_preserves_an_active_local_session(
     tmp_path: Path,
 ) -> None:
     manager, downloader, clients, _events = _manager(tmp_path)
     manager.prepare("u2net", {})
-    legacy_extras = {
-        "api_" + "key": "unused",
-        "per_job_" + "consent": True,
-    }
 
     with pytest.raises(AppError) as exc:
-        manager.prepare("withoutbg", legacy_extras)
+        manager.prepare("sam", {})
+
+    assert exc.value.code is ErrorCode.MODEL_NOT_FOUND
+    assert downloader.calls == ["u2net"]
+    assert clients[0].closes == 0
+    assert manager.active_id == "u2net"
+
+
+def test_unknown_retired_model_id_starts_no_download_or_client(
+    tmp_path: Path,
+) -> None:
+    manager, downloader, clients, _events = _manager(tmp_path)
+    manager.prepare("u2net", {})
+    legacy_extras = {"legacy_option": True}
+
+    with pytest.raises(AppError) as exc:
+        manager.prepare("legacy-retired-model", legacy_extras)
 
     assert exc.value.code is ErrorCode.MODEL_NOT_FOUND
     assert downloader.calls == ["u2net"]
@@ -313,7 +312,7 @@ def test_unknown_former_model_id_starts_no_download_or_client(
     assert manager.active_id == "u2net"
 
 
-def test_unknown_former_model_id_precedes_cleanup_pending_and_preserves_state(
+def test_unknown_retired_model_id_precedes_cleanup_pending_and_preserves_state(
     tmp_path: Path,
 ) -> None:
     manager, downloader, clients, events = _manager(tmp_path)
@@ -328,8 +327,8 @@ def test_unknown_former_model_id_precedes_cleanup_pending_and_preserves_state(
 
     with pytest.raises(AppError) as exc:
         manager.prepare(
-            "withoutbg",
-            {"api_" + "key": "unused", "per_job_" + "consent": True},
+            "legacy-retired-model",
+            {"legacy_option": True},
         )
 
     assert exc.value.code is ErrorCode.MODEL_NOT_FOUND
@@ -345,7 +344,7 @@ def test_unknown_former_model_id_precedes_cleanup_pending_and_preserves_state(
     [
         {"model_path": "/tmp/custom.onnx"},
         {"custom": True},
-        {"sam_prompt": []},
+        {"prompt": []},
     ],
 )
 def test_task9_rejects_custom_options_and_unimplemented_prompts(
@@ -369,7 +368,7 @@ def test_remove_rejects_active_model_then_removes_exact_inactive_artifact(
         manager.remove("u2net")
     assert exc.value.code is ErrorCode.MODEL_IN_USE
 
-    manager.prepare("sam", {})
+    manager.prepare("u2netp", {})
     assert manager.remove("u2net") is True
     assert not result.artifact_path.exists()
     assert manager.remove("u2net") is False

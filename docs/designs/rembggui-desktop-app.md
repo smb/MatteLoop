@@ -43,7 +43,7 @@ The quality-saving moment is immediate feedback: the user can answer “lohnt si
 - **Preserve source access:** the playhead can scrub the complete original even outside the selected export range.
 - **Use explicit inference:** scrubbing updates the original immediately, but `rembg` runs only when the user invokes `Preview Frame`. Any change to playhead, crop, segmentation, edge treatment, alpha cleanup, or framing marks it visibly stale.
 - **Ship lossless animated WebP first:** additional formats are outside V1.
-- **Define delivery by verified execution class:** V1 is complete when all 15 prompt-free local models in the pinned catalog support preview and full render and SAM supports prompted preview only. The exact catalog contains 16 IDs. Custom sessions and ViTMatte are outside the committed scope.
+- **Define delivery by verified execution class:** V1 is complete when all 15 prompt-free local models in the pinned catalog support preview and full render. Custom sessions and ViTMatte are outside the committed scope.
 - **Persist the expensive intermediate:** validated post-segmentation RGBA PNGs are promoted before encoding, can be edited externally, and can drive a later Rebuild without decoding or running `rembg` again.
 - **Keep sessions disposable:** source, preview, jobs, and workspace state reset on restart. `QSettings` stores only simple preferences and window geometry; missing or invalid values fall back to current defaults.
 
@@ -118,7 +118,7 @@ Rules:
 - A central pure event reducer is the only place that changes application state. Widget enablement and visible actions are derived capabilities, not independently toggled flags. Worker results carry a job ID; late or superseded IDs are ignored.
 - Loading a source is permitted only while `JobState=IDLE`. `Replace…` during active work first offers `Cancel job and replace`; the source changes only after cancellation completes.
 - A preview request transitions `IDLE → PREPARING_MODEL` when acquisition/session setup is needed, then `PREVIEWING`; with a ready cached session it transitions directly `IDLE → PREVIEWING`. Success/error/cancel acknowledgement returns to `IDLE`. It is disabled during any non-idle job and there is no hidden queue.
-- Render is disabled while preview/model work is running and for SAM. A current preview is recommended but not required: rendering with `PreviewState=NONE|STALE|ERROR` opens `Preview first` (default), `Render anyway`, or `Cancel`.
+- Render is disabled while preview/model work is running. A current preview is recommended but not required: rendering with `PreviewState=NONE|STALE|ERROR` opens `Preview first` (default), `Render anyway`, or `Cancel`.
 - Preview, model preparation, final render, and Rebuild are exclusive modal jobs. The entire editor is locked until success, failure, or acknowledged cancellation; the wait dialog alone remains interactive.
 - `JobDialog` is a parent-owned, long-lived `QDialog` opened asynchronously with `open()` after setting `Qt.ApplicationModal`; the application never starts an exclusive job through `QDialog.exec()` or another nested event loop. Its signals dispatch typed reducer events, and the dialog lifetime follows the active `JobContext` rather than a blocking call stack.
 - A relevant setting/playhead change moves `CURRENT` to `STALE` without deleting the old result; the stale overlay names the changed category.
@@ -351,23 +351,21 @@ Hard format/implementation guards are validated before allocating render frames 
 
 ## Model Catalog and Edge Modes
 
-The application pins a tested `rembg` release and exposes exactly 16 supported model IDs. The V1 catalog includes:
+The application pins a tested `rembg` release and exposes exactly 15 supported local model IDs. The V1 catalog includes:
 
 - `u2net`, `u2netp`, `u2net_human_seg`, `u2net_cloth_seg`
 - `silueta`
 - `isnet-general-use`, `isnet-anime`
 - `birefnet-general`, `birefnet-general-lite`, `birefnet-portrait`, `birefnet-dis`, `birefnet-hrsod`, `birefnet-cod`, `birefnet-massive`
 - `bria-rmbg`
-- `sam`
 
 Catalog entries declare display name, model ID, purpose, exact execution class, download size/hash from the pinned manifest, local availability, required inputs, license/privacy note, and whether full-video render is enabled.
 
 - `birefnet-portrait` is preselected.
-- All 15 prompt-free local models work after their first verified download and support preview plus full render.
-- `sam` exposes a preview-only prompt editor: positive and negative point prompts placed on the oriented/cropped preview, stored as normalized `(x, y, label)` values in `[0,1]`. At least one positive point is required. Full render is disabled with the explanation that static points do not track a moving subject; temporal SAM tracking is outside the committed scope.
+- All 15 models work after their first verified download and support preview plus full render.
 - `bria-rmbg` displays its large download and license caveat before use.
 - Custom ONNX/model sessions are explicitly outside V1.
-- If `rembg` changes its exported catalog, the adapter may detect additions, but unknown IDs remain disabled until the binding 16-ID manifest is deliberately revised and tested. “All models” means the exact approved IDs in that manifest, not unsafe blind invocation of internal session classes.
+- If `rembg` changes its exported catalog, the adapter may detect additions, but unknown IDs remain disabled until the binding 15-ID manifest is deliberately revised and tested. “All models” means the exact approved IDs in that manifest, not unsafe blind invocation of internal session classes.
 
 Model acquisition is app-controlled rather than an opaque blocking first inference:
 
@@ -566,7 +564,7 @@ Real models, the advertised codec matrix, memory/streaming stress, and frozen ar
 5. execute the manual GUI checklist on candidate artifacts and record pass/fail notes;
 6. generate third-party notices for Qt/PySide6, PyAV/FFmpeg codecs, libwebp/Pillow, ONNX Runtime, fonts, `rembg`, and model licenses before distributing unsigned artifacts.
 
-V1 cannot claim completion until all 15 prompt-free local models pass this manual workflow on every target architecture and SAM's preview-only prompt contract passes its dedicated synthetic and manual checks.
+V1 cannot claim completion until all 15 local models pass this manual workflow on every target architecture.
 
 ## Manual Exploratory Rubric
 
@@ -589,7 +587,7 @@ No curated real-video collection is required or maintained. Before a release, th
 - Preview and rendering intentionally lock the editor in a modal wait dialog while the Qt event loop continues to repaint, show truthful stage/progress, and accept cooperative cancellation.
 - Validated post-segmentation cuts are available immediately after their stage succeeds, remain externally editable, and support a later Rebuild without decoding or `rembg`.
 - Failed/cancelled work never corrupts or silently replaces an existing output.
-- All 15 prompt-free local catalog models pass frozen-artifact preview/render qualification, and SAM is visibly preview-only with validated positive/negative point prompts.
+- All 15 local catalog models pass frozen-artifact preview/render qualification.
 - The manually started release workflow proves target artifacts can launch and pass real frozen-process decode/inference/encode checks without system Python or external media CLI installation.
 
 ## Distribution Plan
@@ -628,7 +626,7 @@ No runtime dependency on an externally installed `ffmpeg`, ImageMagick, `img2web
 6. Implement preview plus the PySide6 workspace: drag/drop, paired canvases, timeline, crop overlay, inspector, model manager, stale state, linked inspection, and the modal progress/cancel dialog.
 7. Implement the bounded full-render and Rebuild pipelines: early cut promotion, external edit detection, immutable snapshots, union trim, padding/stretch, lossless WebP, advisory disk warning, size fit, validation, and atomic output.
 8. Complete automated synthetic core/media/cache/process tests and the documented manual GUI/release checklist; fix any advertised codec/model/architecture claim that fails qualification.
-9. Add SAM preview prompting, rerun its preview-only release checks, and produce unsigned native artifacts.
+9. Produce unsigned native artifacts after the documented release qualification.
 
 ## What Already Exists
 
@@ -648,7 +646,7 @@ No runtime dependency on an externally installed `ffmpeg`, ImageMagick, `img2web
 - Nightly or pull-request real-model/codec/frozen-artifact matrices — qualification runs only through manual release dispatch.
 - Curated real portrait/hair acceptance footage — synthetic public fixtures are the only maintained test media; ad-hoc user videos are exploratory.
 - Restoring the last source, preview, job, or active workspace — restart returns to idle/default state.
-- Temporal SAM tracking, network/URL/live-stream input, HDR tone mapping, custom proxy/CA configuration, universal macOS binaries, and polished AppImage packaging — omitted from the committed product scope and not tracked as follow-up TODOs.
+- Network/URL/live-stream input, HDR tone mapping, custom proxy/CA configuration, universal macOS binaries, and polished AppImage packaging — omitted from the committed product scope and not tracked as follow-up TODOs.
 - Mobile/tablet reflow and window sizes below 1100×720 logical pixels — this is a desktop media tool with one tested minimum composition.
 - Tabbed or vertically stacked Original/Result variants — direct side-by-side comparison is preserved at every supported size.
 - Non-modal preview/render progress — exclusive jobs intentionally lock editing behind one truthful, cancelable dialog.
@@ -686,7 +684,6 @@ The matrix expands the test-plan path groups into production failures. `Automate
 | Disk advisory | Estimate is low and the disk fills mid-job | Automated | Staged failure and cleanup; persistent assets untouched | Disk-full error, existing work preserved |
 | Cancellation/close | Native inference or encoder ignores cancellation briefly | Automated + Manual | `CANCELLING` until safe-boundary acknowledgement | Modal dialog explains pending cancel |
 | QSettings persistence | Older/unknown key contains an incompatible type | Automated | Ignore key independently | Current default used |
-| SAM preview | No positive point or stale normalized prompt | Automated + Manual | Disable request/validate coordinates | Inline prompt explanation |
 | Native artifact | Qt plugin, codec, ONNX provider, or child entry point is missing | Manual release qualification | Do not distribute a failing target artifact | Qualification run identifies target/stage |
 
 ## Inline Architecture Comments
@@ -708,7 +705,7 @@ The matrix expands the test-plan path groups into production failures. `Automate
 | Model/process jobs | `src/rembggui/jobs/`, `tests/jobs/` | core contracts, runtime spike |
 | Main GUI/preview | `src/rembggui/ui/`, `src/rembggui/jobs/` | source/timeline/crop, model/process jobs |
 | Render/Rebuild | `src/rembggui/core/`, `src/rembggui/jobs/` | core contracts, model/process jobs |
-| Qualification and SAM completion | `tests/`, `src/rembggui/ui/`, `src/rembggui/jobs/`, packaging configuration | GUI/preview, Render/Rebuild |
+| Qualification | `tests/`, `src/rembggui/ui/`, `src/rembggui/jobs/`, packaging configuration | GUI/preview, Render/Rebuild |
 
 Parallel lanes after the scaffold:
 
@@ -716,7 +713,7 @@ Parallel lanes after the scaffold:
 - **Lane B:** frozen runtime spike → segmentation/model jobs → render orchestration.
 - **Lane C:** timeline/crop geometry, bounded thumbnail presentation, accessibility adapters, and pytest-qt widget shell can start against frozen interfaces, then waits for Lanes A+B before GUI/preview integration.
 
-Launch Lanes A and B in parallel worktrees after the scaffold. Lane C may build visual widgets in parallel once spec/reducer interfaces are frozen. Merge A+B before connecting preview; implement Render/Rebuild integration sequentially because it touches both `core/` and `jobs/`. Qualification and SAM completion run last.
+Launch Lanes A and B in parallel worktrees after the scaffold. Lane C may build visual widgets in parallel once spec/reducer interfaces are frozen. Merge A+B before connecting preview; implement Render/Rebuild integration sequentially because it touches both `core/` and `jobs/`. Qualification runs last.
 
 Conflict flags: Lanes A and C both touch source/crop contracts if interfaces are not frozen first; Lanes A and B meet in Render/Rebuild. Keep those handoffs sequential rather than resolving semantic merge conflicts after the fact.
 
@@ -741,7 +738,7 @@ Synthesized from this review's findings. Each task derives from a specific findi
   - Files: `src/rembggui/jobs/`, `tests/jobs/`
   - Verify: `pytest tests/jobs` covers crash, protocol mismatch, cancellation, stale IDs, and shared-memory unlink.
 - [ ] **T5 (P1, human: ~3 days / CC: ~1 day)** — Model lifecycle — Implement the pinned catalog, verified atomic downloads, offline cache, session replacement, and execution-class guards.
-  - Surfaced by: Architecture — app-controlled manifest/download/cache with one real local session and an explicit SAM preview capability.
+  - Surfaced by: Architecture — app-controlled manifest/download/cache with one real local session.
   - Files: `src/rembggui/jobs/models/`, `tests/jobs/models/`, `resources/model-manifest.json`
   - Verify: local fake-download tests plus manual release qualification for every real local model.
 - [ ] **T6 (P1, human: ~8 days / CC: ~3 days)** — Visual editor, accessible interactions, preview, and Qt contracts — Build the approved timeline-first workspace with shared `InteractionGeometry`, scaled/bounded thumbnails, `QAccessible` virtual controls, the complete state matrix, and the asynchronous guarded modal job dialog.
@@ -756,10 +753,7 @@ Synthesized from this review's findings. Each task derives from a specific findi
   - Surfaced by: Architecture/Test Review — native artifacts and real model/codec checks are required but deliberately manual-only.
   - Files: `.github/workflows/release.yml`, `packaging/`, `tests/release/`
   - Verify: all four native jobs pass packaged `--smoke-test`, offline cache replay, codec fixtures, and memory stress.
-- [ ] **T9 (P2, human: ~2 days / CC: ~6h)** — SAM catalog completion — Add positive/negative SAM preview prompts while keeping full-video render disabled.
-  - Surfaced by: Architecture — the exact 16-model catalog requires explicit LOCAL and SAM_PREVIEW behavior rather than blind catalog invocation.
-  - Files: `src/rembggui/ui/`, `src/rembggui/jobs/models/`, `tests/jobs/models/`
-  - Verify: SAM point validation, coordinate conversion, prompt invalidation, and preview-only capability checks.
+- [ ] **T9 (Deferred — not committed)** — SAM prompt exploration is outside V1; historical notes are retained only in `docs/future-enhancements.md` with no delivery promise.
 
 ## Focused Design Review Results
 

@@ -151,21 +151,6 @@
       "warning": "Optimized for illustrated rather than photographic subjects."
     },
     {
-      "id": "sam",
-      "display_name": "Segment Anything (SAM)",
-      "upstream_id": "sam",
-      "purpose": "Point-prompted extraction for a selected preview frame.",
-      "execution_class": "sam_preview",
-      "artifact": null,
-      "inference_defaults": {},
-      "required_inputs": ["positive_point"],
-      "edge_modes": ["standard"],
-      "supports_render": false,
-      "license_note": "SAM model acquisition and prompt adapter are capability-routed in V1; review Meta's model terms before use.",
-      "privacy_note": "The planned SAM adapter runs locally; Task 9 does not acquire or start it.",
-      "warning": "Preview only: static point prompts do not track a moving subject."
-    },
-    {
       "id": "birefnet-general",
       "display_name": "BiRefNet General",
       "upstream_id": "birefnet-general",

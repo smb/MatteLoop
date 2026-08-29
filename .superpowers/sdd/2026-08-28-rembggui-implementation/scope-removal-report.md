@@ -1,32 +1,23 @@
 # Local model scope cleanup report
 
-## Outcome
+## Later scope-decision addendum
 
-The current product contract now contains exactly 16 model IDs: 15
-prompt-free local models plus `sam`. The default remains
-`birefnet-portrait`. Local models support preview and full render; SAM is
-preview-only and requires point prompts.
+This report's RED/GREEN evidence below records the state when it was produced
+and is intentionally not rewritten. A later V1 decision deferred SAM prompt
+support completely: the current product contract has exactly 15 approved,
+prompt-free LOCAL models, all with verified local artifacts and preview/full
+render support. `birefnet-portrait` remains the default.
 
-The runtime model trust boundary now has only two execution classes:
-`LOCAL` and `SAM_PREVIEW`. The strict manifest schema and `ModelSpec` no longer
-contain fields that existed only for the retired execution path. Manifest
-parsing and direct `ModelCatalog` construction now share one complete
-`ModelSpec` validator. Both reject missing, duplicate, unknown, or hidden IDs;
-mismatched upstream aliases; non-canonical execution/default/input/edge types;
-malformed scalar metadata; and artifacts outside the pinned release URL,
-filename, size, and checksum contract.
+The current runtime trust boundary has one execution class, `LOCAL`. The
+manifest and catalog reject unknown IDs before extras, cleanup checks,
+downloads, or child/client actions; this includes the retired SAM ID. Generic
+`ModelSpec` metadata and the local lifecycle/cleanup guards remain intact.
 
-`ModelSessionManager` now routes only verified local sessions and the SAM
-preview capability. A former catalog ID fails with `MODEL_NOT_FOUND` before
-extras or cleanup-state validation and before a download or client action. It
-preserves either an already-active local session or a pending cleanup handle
-and cannot be used as an alias or custom catalog entry. The execution-specific
-error code was removed from the serializable error contract.
-
-The binding design, executable plan, Task 9 report, and current local SDD
-context now describe the same 16-ID product. Task 16 is SAM-only. Task 17 has
-no retired execution-path qualification. Development is local/private by
-default; configuring a remote, changing visibility, or publishing requires
+The binding design and executable plan carry only explicit deferred markers;
+the complete earlier prompt exploration is preserved in
+`docs/future-enhancements.md` as non-committed material outside V1 with no
+delivery promise. Task 17 was not renumbered. Development remains local/private
+by default; configuring a remote, changing visibility, or publishing requires
 separate user authorization.
 
 The 15-entry local model provenance record was unchanged and remains exact.

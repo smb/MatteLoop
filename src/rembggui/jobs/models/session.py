@@ -1,4 +1,4 @@
-"""One verified local segmentation session plus the SAM preview capability."""
+"""One verified local segmentation session."""
 
 from __future__ import annotations
 
@@ -108,14 +108,6 @@ class ModelSessionManager:
             if type(extras) is not dict or extras:
                 raise _preparation_error(
                     "Task 9 accepts no model paths, custom options, or prompts"
-                )
-            if spec.execution_class is ExecutionClass.SAM_PREVIEW:
-                self._close_active_unlocked()
-                return PreparationResult(
-                    model_id=spec.id,
-                    execution_class=spec.execution_class,
-                    local_session_ready=False,
-                    artifact_path=None,
                 )
             if spec.execution_class is not ExecutionClass.LOCAL:
                 raise _preparation_error("model execution class is not supported")

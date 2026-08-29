@@ -28,7 +28,6 @@ _APPROVED_IDS = frozenset(
         "silueta",
         "isnet-general-use",
         "isnet-anime",
-        "sam",
         "birefnet-general",
         "birefnet-general-lite",
         "birefnet-portrait",
@@ -39,7 +38,6 @@ _APPROVED_IDS = frozenset(
         "bria-rmbg",
     }
 )
-_LOCAL_IDS = _APPROVED_IDS - {"sam"}
 _ROOT_FIELDS = {"schema_version", "rembg_version", "default_id", "models"}
 _MODEL_FIELDS = {
     "id",
@@ -73,7 +71,6 @@ _RELEASE_PATH_PREFIX = "/danielgatis/rembg/releases/download/v0.0.0/"
 
 class ExecutionClass(StrEnum):
     LOCAL = "local"
-    SAM_PREVIEW = "sam_preview"
 
 
 class ClothCategory(StrEnum):
@@ -223,7 +220,7 @@ class ModelCatalog:
         if type(model_payloads) is not list or len(model_payloads) != len(
             _APPROVED_IDS
         ):
-            raise _manifest_error("model manifest must contain exactly 16 entries")
+            raise _manifest_error("model manifest must contain exactly 15 entries")
         specs = tuple(_parse_model(item) for item in model_payloads)
         ids = [spec.id for spec in specs]
         if len(set(ids)) != len(ids) or set(ids) != _APPROVED_IDS:
@@ -398,33 +395,20 @@ def _validate_model_artifact(artifact: object, model_id: str) -> None:
 
 
 def _validate_model_invariants(spec: ModelSpec) -> None:
-    if spec.id in _LOCAL_IDS:
-        if (
-            spec.execution_class is not ExecutionClass.LOCAL
-            or spec.artifact is None
-            or spec.required_inputs
-            or not spec.supports_render
-        ):
-            raise _manifest_error("local model capability invariants are invalid")
-        expected_defaults = (
-            InferenceDefaults(ClothCategory.FULL)
-            if spec.id == "u2net_cloth_seg"
-            else InferenceDefaults()
-        )
-        if spec.inference_defaults != expected_defaults:
-            raise _manifest_error("local model inference defaults are invalid")
-        return
-    if spec.id == "sam":
-        if (
-            spec.execution_class is not ExecutionClass.SAM_PREVIEW
-            or spec.artifact is not None
-            or spec.required_inputs != ("positive_point",)
-            or spec.supports_render
-            or spec.inference_defaults != InferenceDefaults()
-        ):
-            raise _manifest_error("SAM preview capability invariants are invalid")
-        return
-    raise _manifest_error("model capability invariants are invalid")
+    if (
+        spec.execution_class is not ExecutionClass.LOCAL
+        or spec.artifact is None
+        or spec.required_inputs
+        or not spec.supports_render
+    ):
+        raise _manifest_error("local model capability invariants are invalid")
+    expected_defaults = (
+        InferenceDefaults(ClothCategory.FULL)
+        if spec.id == "u2net_cloth_seg"
+        else InferenceDefaults()
+    )
+    if spec.inference_defaults != expected_defaults:
+        raise _manifest_error("local model inference defaults are invalid")
 
 
 def _string_tuple(

@@ -2,15 +2,24 @@
 
 ## Outcome
 
+### Later scope-decision addendum
+
+The evidence below is historical and remains unchanged. A later V1 decision
+removed SAM prompt support from the active catalog/runtime: Task 9 now exposes
+exactly 15 approved LOCAL models, each with a verified artifact and preview/
+full-render support. The retired ID fails as `MODEL_NOT_FOUND` before side
+effects. Historical prompt notes are retained only in
+`docs/future-enhancements.md`, outside V1 and without a delivery promise.
+
 Implemented the pinned model catalog, verified model acquisition, one-session
 replacement lifecycle, and the manifest-bound Task 8 child launch boundary.
 
-- The catalog exposes exactly 16 approved IDs and defaults to
+- At the time of this historical report, the catalog exposed exactly 16 approved IDs and defaulted to
   `birefnet-portrait`.
 - Fifteen prompt-free local entries carry exact upstream release URLs, runtime
   filenames, expected byte sizes, app-pinned SHA-256 values, and the checksum
   declared by pinned `rembg` 2.0.72 source as provenance.
-- `sam` is capability-routed and preview-only with no Task 9 artifact.
+- The historical catalog included a capability-routed preview-only entry with no Task 9 artifact.
 - BRIA visibly records its 1,024,331,469-byte weight, model-specific license
   caveat, and commercial-use warning.
 
@@ -24,7 +33,7 @@ replacement lifecycle, and the manifest-bound Task 8 child launch boundary.
 - Deeply immutable `ModelCatalog`/`ModelSpec`/`ModelArtifact`/inference-default
   values (frozen/slots plus tuple and mapping-proxy collections), with no
   custom/unknown model lookup.
-- Local/SAM invariants are validated rather than inferred at call sites.
+- The historical local/capability invariants were validated rather than inferred at call sites.
 - Artifact URLs must be unambiguous HTTPS GitHub v0.0.0 release paths without
   embedded userinfo, ports, queries, fragments, percent-encoding, backslashes, or
   nested paths; runtime filenames are canonical `<model-id>.onnx` names.
@@ -106,7 +115,7 @@ replacement lifecycle, and the manifest-bound Task 8 child launch boundary.
   path. The pinned rembg session object is allocated without invoking its
   constructor/downloader. No global rembg/ORT monkeypatch, `U2NET_HOME`, or
   parent/global environment mutation is used.
-- SAM returns a preview-only capability result and never starts a local Task 9 child.
+- The historical preview-only capability result never started a local Task 9 child.
   Switching away from local closes the local client once.
 - Removal rejects the active model, unknown IDs, symlink traversal, and
   non-regular targets; it removes only the exact version/model artifact.

@@ -22,7 +22,6 @@ APPROVED_IDS = {
     "silueta",
     "isnet-general-use",
     "isnet-anime",
-    "sam",
     "birefnet-general",
     "birefnet-general-lite",
     "birefnet-portrait",
@@ -107,7 +106,7 @@ def test_direct_catalog_construction_cannot_retain_mutable_collections() -> None
     specs.clear()
 
     assert catalog.ids == original.ids
-    assert len(catalog.specs) == 16
+    assert len(catalog.specs) == 15
     with pytest.raises(TypeError):
         catalog.specs["u2net"] = original.get("u2net")  # type: ignore[index]
     assert all(
@@ -131,10 +130,15 @@ def test_direct_catalog_construction_maps_a_malformed_id_element() -> None:
 def test_direct_catalog_construction_rejects_a_hidden_former_id() -> None:
     original = ModelCatalog.load_resource()
     specs = dict(original.specs)
-    sam = specs.pop("sam")
-    specs["withoutbg"] = replace(sam, id="withoutbg", upstream_id="withoutbg")
+    donor = specs.pop("bria-rmbg")
+    specs["legacy-retired-model"] = replace(
+        donor,
+        id="legacy-retired-model",
+        upstream_id="legacy-retired-model",
+    )
     ids = tuple(
-        "withoutbg" if model_id == "sam" else model_id for model_id in original.ids
+        "legacy-retired-model" if model_id == "bria-rmbg" else model_id
+        for model_id in original.ids
     )
 
     with pytest.raises(AppError) as exc:
@@ -252,11 +256,8 @@ def test_direct_catalog_construction_rejects_a_stringly_typed_cloth_default() ->
     assert exc.value.code is ErrorCode.MODEL_MANIFEST_INVALID
 
 
-def test_execution_classes_are_exactly_local_and_sam_preview() -> None:
-    assert set(ExecutionClass) == {
-        ExecutionClass.LOCAL,
-        ExecutionClass.SAM_PREVIEW,
-    }
+def test_execution_classes_are_exactly_local() -> None:
+    assert set(ExecutionClass) == {ExecutionClass.LOCAL}
 
 
 def test_model_spec_has_no_retired_remote_fields() -> None:
@@ -277,14 +278,14 @@ def test_model_spec_has_no_retired_remote_fields() -> None:
     }
 
 
-def test_sam_is_preview_only_without_a_local_artifact() -> None:
+def test_every_approved_model_is_a_renderable_local_artifact() -> None:
     catalog = ModelCatalog.load_resource()
-    sam = catalog.get("sam")
 
-    assert sam.execution_class is ExecutionClass.SAM_PREVIEW
-    assert sam.artifact is None
-    assert sam.required_inputs == ("positive_point",)
-    assert sam.supports_render is False
+    for spec in catalog.specs.values():
+        assert spec.execution_class is ExecutionClass.LOCAL
+        assert spec.artifact is not None
+        assert spec.required_inputs == ()
+        assert spec.supports_render is True
 
 
 def test_bria_exposes_download_license_and_commercial_warning() -> None:
@@ -575,8 +576,10 @@ def test_manifest_rejects_duplicate_nonfinite_nonobject_and_non_utf8_json(
             "invalid size",
         ),
         (
-            lambda root: _model(root, "sam").update({"execution_class": "local"}),
-            "SAM local invariant",
+            lambda root: _model(root, "u2net").update(
+                {"execution_class": "unsupported"}
+            ),
+            "unsupported execution class",
         ),
         (
             lambda root: _model(root, "u2net").update({"max_upload_bytes": None}),
