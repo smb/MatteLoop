@@ -22,8 +22,7 @@
       "supports_render": true,
       "license_note": "Model terms are provided by the upstream U²-Net project; review them before redistribution.",
       "privacy_note": "Runs locally after the verified model download.",
-      "warning": "",
-      "max_upload_bytes": null
+      "warning": ""
     },
     {
       "id": "u2netp",
@@ -44,8 +43,7 @@
       "supports_render": true,
       "license_note": "Model terms are provided by the upstream U²-Net project; review them before redistribution.",
       "privacy_note": "Runs locally after the verified model download.",
-      "warning": "Lower resource use can trade away fine edge detail.",
-      "max_upload_bytes": null
+      "warning": "Lower resource use can trade away fine edge detail."
     },
     {
       "id": "u2net_human_seg",
@@ -66,8 +64,7 @@
       "supports_render": true,
       "license_note": "Model terms are provided by the upstream U²-Net project; review them before redistribution.",
       "privacy_note": "Runs locally after the verified model download.",
-      "warning": "",
-      "max_upload_bytes": null
+      "warning": ""
     },
     {
       "id": "u2net_cloth_seg",
@@ -88,8 +85,7 @@
       "supports_render": true,
       "license_note": "Model terms are provided by the upstream U²-Net project; review them before redistribution.",
       "privacy_note": "Runs locally after the verified model download.",
-      "warning": "Produces clothing-class masks; preview the selected class behavior before rendering.",
-      "max_upload_bytes": null
+      "warning": "Produces clothing-class masks; preview the selected class behavior before rendering."
     },
     {
       "id": "silueta",
@@ -110,8 +106,7 @@
       "supports_render": true,
       "license_note": "Review the Silueta model's upstream terms before redistribution.",
       "privacy_note": "Runs locally after the verified model download.",
-      "warning": "",
-      "max_upload_bytes": null
+      "warning": ""
     },
     {
       "id": "isnet-general-use",
@@ -132,8 +127,7 @@
       "supports_render": true,
       "license_note": "Review the IS-Net model's upstream terms before redistribution.",
       "privacy_note": "Runs locally after the verified model download.",
-      "warning": "",
-      "max_upload_bytes": null
+      "warning": ""
     },
     {
       "id": "isnet-anime",
@@ -154,8 +148,7 @@
       "supports_render": true,
       "license_note": "Review the IS-Net Anime model's upstream terms before redistribution.",
       "privacy_note": "Runs locally after the verified model download.",
-      "warning": "Optimized for illustrated rather than photographic subjects.",
-      "max_upload_bytes": null
+      "warning": "Optimized for illustrated rather than photographic subjects."
     },
     {
       "id": "sam",
@@ -168,10 +161,9 @@
       "required_inputs": ["positive_point"],
       "edge_modes": ["standard"],
       "supports_render": false,
-      "license_note": "SAM model acquisition and prompt adapter are capability-routed in V1.1; review Meta's model terms before use.",
+      "license_note": "SAM model acquisition and prompt adapter are capability-routed in V1; review Meta's model terms before use.",
       "privacy_note": "The planned SAM adapter runs locally; Task 9 does not acquire or start it.",
-      "warning": "Preview only: static point prompts do not track a moving subject.",
-      "max_upload_bytes": null
+      "warning": "Preview only: static point prompts do not track a moving subject."
     },
     {
       "id": "birefnet-general",
@@ -192,8 +184,7 @@
       "supports_render": true,
       "license_note": "Review the BiRefNet model's upstream terms before redistribution or commercial use.",
       "privacy_note": "Runs locally after the verified model download.",
-      "warning": "Large model download and memory footprint.",
-      "max_upload_bytes": null
+      "warning": "Large model download and memory footprint."
     },
     {
       "id": "birefnet-general-lite",
@@ -214,8 +205,7 @@
       "supports_render": true,
       "license_note": "Review the BiRefNet model's upstream terms before redistribution or commercial use.",
       "privacy_note": "Runs locally after the verified model download.",
-      "warning": "Smaller than full BiRefNet models with a possible quality trade-off.",
-      "max_upload_bytes": null
+      "warning": "Smaller than full BiRefNet models with a possible quality trade-off."
     },
     {
       "id": "birefnet-portrait",
@@ -236,8 +226,7 @@
       "supports_render": true,
       "license_note": "Review the BiRefNet model's upstream terms before redistribution or commercial use.",
       "privacy_note": "Runs locally after the verified model download.",
-      "warning": "Large model download and memory footprint.",
-      "max_upload_bytes": null
+      "warning": "Large model download and memory footprint."
     },
     {
       "id": "birefnet-dis",
@@ -258,8 +247,7 @@
       "supports_render": true,
       "license_note": "Review the BiRefNet model's upstream terms before redistribution or commercial use.",
       "privacy_note": "Runs locally after the verified model download.",
-      "warning": "Large model download and memory footprint.",
-      "max_upload_bytes": null
+      "warning": "Large model download and memory footprint."
     },
     {
       "id": "birefnet-hrsod",
@@ -280,8 +268,7 @@
       "supports_render": true,
       "license_note": "Review the BiRefNet model's upstream terms before redistribution or commercial use.",
       "privacy_note": "Runs locally after the verified model download.",
-      "warning": "Large model download and memory footprint.",
-      "max_upload_bytes": null
+      "warning": "Large model download and memory footprint."
     },
     {
       "id": "birefnet-cod",
@@ -302,8 +289,7 @@
       "supports_render": true,
       "license_note": "Review the BiRefNet model's upstream terms before redistribution or commercial use.",
       "privacy_note": "Runs locally after the verified model download.",
-      "warning": "Large model download and memory footprint.",
-      "max_upload_bytes": null
+      "warning": "Large model download and memory footprint."
     },
     {
       "id": "birefnet-massive",
@@ -324,8 +310,7 @@
       "supports_render": true,
       "license_note": "Review the BiRefNet model's upstream terms before redistribution or commercial use.",
       "privacy_note": "Runs locally after the verified model download.",
-      "warning": "Large model download and memory footprint.",
-      "max_upload_bytes": null
+      "warning": "Large model download and memory footprint."
     },
     {
       "id": "bria-rmbg",
@@ -346,24 +331,7 @@
       "supports_render": true,
       "license_note": "BRIA RMBG 2.0 has model-specific license terms; commercial use requires checking and satisfying BRIA's current license.",
       "privacy_note": "Runs locally after the verified model download.",
-      "warning": "Approximately 1.024 GB download; review the BRIA license and commercial-use terms before use.",
-      "max_upload_bytes": null
-    },
-    {
-      "id": "withoutbg",
-      "display_name": "withoutBG Cloud",
-      "upstream_id": "withoutbg",
-      "purpose": "Consent-gated cloud background removal.",
-      "execution_class": "cloud_withoutbg",
-      "artifact": null,
-      "inference_defaults": {},
-      "required_inputs": ["session_token", "per_job_consent"],
-      "edge_modes": ["standard"],
-      "supports_render": true,
-      "license_note": "Use is subject to the withoutBG provider's current service terms.",
-      "privacy_note": "Frames leave this device only after per-job consent. The session token is held in memory, never persisted, and never logged.",
-      "warning": "Cloud processing uploads frames; each encoded upload is limited to 20 MiB.",
-      "max_upload_bytes": 20971520
+      "warning": "Approximately 1.024 GB download; review the BRIA license and commercial-use terms before use."
     }
   ]
 }

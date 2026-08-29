@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, fields, replace
 
 import pytest
 
@@ -11,6 +11,7 @@ from rembggui.jobs.models.catalog import (
     ExecutionClass,
     InferenceDefaults,
     ModelCatalog,
+    ModelSpec,
 )
 
 APPROVED_IDS = {
@@ -30,7 +31,6 @@ APPROVED_IDS = {
     "birefnet-cod",
     "birefnet-massive",
     "bria-rmbg",
-    "withoutbg",
 }
 
 
@@ -107,7 +107,7 @@ def test_direct_catalog_construction_cannot_retain_mutable_collections() -> None
     specs.clear()
 
     assert catalog.ids == original.ids
-    assert len(catalog.specs) == 17
+    assert len(catalog.specs) == 16
     with pytest.raises(TypeError):
         catalog.specs["u2net"] = original.get("u2net")  # type: ignore[index]
     assert all(
@@ -117,20 +117,54 @@ def test_direct_catalog_construction_cannot_retain_mutable_collections() -> None
     )
 
 
-def test_special_models_are_capability_routed_without_local_artifacts() -> None:
+def test_direct_catalog_construction_rejects_a_hidden_former_id() -> None:
+    original = ModelCatalog.load_resource()
+    specs = dict(original.specs)
+    sam = specs.pop("sam")
+    specs["withoutbg"] = replace(sam, id="withoutbg", upstream_id="withoutbg")
+    ids = tuple(
+        "withoutbg" if model_id == "sam" else model_id for model_id in original.ids
+    )
+
+    with pytest.raises(AppError) as exc:
+        ModelCatalog(original.rembg_version, original.default_id, ids, specs)
+
+    assert exc.value.code is ErrorCode.MODEL_MANIFEST_INVALID
+
+
+def test_execution_classes_are_exactly_local_and_sam_preview() -> None:
+    assert set(ExecutionClass) == {
+        ExecutionClass.LOCAL,
+        ExecutionClass.SAM_PREVIEW,
+    }
+
+
+def test_model_spec_has_no_retired_remote_fields() -> None:
+    assert {field.name for field in fields(ModelSpec)} == {
+        "id",
+        "display_name",
+        "upstream_id",
+        "purpose",
+        "execution_class",
+        "artifact",
+        "inference_defaults",
+        "required_inputs",
+        "edge_modes",
+        "supports_render",
+        "license_note",
+        "privacy_note",
+        "warning",
+    }
+
+
+def test_sam_is_preview_only_without_a_local_artifact() -> None:
     catalog = ModelCatalog.load_resource()
     sam = catalog.get("sam")
-    cloud = catalog.get("withoutbg")
 
     assert sam.execution_class is ExecutionClass.SAM_PREVIEW
     assert sam.artifact is None
     assert sam.required_inputs == ("positive_point",)
     assert sam.supports_render is False
-    assert cloud.execution_class is ExecutionClass.CLOUD_WITHOUTBG
-    assert cloud.artifact is None
-    assert cloud.max_upload_bytes == 20 * 1024 * 1024
-    assert cloud.required_inputs == ("session_token", "per_job_consent")
-    assert "never persisted" in cloud.privacy_note.lower()
 
 
 def test_bria_exposes_download_license_and_commercial_warning() -> None:
@@ -302,6 +336,7 @@ def test_each_local_pin_has_honest_auditable_provenance() -> None:
     assert set(by_id) == set(local)
     assert set(expected_witness_urls) == set(local)
     assert len(entries) == len(by_id)
+    assert len(entries) == 15
     for model_id, spec in local.items():
         artifact = spec.artifact
         assert artifact is not None
@@ -424,8 +459,8 @@ def test_manifest_rejects_duplicate_nonfinite_nonobject_and_non_utf8_json(
             "SAM local invariant",
         ),
         (
-            lambda root: _model(root, "withoutbg").update({"max_upload_bytes": None}),
-            "cloud upload invariant",
+            lambda root: _model(root, "u2net").update({"max_upload_bytes": None}),
+            "retired remote field",
         ),
         (
             lambda root: _model(root, "u2net_cloth_seg").update(
@@ -462,6 +497,7 @@ def test_manifest_strictly_rejects_hostile_schema_mutations(
 def test_catalog_rejects_unknown_lookup_and_does_not_offer_custom_ids() -> None:
     catalog = ModelCatalog.load_resource()
 
-    with pytest.raises(AppError) as exc:
-        catalog.get("u2net_custom")
-    assert exc.value.code is ErrorCode.MODEL_NOT_FOUND
+    for model_id in ("u2net_custom", "withoutbg"):
+        with pytest.raises(AppError) as exc:
+            catalog.get(model_id)
+        assert exc.value.code is ErrorCode.MODEL_NOT_FOUND

@@ -268,21 +268,12 @@ def test_replacement_failure_clears_active_state_truthfully(tmp_path: Path) -> N
     assert manager.active_spec is None
 
 
-@pytest.mark.parametrize(
-    ("model_id", "execution_class"),
-    [
-        ("sam", ExecutionClass.SAM_PREVIEW),
-        ("withoutbg", ExecutionClass.CLOUD_WITHOUTBG),
-    ],
-)
-def test_special_models_return_capability_without_starting_local_child(
-    tmp_path: Path, model_id: str, execution_class: ExecutionClass
-) -> None:
+def test_sam_returns_capability_without_starting_local_child(tmp_path: Path) -> None:
     manager, downloader, clients, _events = _manager(tmp_path)
 
-    result = manager.prepare(model_id, {})
+    result = manager.prepare("sam", {})
 
-    assert result.execution_class is execution_class
+    assert result.execution_class is ExecutionClass.SAM_PREVIEW
     assert result.local_session_ready is False
     assert result.artifact_path is None
     assert downloader.calls == []
@@ -290,17 +281,32 @@ def test_special_models_return_capability_without_starting_local_child(
     assert manager.active_id is None
 
 
-def test_switching_from_local_to_capability_closes_local_exactly_once(
+def test_switching_from_local_to_sam_closes_local_exactly_once(
     tmp_path: Path,
 ) -> None:
     manager, _downloader, clients, _events = _manager(tmp_path)
     manager.prepare("u2net", {})
 
     manager.prepare("sam", {})
-    manager.prepare("withoutbg", {})
 
     assert clients[0].closes == 1
     assert manager.active_id is None
+
+
+def test_unknown_former_model_id_starts_no_download_or_client(
+    tmp_path: Path,
+) -> None:
+    manager, downloader, clients, _events = _manager(tmp_path)
+    manager.prepare("u2net", {})
+
+    with pytest.raises(AppError) as exc:
+        manager.prepare("withoutbg", {})
+
+    assert exc.value.code is ErrorCode.MODEL_NOT_FOUND
+    assert downloader.calls == ["u2net"]
+    assert len(clients) == 1
+    assert clients[0].closes == 0
+    assert manager.active_id == "u2net"
 
 
 @pytest.mark.parametrize(
@@ -308,11 +314,10 @@ def test_switching_from_local_to_capability_closes_local_exactly_once(
     [
         {"model_path": "/tmp/custom.onnx"},
         {"custom": True},
-        {"token": "secret-token"},
         {"sam_prompt": []},
     ],
 )
-def test_task9_rejects_all_custom_or_sensitive_extras_without_leaking_values(
+def test_task9_rejects_custom_options_and_unimplemented_prompts(
     tmp_path: Path, extras: dict[str, object]
 ) -> None:
     manager, _downloader, _clients, _events = _manager(tmp_path)
@@ -320,7 +325,6 @@ def test_task9_rejects_all_custom_or_sensitive_extras_without_leaking_values(
     with pytest.raises(AppError) as exc:
         manager.prepare("u2net", extras)
     assert exc.value.code is ErrorCode.MODEL_PREPARATION_INVALID
-    assert "secret-token" not in repr(exc.value)
 
 
 def test_remove_rejects_active_model_then_removes_exact_inactive_artifact(

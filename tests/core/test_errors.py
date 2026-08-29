@@ -130,3 +130,9 @@ def test_source_changed_error_code_round_trips_for_reload_recovery() -> None:
 
     assert restored.code is ErrorCode.SOURCE_CHANGED
     assert restored.retry_action == "reload-source"
+
+
+def test_error_contract_has_no_retired_remote_code() -> None:
+    retired_code = "cloud" + "_consent_required"
+
+    assert retired_code not in {code.value for code in ErrorCode}

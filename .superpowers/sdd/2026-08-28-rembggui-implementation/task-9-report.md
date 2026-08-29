@@ -5,14 +5,12 @@
 Implemented the pinned model catalog, verified model acquisition, one-session
 replacement lifecycle, and the manifest-bound Task 8 child launch boundary.
 
-- The catalog exposes exactly the approved 17 public IDs and defaults to
+- The catalog exposes exactly 16 approved IDs and defaults to
   `birefnet-portrait`.
 - Fifteen prompt-free local entries carry exact upstream release URLs, runtime
   filenames, expected byte sizes, app-pinned SHA-256 values, and the checksum
   declared by pinned `rembg` 2.0.72 source as provenance.
 - `sam` is capability-routed and preview-only with no Task 9 artifact.
-- `withoutbg` is capability-routed with the 20 MiB upload limit/privacy
-  metadata and no artifact, credential, token, endpoint, or transport.
 - BRIA visibly records its 1,024,331,469-byte weight, model-specific license
   caveat, and commercial-use warning.
 
@@ -26,9 +24,9 @@ replacement lifecycle, and the manifest-bound Task 8 child launch boundary.
 - Deeply immutable `ModelCatalog`/`ModelSpec`/`ModelArtifact`/inference-default
   values (frozen/slots plus tuple and mapping-proxy collections), with no
   custom/unknown model lookup.
-- Local/SAM/cloud invariants are validated rather than inferred at call sites.
+- Local/SAM invariants are validated rather than inferred at call sites.
 - Artifact URLs must be unambiguous HTTPS GitHub v0.0.0 release paths without
-  credentials, ports, queries, fragments, percent-encoding, backslashes, or
+  embedded userinfo, ports, queries, fragments, percent-encoding, backslashes, or
   nested paths; runtime filenames are canonical `<model-id>.onnx` names.
 
 ### Downloader
@@ -96,7 +94,7 @@ replacement lifecycle, and the manifest-bound Task 8 child launch boundary.
 - The child launch payload has one exact schema and only includes the built-in
   ID, upstream ID, pinned version, manifest-bound cache home/filename, size,
   SHA-256, and typed catalog-owned inference defaults. Extras, custom paths,
-  prompts, and tokens are rejected in Task 9.
+  and unimplemented prompts are rejected in Task 9.
 - `u2net_cloth_seg` carries the input-free canonical `cloth_category=full`
   default from the pinned rembg semantics. It yields exactly one mask and keeps
   result height/width equal to the source; the GUI receives no free Task 9
@@ -108,7 +106,7 @@ replacement lifecycle, and the manifest-bound Task 8 child launch boundary.
   path. The pinned rembg session object is allocated without invoking its
   constructor/downloader. No global rembg/ORT monkeypatch, `U2NET_HOME`, or
   parent/global environment mutation is used.
-- SAM/cloud return capability results and never start a local Task 9 child.
+- SAM returns a preview-only capability result and never starts a local Task 9 child.
   Switching away from local closes the local client once.
 - Removal rejects the active model, unknown IDs, symlink traversal, and
   non-regular targets; it removes only the exact version/model artifact.

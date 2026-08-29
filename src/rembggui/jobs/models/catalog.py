@@ -37,10 +37,9 @@ _APPROVED_IDS = frozenset(
         "birefnet-cod",
         "birefnet-massive",
         "bria-rmbg",
-        "withoutbg",
     }
 )
-_LOCAL_IDS = _APPROVED_IDS - {"sam", "withoutbg"}
+_LOCAL_IDS = _APPROVED_IDS - {"sam"}
 _ROOT_FIELDS = {"schema_version", "rembg_version", "default_id", "models"}
 _MODEL_FIELDS = {
     "id",
@@ -56,7 +55,6 @@ _MODEL_FIELDS = {
     "license_note",
     "privacy_note",
     "warning",
-    "max_upload_bytes",
 }
 _ARTIFACT_FIELDS = {
     "url",
@@ -76,7 +74,6 @@ _RELEASE_PATH_PREFIX = "/danielgatis/rembg/releases/download/v0.0.0/"
 class ExecutionClass(StrEnum):
     LOCAL = "local"
     SAM_PREVIEW = "sam_preview"
-    CLOUD_WITHOUTBG = "cloud_withoutbg"
 
 
 class ClothCategory(StrEnum):
@@ -117,7 +114,6 @@ class ModelSpec:
     license_note: str
     privacy_note: str
     warning: str
-    max_upload_bytes: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,8 +126,25 @@ class ModelCatalog:
     specs: Mapping[str, ModelSpec]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "ids", tuple(self.ids))
-        object.__setattr__(self, "specs", MappingProxyType(dict(self.specs)))
+        ids = tuple(self.ids)
+        specs = dict(self.specs)
+        if self.rembg_version != _PINNED_REMBG_VERSION:
+            raise _manifest_error("catalog rembg version is not the app pin")
+        if self.default_id != _DEFAULT_ID:
+            raise _manifest_error("catalog default is not the approved default")
+        if (
+            len(ids) != len(_APPROVED_IDS)
+            or len(set(ids)) != len(ids)
+            or set(ids) != _APPROVED_IDS
+            or set(specs) != _APPROVED_IDS
+        ):
+            raise _manifest_error("catalog IDs are duplicate, missing, or unknown")
+        for model_id, spec in specs.items():
+            if type(spec) is not ModelSpec or spec.id != model_id:
+                raise _manifest_error("catalog model key and specification mismatch")
+            _validate_model_invariants(spec)
+        object.__setattr__(self, "ids", ids)
+        object.__setattr__(self, "specs", MappingProxyType(specs))
 
     @classmethod
     def _build(
@@ -200,7 +213,7 @@ class ModelCatalog:
         if type(model_payloads) is not list or len(model_payloads) != len(
             _APPROVED_IDS
         ):
-            raise _manifest_error("model manifest must contain exactly 17 entries")
+            raise _manifest_error("model manifest must contain exactly 16 entries")
         specs = tuple(_parse_model(item) for item in model_payloads)
         ids = [spec.id for spec in specs]
         if len(set(ids)) != len(ids) or set(ids) != _APPROVED_IDS:
@@ -250,11 +263,6 @@ def _parse_model(value: object) -> ModelSpec:
     supports_render = value["supports_render"]
     if type(supports_render) is not bool:
         raise _manifest_error("model supports_render must be a boolean")
-    max_upload = value["max_upload_bytes"]
-    if max_upload is not None and (
-        type(max_upload) is not int or max_upload <= 0 or max_upload > 100 * 1024 * 1024
-    ):
-        raise _manifest_error("model upload limit must be a bounded positive integer")
     spec = ModelSpec(
         id=model_id,
         display_name=_strict_string(value, "display_name"),
@@ -269,7 +277,6 @@ def _parse_model(value: object) -> ModelSpec:
         license_note=_strict_string(value, "license_note"),
         privacy_note=_strict_string(value, "privacy_note"),
         warning=_strict_string(value, "warning", allow_empty=True),
-        max_upload_bytes=max_upload,
     )
     _validate_model_invariants(spec)
     return spec
@@ -343,7 +350,6 @@ def _validate_model_invariants(spec: ModelSpec) -> None:
             or spec.artifact is None
             or spec.required_inputs
             or not spec.supports_render
-            or spec.max_upload_bytes is not None
         ):
             raise _manifest_error("local model capability invariants are invalid")
         expected_defaults = (
@@ -360,20 +366,11 @@ def _validate_model_invariants(spec: ModelSpec) -> None:
             or spec.artifact is not None
             or spec.required_inputs != ("positive_point",)
             or spec.supports_render
-            or spec.max_upload_bytes is not None
             or spec.inference_defaults != InferenceDefaults()
         ):
             raise _manifest_error("SAM preview capability invariants are invalid")
         return
-    if (
-        spec.execution_class is not ExecutionClass.CLOUD_WITHOUTBG
-        or spec.artifact is not None
-        or spec.required_inputs != ("session_token", "per_job_consent")
-        or not spec.supports_render
-        or spec.max_upload_bytes != 20 * 1024 * 1024
-        or spec.inference_defaults != InferenceDefaults()
-    ):
-        raise _manifest_error("withoutBG cloud capability invariants are invalid")
+    raise _manifest_error("model capability invariants are invalid")
 
 
 def _string_tuple(

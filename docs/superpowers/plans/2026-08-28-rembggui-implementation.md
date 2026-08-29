@@ -14,7 +14,7 @@
 
 - Support Windows 11 x86_64, macOS 13+ arm64 and x86_64, and Ubuntu 22.04 x86_64; builds are separate and unsigned.
 - Require Python `>=3.13,<3.14` for development and packaging; end-user artifacts bundle Python and require no external `ffmpeg`, ImageMagick, `img2webp`, Bash, or Python.
-- Pin `rembg[cpu]==2.0.72`; do not expose custom model paths or custom ONNX sessions. This release supports Python 3.11–3.13 and includes the approved public model catalog.
+- Pin `rembg[cpu]==2.0.72`; do not expose custom model paths or custom ONNX sessions. This release supports Python 3.11–3.13 and includes exactly 15 prompt-free local models plus SAM preview-only.
 - Select `birefnet-portrait` on first launch. Model weights live outside the application bundle and are never committed.
 - Accept local 8-bit SDR MP4/MOV/WebM/MKV sources within the documented media envelope; timestamp is authoritative for VFR media.
 - Output only lossless still/animated WebP in V1; final dimensions are `128..16383`, frame count `1..100000`, and RIFF output remains below 4 GiB.
@@ -23,9 +23,9 @@
 - All UI state changes flow through one pure reducer. Late worker events are ignored unless their source/job/request IDs match current state.
 - Open heavy-job dialogs with asynchronous `QDialog.open()` and `Qt.ApplicationModal`, never `exec()`. Escape/close dispatch one cancel request and the dialog remains until a matching terminal acknowledgement.
 - Paint, pointer/touch hit testing, keyboard focus, and `QAccessible` virtual-child rectangles use one immutable `InteractionGeometry` snapshot.
-- PR tests use synthetic public fixtures and fake model/job adapters. Real model weights, native frozen artifacts, screenreaders, and codec matrices run only in manually dispatched release qualification.
-- Do not persist active source, preview, job, token, or workspace selection. Persist only primitive settings, explicit output directory, window geometry, and inspector disclosure state.
-- Never log or persist cloud tokens. `withoutbg` requires per-job consent and a session-only key; authentication failure clears the key.
+- Ordinary automated tests use synthetic public fixtures and fake model/job adapters. Real model weights, native frozen artifacts, screenreaders, and codec matrices run only in manually started release qualification.
+- Do not persist active source, preview, job, or workspace selection. Persist only primitive settings, explicit output directory, window geometry, and inspector disclosure state.
+- Develop locally/private by default. Creating or configuring a remote and changing repository visibility require separate user authorization.
 
 ## File Map
 
@@ -42,7 +42,7 @@
 | `src/rembggui/jobs/thumbnails.py` | Cancelable target-scaled `QImage` thumbnail requests and cache metadata. |
 | `src/rembggui/jobs/context.py` | Job identity, cancellation, progress, and exclusive scheduling. |
 | `src/rembggui/jobs/segmentation_host.py` | Spawn-safe Pipe/shared-memory protocol and reusable rembg session. |
-| `src/rembggui/jobs/models/` | Pinned catalog, verified downloads, cache, sessions, SAM/cloud adapters. |
+| `src/rembggui/jobs/models/` | Pinned 16-ID catalog, verified local downloads/cache/sessions, and SAM preview prompting. |
 | `src/rembggui/jobs/workspace.py` | Durable cuts, manifests, validation, promotion, external-edit detection, snapshots. |
 | `src/rembggui/jobs/render.py` | Preview, render, Rebuild, staging, validation, atomic output. |
 | `src/rembggui/ui/` | Main window, presenters, canvases, timeline/crop, accessibility, inspector, dialogs. |
@@ -505,7 +505,7 @@ git commit -m "feat: isolate segmentation jobs"
 - Create: `tests/jobs/models/test_session.py`
 
 **Interfaces:**
-- Produces: `ExecutionClass = LOCAL | SAM_PREVIEW | CLOUD_WITHOUTBG` and frozen `ModelSpec`.
+- Produces: `ExecutionClass = LOCAL | SAM_PREVIEW` and frozen `ModelSpec`.
 - Produces: `ModelCatalog.load_resource()`, `.default_id == "birefnet-portrait"`, `.get(model_id)`.
 - Produces: `ModelDownloader.download(spec, destination, progress, cancelled) -> Path`.
 - Produces: `ModelSessionManager.prepare(model_id, extras)`, `.remove(model_id)`, `.close()`.
@@ -520,7 +520,7 @@ def test_manifest_contains_exact_approved_catalog_and_default():
         "u2net", "u2netp", "u2net_human_seg", "u2net_cloth_seg", "silueta",
         "isnet-general-use", "isnet-anime", "sam", "birefnet-general",
         "birefnet-general-lite", "birefnet-portrait", "birefnet-dis",
-        "birefnet-hrsod", "birefnet-cod", "birefnet-massive", "bria-rmbg", "withoutbg",
+        "birefnet-hrsod", "birefnet-cod", "birefnet-massive", "bria-rmbg",
     }
 
 def test_checksum_mismatch_never_promotes_part_file(fake_http, tmp_path):
@@ -539,7 +539,7 @@ Expected: missing catalog modules/resources.
 
 - [ ] **Step 3: Implement pinned manifest and trust boundary**
 
-Record display name, upstream model ID, purpose, execution class, URLs/checksums/sizes where upstream publishes them, requirements, render support, and license/privacy text. Unknown IDs and custom paths remain disabled. BRIA shows its weight/license warning; `withoutbg` has no local download.
+Record display name, upstream model ID, purpose, execution class, URLs/checksums/sizes for the 15 local models, generic requirements, render support, and license/privacy text. SAM has no Task 9 artifact and is preview-only. Unknown IDs and custom paths remain disabled. BRIA shows its weight/license warning.
 
 - [ ] **Step 4: Implement atomic download and cache namespaces**
 
@@ -547,7 +547,7 @@ Stream to `<cache>/2.0.72/<model>/<file>.part`, emit byte progress only with kno
 
 - [ ] **Step 5: Implement one-session replacement lifecycle**
 
-`prepare()` routes local model changes through `SegmentationClient.replace_model`; active models cannot be removed; version namespace changes never reuse old weights. SAM/cloud are capability-routed and implemented in Task 16.
+`prepare()` routes local model changes through `SegmentationClient.replace_model`; active models cannot be removed; version namespace changes never reuse old weights. SAM is capability-routed and its prompt adapter is implemented in Task 16.
 
 - [ ] **Step 6: Verify GREEN and commit**
 
@@ -590,9 +590,9 @@ Expected: `run_smoke` missing.
 
 The smoke path uses generated media and a fake model only; it must never reach the network. Configure Nuitka/PySide plugins, package resources, multiprocessing entry point, PyAV libraries/codecs, and exclusions for tests/model weights/local media.
 
-- [ ] **Step 4: Implement manual four-target workflow**
+- [ ] **Step 4: Implement manual four-target qualification**
 
-Use `workflow_dispatch`, uv/CPython 3.13, native runners, cache disabled for secrets/media, `pyside6-deploy`, artifact upload, and smoke execution on the frozen result. Do not sign, notarize, publish, or download the full model catalog in PR jobs.
+Provide repeatable uv/CPython 3.13 commands for matching native machines, use `pyside6-deploy`, keep model/private-media caches out of artifacts, and run smoke execution on the frozen result. Existing remote workflow configuration is optional and inert until the user separately authorizes remote use; do not sign, notarize, publish, or download the full model catalog in ordinary automated checks.
 
 - [ ] **Step 5: Verify locally and document native gate**
 
@@ -600,7 +600,7 @@ Run: `QT_QPA_PLATFORM=offscreen uv run pytest tests/release/test_frozen_smoke.py
 
 Run: `uv run python -m rembggui --smoke-test`
 
-Expected: local unfrozen smoke passes. Native bundle execution remains a manual GitHub Actions release gate.
+Expected: local unfrozen smoke passes. Native bundle execution remains a manual platform-specific release gate.
 
 - [ ] **Step 6: Commit**
 
@@ -900,7 +900,7 @@ Scrubbing updates Original with 100–150 ms decode debounce; only `Preview Fram
 
 - [ ] **Step 5: Implement model/workspace management UI**
 
-Show model purpose, execution class, size/status/license/privacy, Prepare & Preview, progress/cancel, offline cache, remove guards, and `birefnet-portrait` default. Workspace UI exposes Open Cut Folder, Show edited cut, Rebuild, Regenerate, size/source/last-use/edited/pinned, validation errors, and explicit deletion.
+Show model purpose, LOCAL or SAM_PREVIEW execution class, size/status/license/privacy, Prepare & Preview, progress/cancel, offline cache, remove guards, and `birefnet-portrait` default. Present the 15 local models together and SAM as preview-only, with no third execution group. Workspace UI exposes Open Cut Folder, Show edited cut, Rebuild, Regenerate, size/source/last-use/edited/pinned, validation errors, and explicit deletion.
 
 - [ ] **Step 6: Verify GREEN and commit**
 
@@ -911,25 +911,20 @@ git add src/rembggui/ui tests/ui
 git commit -m "feat: integrate preview jobs and workspaces"
 ```
 
-### Task 16: SAM preview prompts and consent-gated withoutbg cloud adapter
+### Task 16: SAM preview prompts
 
 **Files:**
 - Create: `src/rembggui/jobs/models/sam.py`
-- Create: `src/rembggui/jobs/models/withoutbg.py`
 - Create: `src/rembggui/ui/sam_prompt.py`
-- Create: `src/rembggui/ui/cloud_consent.py`
 - Create: `tests/jobs/models/test_sam.py`
-- Create: `tests/jobs/models/test_withoutbg.py`
 - Create: `tests/ui/test_special_models.py`
 - Modify: `src/rembggui/jobs/models/catalog.py`
 - Modify: `src/rembggui/ui/inspector.py`
 
 **Interfaces:**
 - Produces: normalized `SamPoint(x: float, y: float, label: Positive|Negative)` and `build_sam_extras(points, oriented_crop_size)`.
-- Produces: `WithoutBgAdapter(api_key_provider, session_factory)` implementing one-frame cloud segmentation with timeout/error mapping through the pinned rembg session boundary.
-- Cloud contract follows rembg 2.0.72: model ID `withoutbg`, key supplied through session extras as `api_key`, upstream upload cap 20 MiB; app token remains memory-only.
 
-- [ ] **Step 1: Write failing special-model tests**
+- [ ] **Step 1: Write failing SAM prompt tests**
 
 ```python
 def test_sam_requires_positive_point_and_maps_y_x_order():
@@ -938,17 +933,11 @@ def test_sam_requires_positive_point_and_maps_y_x_order():
     assert extras["input_points"].tolist() == [[100, 100]]
     assert extras["input_labels"].tolist() == [1]
 
-def test_withoutbg_never_sends_without_job_consent(recording_session_factory):
-    adapter = WithoutBgAdapter(lambda: "secret", recording_session_factory)
-    with pytest.raises(AppError) as exc:
-        adapter.remove(frame(), consent=None)
-    assert exc.value.code is ErrorCode.CLOUD_CONSENT_REQUIRED
-    assert recording_session_factory.calls == []
 ```
 
 - [ ] **Step 2: Verify RED**
 
-Run: `QT_QPA_PLATFORM=offscreen uv run pytest tests/jobs/models/test_sam.py tests/jobs/models/test_withoutbg.py tests/ui/test_special_models.py -q`
+Run: `QT_QPA_PLATFORM=offscreen uv run pytest tests/jobs/models/test_sam.py tests/ui/test_special_models.py -q`
 
 Expected: special adapters/UI missing.
 
@@ -956,17 +945,17 @@ Expected: special adapters/UI missing.
 
 Store normalized points on oriented/cropped preview, require at least one positive, convert to rembg's `[y, x]` point order, invalidate prompts after source/crop changes, allow positive/negative editing, and disable full-video Render with the approved temporal-tracking explanation.
 
-- [ ] **Step 4: Implement cloud consent and token lifecycle**
+- [ ] **Step 4: Integrate SAM through the existing session boundary**
 
-Use rembg's `withoutbg` session boundary or an injected equivalent, never a hard-coded undocumented endpoint. Confirm exact frame count/transmission per job, reject frames over 20 MiB before sending, use bounded timeouts, never auto-retry, map auth/quota/proxy/TLS/timeouts, clear token on auth failure/source replacement/quit, and redact token from repr/log/error detail.
+Route SAM preparation and one-frame inference through the existing model/session boundary. Source or crop changes clear normalized points, stale prompts cannot run, and selecting SAM evicts any active local process according to the existing cleanup contract.
 
-- [ ] **Step 5: Cover recorded/sandbox responses and UI gates**
+- [ ] **Step 5: Cover prompt behavior and UI gates**
 
-Test success RGBA, auth rejection/token clear, quota, timeout, TLS/proxy, malformed/partial result, multi-frame stop on first failure, consent wording/count, password echo mode, render disabled for SAM, and no live calls in untrusted CI.
+Test positive/negative points, coordinate conversion, missing-positive validation, stale prompt invalidation, success RGBA through an injected fake, local-session cleanup on selection change, and full-video Render disabled for SAM. Ordinary tests never download a real SAM weight or make a live call.
 
 - [ ] **Step 6: Verify GREEN and commit**
 
-Run: `QT_QPA_PLATFORM=offscreen uv run pytest tests/jobs/models/test_sam.py tests/jobs/models/test_withoutbg.py tests/ui/test_special_models.py -q`
+Run: `QT_QPA_PLATFORM=offscreen uv run pytest tests/jobs/models/test_sam.py tests/ui/test_special_models.py -q`
 
 ```bash
 git add src/rembggui/jobs/models src/rembggui/ui tests/jobs/models tests/ui
@@ -1025,7 +1014,7 @@ Cover every row of the design's Failure-Mode Coverage table with an automated or
 
 - [ ] **Step 5: Finalize packaging/resources/notices/docs**
 
-Ensure fonts/resources/model manifest/Qt plugins/PyAV codecs/multiprocessing entry point are packaged without weights or secrets. Generate accurate third-party notices. Document unsigned-launch steps, model licenses, public repo hygiene, native qualification, screenreader/DPI checks, and no system CLI requirement.
+Ensure fonts/resources/model manifest/Qt plugins/PyAV codecs/multiprocessing entry point are packaged without weights, private media, or generated workspaces. Generate accurate third-party notices. Document unsigned-launch steps, model licenses, local/private development, native qualification, screenreader/DPI checks, and no system CLI requirement.
 
 - [ ] **Step 6: Run the complete verification matrix**
 
@@ -1055,11 +1044,11 @@ git commit -m "test: qualify complete rembgGUI workflow"
 - The final whole-branch review covers `1247030..HEAD` and the approved design spec.
 - The plan ledger records every ruling, deferred Minor, commit range, and review verdict.
 - Local CPython 3.13 lint/type/test/smoke checks pass freshly.
-- Native Windows/macOS/Linux artifacts remain explicitly unclaimed until the manually dispatched workflow runs successfully on a public GitHub remote.
+- Native Windows/macOS/Linux artifacts remain explicitly unclaimed until manually started qualification runs successfully. Any remote execution or publication requires separate user authorization.
 
 ## Plan Self-Review
 
-- Spec coverage: Tasks 2–6 cover every script parameter and pure processing invariant; Tasks 7–12 cover source/model/job/cut/render lifecycles; Tasks 13–16 cover every approved UI, accessibility, modal, and special-model state; Tasks 10 and 17 cover distribution and qualification. No approved requirement is unassigned.
+- Spec coverage: Tasks 2–6 cover every script parameter and pure processing invariant; Tasks 7–12 cover source/model/job/cut/render lifecycles; Tasks 13–16 cover every approved UI, accessibility, modal, and SAM state; Tasks 10 and 17 cover distribution and qualification. No approved requirement is unassigned.
 - Placeholder scan: no `TBD`, `TODO`, “implement later,” vague error-handling step, or undefined “similar to” instruction remains.
 - Type consistency: downstream tasks consume the exact interfaces declared by earlier tasks; `rembggui.core` remains PySide-free; Qt image/widget ownership begins only in jobs/UI adapters; render parity reads the public promoted-cut workspace API.
 - Scope: all tasks produce one desktop application and share the immutable spec/job/media interfaces, so splitting into separate implementation plans would duplicate boundaries and make integration less reliable.

@@ -38,7 +38,6 @@ class ErrorCode(StrEnum):
     MODEL_MANAGER_CLOSED = "model_manager_closed"
     SOURCE_CHANGED = "source_changed"
     CUTS_CHANGED_DURING_SNAPSHOT = "cuts_changed_during_snapshot"
-    CLOUD_CONSENT_REQUIRED = "cloud_consent_required"
     SOURCE_NOT_LOCAL = "source_not_local"
     SOURCE_UNREADABLE = "source_unreadable"
     SOURCE_NO_VIDEO = "source_no_video"
