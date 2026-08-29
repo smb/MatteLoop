@@ -397,6 +397,29 @@ def test_remove_parent_swap_never_unlinks_outside_bound_directory(
     assert outside_target.read_bytes() == b"outside"
 
 
+def test_remove_maps_bound_directory_close_oserror_after_visible_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, _downloader, _clients, _events = _manager(tmp_path)
+    target = tmp_path / "2.0.72" / "u2net" / "u2net.onnx"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"cache")
+    real_close = BoundModelDirectory.close
+
+    def close_then_fail(bound: BoundModelDirectory) -> None:
+        real_close(bound)
+        raise OSError("synthetic CloseHandle failure")
+
+    monkeypatch.setattr(BoundModelDirectory, "close", close_then_fail)
+
+    with pytest.raises(AppError) as exc:
+        manager.remove("u2net")
+
+    assert exc.value.code is ErrorCode.MODEL_DOWNLOAD_DISK
+    assert "CloseHandle" in exc.value.technical_detail
+    assert not target.exists()
+
+
 def test_close_is_idempotent_and_calls_owned_client_exactly_once(
     tmp_path: Path,
 ) -> None:

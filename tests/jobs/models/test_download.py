@@ -276,6 +276,62 @@ def test_verified_offline_cache_is_reused_and_invalid_cache_is_not(
     assert not path.exists()
 
 
+@pytest.mark.parametrize("reuse_cached", [False, True])
+def test_bound_directory_close_oserror_is_structured_for_download_and_reuse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reuse_cached: bool,
+) -> None:
+    data = b"bound-close"
+    catalog, spec = _spec(data)
+    target = tmp_path / "2.0.72" / "u2net" / "u2net.onnx"
+    if reuse_cached:
+        target.parent.mkdir(parents=True)
+        target.write_bytes(data)
+    real_close = BoundModelDirectory.close
+
+    def close_then_fail(bound: BoundModelDirectory) -> None:
+        real_close(bound)
+        raise OSError("synthetic CloseHandle failure")
+
+    monkeypatch.setattr(BoundModelDirectory, "close", close_then_fail)
+
+    with pytest.raises(AppError) as exc:
+        ModelDownloader(FakeTransport(FakeResponse(data)), catalog=catalog).download(
+            spec, tmp_path, lambda _done, _total: None, lambda: False
+        )
+
+    assert exc.value.code is ErrorCode.MODEL_DOWNLOAD_DISK
+    assert "CloseHandle" in exc.value.technical_detail
+    assert target.read_bytes() == data
+
+
+def test_bound_close_cleanup_failure_preserves_primary_download_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected = b"expected"
+    catalog, spec = _spec(expected)
+    real_close = BoundModelDirectory.close
+
+    def close_then_fail(bound: BoundModelDirectory) -> None:
+        real_close(bound)
+        raise OSError("synthetic CloseHandle cleanup failure")
+
+    monkeypatch.setattr(BoundModelDirectory, "close", close_then_fail)
+
+    with pytest.raises(AppError) as exc:
+        ModelDownloader(
+            FakeTransport(FakeResponse(b"tampered")), catalog=catalog
+        ).download(spec, tmp_path, lambda _done, _total: None, lambda: False)
+
+    assert exc.value.code is ErrorCode.MODEL_DOWNLOAD_DISK
+    assert "CloseHandle" in exc.value.technical_detail
+    primary = exc.value.__cause__
+    assert isinstance(primary, AppError)
+    assert primary.code is ErrorCode.MODEL_CHECKSUM_MISMATCH
+    assert not list(tmp_path.rglob("*.part"))
+
+
 def test_different_manifest_version_never_reuses_old_namespace(tmp_path: Path) -> None:
     data = b"same-bytes"
     old_path = tmp_path / "2.0.71" / "u2net" / "u2net.onnx"

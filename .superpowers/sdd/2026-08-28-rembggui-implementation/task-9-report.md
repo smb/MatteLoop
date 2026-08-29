@@ -40,13 +40,17 @@ replacement lifecycle, and the manifest-bound Task 8 child launch boundary.
   promotion.
 - Rejects symlink/reparse/non-directory namespace components and non-regular
   cache files. On POSIX, every cache operation is relative to a bound directory
-  descriptor opened with `O_DIRECTORY|O_NOFOLLOW`. On Windows, root/version/
-  model are opened hierarchically without delete sharing. Immediately after
-  each `CreateFileW`, `GetFileInformationByHandleEx(FileAttributeTagInfo)`
-  proves that the opened object has `FILE_ATTRIBUTE_DIRECTORY` and not
-  `FILE_ATTRIBUTE_REPARSE_POINT`; all validated ancestor/model handles remain
-  held until the full-path file operation finishes. Missing-component early
-  returns and all exceptions close every already-opened handle exactly once.
+  descriptor opened with `O_DIRECTORY|O_NOFOLLOW`. On Windows, the lexical
+  drive-volume or UNC-share anchor and every component through cache root,
+  version, and model are opened hierarchically without delete sharing.
+  Immediately after each `CreateFileW`,
+  `GetFileInformationByHandleEx(FileAttributeTagInfo)` proves that the opened
+  object has `FILE_ATTRIBUTE_DIRECTORY` and not
+  `FILE_ATTRIBUTE_REPARSE_POINT`; all validated handles remain held while the
+  next full-path component is opened/created and until the file operation
+  finishes. There is no pre-binding `resolve`, `lstat`, or recursive directory
+  creation window. Missing-component early returns and all exceptions close
+  every already-opened handle exactly once in reverse order.
 - Streams only bounded native chunks, enforces manifest size on both overrun
   and EOF, emits progress only when a valid known total exists, and checks
   cancellation before/between/after reads and before promotion.
@@ -59,6 +63,11 @@ replacement lifecycle, and the manifest-bound Task 8 child launch boundary.
   same-target single flight across downloader instances.
 - Maps HTTP, TLS, proxy, general network, permission, disk, size, checksum,
   unsafe-cache, and cancellation failures to structured `AppError` codes.
+- A directory-handle close failure after download, verified cache reuse, failed
+  download cleanup, or removal is mapped to the existing structured storage
+  error. When cleanup fails while another operation is already failing, the
+  cleanup error remains visible and the original failure is retained as the
+  direct cause.
 
 ### Session and Task 8 projection
 
@@ -206,6 +215,63 @@ No network transport, official release asset, or real ONNX inference was used
 by the automated tests. The BRIA secondary witness revision was resolved to
 `302f8bb8c9606587dae63532702ef3b72208cce7`; its metadata exposes the same
 SHA-256 as the app pin, without being treated as official-release byte proof.
+
+### Fix round 3
+
+RED evidence:
+
+```text
+uv run pytest \
+  tests/jobs/models/test_cache_fs.py::test_windows_binding_holds_anchor_through_every_cache_ancestor \
+  tests/jobs/models/test_cache_fs.py::test_windows_binding_blocks_redirect_of_ancestor_above_cache_root \
+  tests/jobs/models/test_cache_fs.py::test_windows_path_chain_supports_drive_and_unc_anchors \
+  tests/jobs/models/test_cache_fs.py::test_windows_path_chain_rejects_unanchored_or_drive_relative_roots -q
+6 failed: binding began at cache_root and exposed the cache-root ancestor
+
+uv run pytest \
+  tests/jobs/models/test_download.py::test_bound_directory_close_oserror_is_structured_for_download_and_reuse \
+  tests/jobs/models/test_download.py::test_bound_close_cleanup_failure_preserves_primary_download_error \
+  tests/jobs/models/test_session.py::test_remove_maps_bound_directory_close_oserror_after_visible_cleanup -q
+4 failed: raw OSError escaped download, reuse, failure cleanup, and remove
+
+uv run pytest tests/jobs/models/test_cache_fs.py::test_windows_path_chain_rejects_traversal_and_device_namespaces -q
+3 failed, 3 passed: non-canonical UNC traversal shares and a non-ASCII drive were still accepted
+```
+
+The deterministic Windows seam attempted to rename/junction an ancestor above
+`cache_root` exactly before opening `cache_root`. The old implementation had no
+handle for that ancestor; the redirect succeeded and the later root lookup was
+redirected. The corrected implementation already holds the ancestor without
+delete sharing, so the redirect is blocked. Separate assertions prove
+anchor-to-leaf opening order,
+post-open identity queries, held ancestors during each one-level
+`CreateDirectoryW`, and reverse exactly-once cleanup after missing components,
+midway native-open failure, identity failure, and `CloseHandle` failure.
+
+GREEN evidence:
+
+```text
+uv run pytest tests/jobs/models -q
+110 passed in 0.67s
+
+uv run pytest -q
+629 passed in 39.57s
+
+uv run ruff check .
+All checks passed!
+
+uv run mypy src
+Success: no issues found in 23 source files
+
+git diff --check
+clean
+```
+
+The Windows path parser accepts canonical absolute drive and UNC-share roots,
+rejects relative, drive-relative, rooted-without-drive, traversal, and device
+namespace forms, and performs no filesystem resolution before the native
+handle chain begins. Tests remain synthetic and cross-platform: no network,
+real ONNX, or Windows-only runtime is required to exercise the native API seam.
 
 ## Deliberate tradeoffs / remaining qualification
 

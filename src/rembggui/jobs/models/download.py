@@ -12,7 +12,11 @@ from threading import Lock
 from typing import NoReturn, Protocol, runtime_checkable
 
 from rembggui.core.errors import AppError, ErrorCode
-from rembggui.jobs.models.cache_fs import BoundModelDirectory, UnsafeCacheError
+from rembggui.jobs.models.cache_fs import (
+    BoundDirectoryCloseError,
+    BoundModelDirectory,
+    UnsafeCacheError,
+)
 from rembggui.jobs.models.catalog import (
     ExecutionClass,
     ModelArtifact,
@@ -109,11 +113,24 @@ class ModelDownloader:
                 raise _permission_error(trusted.id, error) from error
             except OSError as error:
                 raise _disk_error(trusted.id, error) from error
-            with bound:
-                _after_model_directory_bound(bound)
-                return self._download_locked(
-                    trusted, artifact, bound, progress, cancelled
+            try:
+                with bound:
+                    _after_model_directory_bound(bound)
+                    return self._download_locked(
+                        trusted, artifact, bound, progress, cancelled
+                    )
+            except BoundDirectoryCloseError as error:
+                close_error = error.close_error
+                if isinstance(close_error, PermissionError):
+                    mapped = _permission_error(trusted.id, close_error)
+                else:
+                    mapped = _disk_error(trusted.id, close_error)
+                cause = (
+                    error.primary_error
+                    if error.primary_error is not None
+                    else close_error
                 )
+                raise mapped from cause
 
     def _trusted_local_spec(self, spec: ModelSpec) -> ModelSpec:
         if type(spec) is not ModelSpec:

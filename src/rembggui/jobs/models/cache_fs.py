@@ -10,7 +10,7 @@ from __future__ import annotations
 import errno
 import os
 import stat
-from pathlib import Path
+from pathlib import Path, PurePath, PureWindowsPath
 from types import TracebackType
 from typing import Protocol
 
@@ -21,6 +21,8 @@ _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 class _WindowsDirectoryApi(Protocol):
     def open_directory(self, path: Path) -> int: ...
 
+    def create_directory(self, path: Path) -> None: ...
+
     def file_attributes(self, handle: int) -> int: ...
 
     def close_handle(self, handle: int) -> None: ...
@@ -28,6 +30,19 @@ class _WindowsDirectoryApi(Protocol):
 
 class UnsafeCacheError(Exception):
     pass
+
+
+class BoundDirectoryCloseError(Exception):
+    """A bound-directory cleanup failure with its interrupted error retained."""
+
+    __slots__ = ("close_error", "primary_error")
+
+    def __init__(
+        self, close_error: OSError, primary_error: BaseException | None
+    ) -> None:
+        self.close_error = close_error
+        self.primary_error = primary_error
+        super().__init__(f"could not close bound model cache: {close_error}")
 
 
 class BoundModelDirectory:
@@ -52,10 +67,10 @@ class BoundModelDirectory:
     def bind(
         cls, root: Path, version: str, model_id: str, *, create: bool
     ) -> BoundModelDirectory | None:
+        if os.name == "nt":
+            return _bind_windows(root, version, model_id, create=create)
         absolute_root = root.absolute()
         model_path = absolute_root / version / model_id
-        if os.name == "nt":
-            return _bind_windows(absolute_root, version, model_id, create=create)
         return _bind_posix(model_path, create=create)
 
     def __enter__(self) -> BoundModelDirectory:
@@ -67,7 +82,13 @@ class BoundModelDirectory:
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        self.close()
+        try:
+            self.close()
+        except OSError as error:
+            failure = BoundDirectoryCloseError(error, exc_value)
+            if exc_value is not None:
+                raise failure from exc_value
+            raise failure from error
 
     def close(self) -> None:
         descriptor = self._fd
@@ -246,28 +267,22 @@ def _bind_windows(
 ) -> BoundModelDirectory | None:
     active_api = api if api is not None else _CtypesWindowsDirectoryApi()
     handles: list[int] = []
-    current = root
+    chain = _windows_path_chain(root, version, model_id)
+    current = chain[-1]
     bound: BoundModelDirectory | None = None
     try:
-        for component in (None, version, model_id):
-            if component is not None:
-                _validate_component(component)
-                current = current / component
+        for index, component_path in enumerate(chain):
             try:
-                info = current.lstat()
+                handle = active_api.open_directory(component_path)
             except FileNotFoundError:
+                if index == 0:
+                    raise UnsafeCacheError(
+                        "model cache volume or share anchor is unavailable"
+                    ) from None
                 if not create:
                     return None
-                current.mkdir(mode=0o700)
-                info = current.lstat()
-            if (
-                stat.S_ISLNK(info.st_mode)
-                or current.is_symlink()
-                or current.is_junction()
-                or not stat.S_ISDIR(info.st_mode)
-            ):
-                raise UnsafeCacheError("model cache component is not a real directory")
-            handle = active_api.open_directory(current)
+                active_api.create_directory(component_path)
+                handle = active_api.open_directory(component_path)
             handles.append(handle)
             attributes = active_api.file_attributes(handle)
             if not attributes & _FILE_ATTRIBUTE_DIRECTORY:
@@ -286,6 +301,68 @@ def _bind_windows(
             _close_windows_handles(active_api, tuple(handles))
 
 
+def _windows_path_chain[PathT: PurePath](
+    root: PathT, version: str, model_id: str
+) -> tuple[PathT, ...]:
+    """Return the lexical anchor-to-model chain without resolving any segment."""
+    if not root.is_absolute() or not root.anchor or not root.parts:
+        raise UnsafeCacheError("model cache path must be absolute")
+    if isinstance(root, PureWindowsPath):
+        _validate_windows_anchor(root)
+        windows_path = True
+    else:
+        windows_path = False
+    if root.parts[0] != root.anchor:
+        raise UnsafeCacheError("model cache path has an invalid anchor")
+
+    current = type(root)(root.anchor)
+    chain = [current]
+    for component in (*root.parts[1:], version, model_id):
+        if windows_path:
+            _validate_windows_component(component)
+        else:
+            _validate_component(component)
+        current = current / component
+        chain.append(current)
+    return tuple(chain)
+
+
+def _validate_windows_anchor(root: PureWindowsPath) -> None:
+    drive = root.drive
+    anchor = root.anchor
+    if root.root != "\\" or not drive:
+        raise UnsafeCacheError("model cache path must be absolute")
+    if drive.startswith("\\\\"):
+        lowered = drive.casefold()
+        if lowered.startswith(("\\\\?\\", "\\\\.\\")):
+            raise UnsafeCacheError("model cache path has an invalid Windows anchor")
+        unc_parts = [part for part in drive[2:].split("\\") if part]
+        if len(unc_parts) != 2:
+            raise UnsafeCacheError("model cache path has an invalid UNC share anchor")
+        for component in unc_parts:
+            _validate_windows_component(component)
+        return
+    if (
+        len(drive) != 2
+        or drive[1] != ":"
+        or not drive[0].isascii()
+        or not drive[0].isalpha()
+    ):
+        raise UnsafeCacheError("model cache path has an invalid drive anchor")
+    if anchor != f"{drive}\\":
+        raise UnsafeCacheError("model cache path has an invalid Windows anchor")
+
+
+def _validate_windows_component(value: str) -> None:
+    _validate_component(value)
+    if (
+        value.endswith((" ", "."))
+        or any(character in '<>:"|?*' for character in value)
+        or any(ord(character) < 32 for character in value)
+    ):
+        raise UnsafeCacheError("model cache namespace component is invalid")
+
+
 def _close_windows_handles(api: _WindowsDirectoryApi, handles: tuple[int, ...]) -> None:
     first_error: BaseException | None = None
     for handle in reversed(handles):
@@ -299,7 +376,13 @@ def _close_windows_handles(api: _WindowsDirectoryApi, handles: tuple[int, ...]) 
 
 
 class _CtypesWindowsDirectoryApi:
-    __slots__ = ("_close_handle", "_create_file", "_get_information", "_invalid")
+    __slots__ = (
+        "_close_handle",
+        "_create_directory",
+        "_create_file",
+        "_get_information",
+        "_invalid",
+    )
 
     def __init__(self) -> None:
         import ctypes
@@ -317,6 +400,9 @@ class _CtypesWindowsDirectoryApi:
             wintypes.HANDLE,
         )
         create_file.restype = wintypes.HANDLE
+        create_directory = kernel32.CreateDirectoryW
+        create_directory.argtypes = (wintypes.LPCWSTR, wintypes.LPVOID)
+        create_directory.restype = wintypes.BOOL
         get_information = kernel32.GetFileInformationByHandleEx
         get_information.argtypes = (
             wintypes.HANDLE,
@@ -329,6 +415,7 @@ class _CtypesWindowsDirectoryApi:
         close_handle.argtypes = (wintypes.HANDLE,)
         close_handle.restype = wintypes.BOOL
         self._create_file = create_file
+        self._create_directory = create_directory
         self._get_information = get_information
         self._close_handle = close_handle
         self._invalid = wintypes.HANDLE(-1).value
@@ -347,8 +434,32 @@ class _CtypesWindowsDirectoryApi:
         )
         if handle == self._invalid:
             last_error = getattr(ctypes, "get_last_error")()
+            if last_error in {2, 3}:
+                raise FileNotFoundError(
+                    last_error, "cache directory does not exist", str(path)
+                )
+            if last_error == 5:
+                raise PermissionError(
+                    last_error, "could not bind cache directory", str(path)
+                )
             raise OSError(last_error, "could not bind cache directory")
         return int(handle)
+
+    def create_directory(self, path: Path) -> None:
+        import ctypes
+
+        if self._create_directory(str(path), None):
+            return
+        last_error = getattr(ctypes, "get_last_error")()
+        if last_error == 183:
+            # A racing creator is safe: the following OPEN_REPARSE_POINT handle
+            # identity proof decides whether the resulting entry is admissible.
+            return
+        if last_error == 5:
+            raise PermissionError(
+                last_error, "could not create cache directory", str(path)
+            )
+        raise OSError(last_error, "could not create cache directory", str(path))
 
     def file_attributes(self, handle: int) -> int:
         import ctypes

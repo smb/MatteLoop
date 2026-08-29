@@ -9,7 +9,11 @@ from threading import RLock
 from typing import Protocol
 
 from rembggui.core.errors import AppError, ErrorCode
-from rembggui.jobs.models.cache_fs import BoundModelDirectory, UnsafeCacheError
+from rembggui.jobs.models.cache_fs import (
+    BoundDirectoryCloseError,
+    BoundModelDirectory,
+    UnsafeCacheError,
+)
 from rembggui.jobs.models.catalog import ExecutionClass, ModelCatalog, ModelSpec
 from rembggui.jobs.models.download import CancellationCheck, ProgressCallback
 
@@ -197,18 +201,31 @@ class ModelSessionManager:
                 raise _remove_disk(spec.id, error) from error
             if bound is None:
                 return False
-            with bound:
-                try:
-                    _after_remove_directory_bound(bound)
-                    removed = bound.unlink_regular(artifact.runtime_filename)
-                    bound.assert_still_named()
-                    return removed
-                except UnsafeCacheError as error:
-                    raise _unsafe_cache(str(error)) from error
-                except PermissionError as error:
-                    raise _remove_permission(spec.id, error) from error
-                except OSError as error:
-                    raise _remove_disk(spec.id, error) from error
+            try:
+                with bound:
+                    try:
+                        _after_remove_directory_bound(bound)
+                        removed = bound.unlink_regular(artifact.runtime_filename)
+                        bound.assert_still_named()
+                        return removed
+                    except UnsafeCacheError as error:
+                        raise _unsafe_cache(str(error)) from error
+                    except PermissionError as error:
+                        raise _remove_permission(spec.id, error) from error
+                    except OSError as error:
+                        raise _remove_disk(spec.id, error) from error
+            except BoundDirectoryCloseError as error:
+                close_error = error.close_error
+                if isinstance(close_error, PermissionError):
+                    mapped = _remove_permission(spec.id, close_error)
+                else:
+                    mapped = _remove_disk(spec.id, close_error)
+                cause = (
+                    error.primary_error
+                    if error.primary_error is not None
+                    else close_error
+                )
+                raise mapped from cause
 
     def close(self) -> None:
         with self._lock:
