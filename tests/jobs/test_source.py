@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 import struct
+from dataclasses import replace
 from fractions import Fraction
 from types import SimpleNamespace
 
@@ -14,6 +16,7 @@ from rembggui.jobs.source import (
     MAX_TIMELINE_DECODED_FRAMES,
     DecodedFrame,
     SourceRevision,
+    SourceValidationProof,
     _decodable_video_stream,
     _derive_timeline,
     _display_dimensions,
@@ -438,6 +441,25 @@ def test_missing_single_frame_cadence_is_rejected_as_unproven():
     assert error.value.code is ErrorCode.SOURCE_FPS_UNSUPPORTED
 
 
+def test_timeline_rejects_decoded_frame_without_pts():
+    frame = av.VideoFrame.from_image(Image.new("RGB", (2, 2), "red"))
+    frame.pts = None
+    stream = _color_stream(matrix=0)
+    stream.time_base = Fraction(1)
+
+    class Container:
+        def seek(self, *args, **kwargs):
+            return None
+
+        def decode(self, selected_stream):
+            yield frame
+
+    with pytest.raises(AppError) as error:
+        _derive_timeline(Container(), stream, Fraction(0), Fraction(1))
+
+    assert error.value.code is ErrorCode.SOURCE_CORRUPT
+
+
 def test_stream_selection_skips_first_undecodable_video_stream():
     bad = SimpleNamespace(disposition=av.stream.Disposition(0))
     good = SimpleNamespace(disposition=av.stream.Disposition(0))
@@ -480,6 +502,45 @@ def test_probe_revision_binds_decode_to_same_regular_file(tmp_path):
             expected_revision=info.revision,
         )
     assert error.value.code is ErrorCode.SOURCE_CHANGED
+
+
+def test_validation_proof_is_immutable_serializable_and_structurally_bound(tmp_path):
+    path = make_video(tmp_path / "proof.mp4", _solid_frames(), Fraction(2))
+    info = probe_source(path)
+
+    assert isinstance(info.validation_proof, SourceValidationProof)
+    payload = info.validation_proof.to_payload()
+    serialized = json.dumps(payload)
+    restored = SourceValidationProof.from_payload(json.loads(serialized))
+    assert payload["source_revision"]["inode"] == info.revision.inode
+    assert payload["duration"] == [3, 2]
+    assert restored == info.validation_proof
+
+    mismatched = replace(info.validation_proof, stream_index=999)
+    with pytest.raises(AppError) as error:
+        decode_frame(
+            path,
+            Fraction(0),
+            request_id=5,
+            expected_revision=info.revision,
+            validation_proof=mismatched,
+        )
+
+    assert error.value.code is ErrorCode.SOURCE_CHANGED
+
+    other = make_video(
+        tmp_path / "other-proof-source.mp4",
+        list(reversed(_solid_frames())),
+        Fraction(2),
+    )
+    with pytest.raises(AppError) as source_error:
+        decode_frame(
+            other,
+            Fraction(0),
+            request_id=6,
+            validation_proof=restored,
+        )
+    assert source_error.value.code is ErrorCode.SOURCE_CHANGED
 
 
 def test_retarget_during_decode_is_rejected_after_native_access(tmp_path, monkeypatch):

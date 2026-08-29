@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import os
 import stat
 import struct
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
@@ -52,11 +54,142 @@ class SourceRevision:
 
 
 @dataclass(frozen=True, slots=True)
+class SourceValidationProof:
+    """Serializable probe proof bound to one file revision and video stream."""
+
+    source_revision: SourceRevision
+    stream_index: int
+    stream_start_time: int | None
+    declared_duration: Fraction
+    declared_frame_count: int
+    coded_width: int
+    coded_height: int
+    time_base: Fraction
+    presentation_origin: Fraction
+    duration: Fraction
+    average_rate: Fraction | None
+    base_rate: Fraction | None
+    guessed_rate: Fraction | None
+    peak_rate: Fraction
+    frame_count: int | None
+    rotation: int
+    pixel_aspect: Fraction
+    pixel_format: str
+    codec_name: str
+    color_matrix: int
+    color_range: int
+    color_transfer: int
+    color_primaries: int
+    rgb_input: bool
+    proof_version: str
+    contract_digest: str
+
+    def to_payload(self) -> dict[str, object]:
+        """Return a JSON-serializable immutable-proof representation."""
+        revision = self.source_revision
+        payload: dict[str, object] = {
+            "source_revision": {
+                "device": revision.device,
+                "inode": revision.inode,
+                "size": revision.size,
+                "mtime_ns": revision.mtime_ns,
+                "ctime_ns": revision.ctime_ns,
+            },
+            "stream_index": self.stream_index,
+            "stream_start_time": self.stream_start_time,
+            "declared_duration": _fraction_payload(self.declared_duration),
+            "declared_frame_count": self.declared_frame_count,
+            "coded_width": self.coded_width,
+            "coded_height": self.coded_height,
+            "time_base": _fraction_payload(self.time_base),
+            "presentation_origin": _fraction_payload(self.presentation_origin),
+            "duration": _fraction_payload(self.duration),
+            "average_rate": _optional_fraction_payload(self.average_rate),
+            "base_rate": _optional_fraction_payload(self.base_rate),
+            "guessed_rate": _optional_fraction_payload(self.guessed_rate),
+            "peak_rate": _fraction_payload(self.peak_rate),
+            "frame_count": self.frame_count,
+            "rotation": self.rotation,
+            "pixel_aspect": _fraction_payload(self.pixel_aspect),
+            "pixel_format": self.pixel_format,
+            "codec_name": self.codec_name,
+            "color_matrix": self.color_matrix,
+            "color_range": self.color_range,
+            "color_transfer": self.color_transfer,
+            "color_primaries": self.color_primaries,
+            "rgb_input": self.rgb_input,
+            "proof_version": self.proof_version,
+        }
+        payload["contract_digest"] = self.contract_digest
+        return payload
+
+    def computed_digest(self) -> str:
+        payload = self.to_payload()
+        payload.pop("contract_digest")
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        return hashlib.sha256(encoded).hexdigest()
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, object]) -> SourceValidationProof:
+        """Restore and integrity-check a proof from ``to_payload`` output."""
+        try:
+            revision_payload = cast(Mapping[str, object], payload["source_revision"])
+            revision = SourceRevision(
+                device=_payload_int(revision_payload, "device"),
+                inode=_payload_int(revision_payload, "inode"),
+                size=_payload_int(revision_payload, "size"),
+                mtime_ns=_payload_int(revision_payload, "mtime_ns"),
+                ctime_ns=_payload_int(revision_payload, "ctime_ns"),
+            )
+            frame_count_value = payload["frame_count"]
+            proof = cls(
+                source_revision=revision,
+                stream_index=_payload_int(payload, "stream_index"),
+                stream_start_time=_optional_payload_int(payload, "stream_start_time"),
+                declared_duration=_fraction_from_payload(payload["declared_duration"]),
+                declared_frame_count=_payload_int(payload, "declared_frame_count"),
+                coded_width=_payload_int(payload, "coded_width"),
+                coded_height=_payload_int(payload, "coded_height"),
+                time_base=_fraction_from_payload(payload["time_base"]),
+                presentation_origin=_fraction_from_payload(
+                    payload["presentation_origin"]
+                ),
+                duration=_fraction_from_payload(payload["duration"]),
+                average_rate=_optional_fraction_from_payload(payload["average_rate"]),
+                base_rate=_optional_fraction_from_payload(payload["base_rate"]),
+                guessed_rate=_optional_fraction_from_payload(payload["guessed_rate"]),
+                peak_rate=_fraction_from_payload(payload["peak_rate"]),
+                frame_count=(
+                    None
+                    if frame_count_value is None
+                    else _strict_int(frame_count_value)
+                ),
+                rotation=_payload_int(payload, "rotation"),
+                pixel_aspect=_fraction_from_payload(payload["pixel_aspect"]),
+                pixel_format=_payload_str(payload, "pixel_format"),
+                codec_name=_payload_str(payload, "codec_name"),
+                color_matrix=_payload_int(payload, "color_matrix"),
+                color_range=_payload_int(payload, "color_range"),
+                color_transfer=_payload_int(payload, "color_transfer"),
+                color_primaries=_payload_int(payload, "color_primaries"),
+                rgb_input=_payload_bool(payload, "rgb_input"),
+                proof_version=_payload_str(payload, "proof_version"),
+                contract_digest=_payload_str(payload, "contract_digest"),
+            )
+        except (KeyError, TypeError, ValueError, ZeroDivisionError) as error:
+            raise ValueError("invalid source validation proof payload") from error
+        if proof.contract_digest != proof.computed_digest():
+            raise ValueError("source validation proof payload failed integrity check")
+        return proof
+
+
+@dataclass(frozen=True, slots=True)
 class SourceInfo:
     """Validated presentation metadata in oriented, square-pixel coordinates."""
 
     path: Path
     revision: SourceRevision
+    validation_proof: SourceValidationProof
     width: int
     height: int
     duration: Fraction
@@ -114,6 +247,7 @@ def decode_frame(
     *,
     is_cancelled: CancelCheck | None = None,
     expected_revision: SourceRevision | None = None,
+    validation_proof: SourceValidationProof | None = None,
 ) -> DecodedFrame:
     """Decode the frame whose half-open presentation interval owns ``timestamp``.
 
@@ -145,27 +279,39 @@ def decode_frame(
             "reload-source",
         )
     _raise_if_cancelled(is_cancelled)
+    if validation_proof is not None:
+        _validate_proof_identity(validation_proof, expected_revision)
+        expected_revision = validation_proof.source_revision
     try:
         with _input_container(source, expected_revision) as (container, revision):
             _validate_container_format(source, container)
-            stream, metadata_frame = _decodable_video_stream(container, is_cancelled)
-            source_info = _source_info(
-                source,
-                revision,
-                container,
-                stream,
-                metadata_frame,
-                is_cancelled,
-            )
-            presentation_origin = _presentation_origin(
-                stream, metadata_frame, source_info.time_base
-            )
+            if validation_proof is None:
+                stream, metadata_frame = _decodable_video_stream(
+                    container, is_cancelled
+                )
+                source_info = _source_info(
+                    source,
+                    revision,
+                    container,
+                    stream,
+                    metadata_frame,
+                    is_cancelled,
+                )
+                presentation_origin = _presentation_origin(
+                    stream, metadata_frame, source_info.time_base
+                )
+                duration = source_info.duration
+            else:
+                stream = _stream_from_proof(container, validation_proof, revision)
+                metadata_frame = None
+                presentation_origin = validation_proof.presentation_origin
+                duration = validation_proof.duration
             _seek_for_timestamp(
                 container,
                 stream,
                 timestamp,
                 presentation_origin,
-                source_info.duration,
+                duration,
             )
             candidate, _ = _frame_at_timestamp(
                 container,
@@ -173,9 +319,22 @@ def decode_frame(
                 timestamp,
                 presentation_origin,
                 is_cancelled,
+                validation_proof,
             )
             actual_pts = _frame_timestamp(candidate) - presentation_origin
-            image = _normalized_image(candidate, stream, metadata_frame)
+            image = _normalized_image(
+                candidate,
+                stream,
+                metadata_frame,
+                expected_rotation=(
+                    validation_proof.rotation if validation_proof is not None else None
+                ),
+                expected_pixel_aspect=(
+                    validation_proof.pixel_aspect
+                    if validation_proof is not None
+                    else None
+                ),
+            )
             return DecodedFrame(image, timestamp, actual_pts, request_id, revision)
     except AppError:
         raise
@@ -291,6 +450,15 @@ def _source_changed(detail: str) -> AppError:
     )
 
 
+def _proof_mismatch(detail: str) -> AppError:
+    return _source_error(
+        ErrorCode.SOURCE_CHANGED,
+        "source.proof.mismatch",
+        detail,
+        "reprobe-source",
+    )
+
+
 def _validate_container_format(source: Path, container: Any) -> None:
     format_name = str(getattr(getattr(container, "format", None), "name", ""))
     suffix = source.suffix.casefold()
@@ -308,6 +476,114 @@ def _validate_container_format(source: Path, container: Any) -> None:
             f"{suffix} suffix does not match demuxer {format_name or 'unknown'}",
             "choose-another-file",
         )
+
+
+def _validate_proof_identity(
+    proof: SourceValidationProof, expected_revision: SourceRevision | None
+) -> None:
+    if not isinstance(proof, SourceValidationProof):
+        raise _proof_mismatch("validation proof has the wrong type")
+    if proof.proof_version != "source-proof-v1":
+        raise _proof_mismatch("validation proof version is unsupported")
+    if proof.contract_digest != proof.computed_digest():
+        raise _proof_mismatch("validation proof contract digest is invalid")
+    if expected_revision is not None and expected_revision != proof.source_revision:
+        raise _proof_mismatch("validation proof and expected revision differ")
+    if (
+        proof.duration <= 0
+        or proof.duration > MAX_SOURCE_DURATION
+        or proof.peak_rate <= 0
+        or proof.peak_rate > MAX_SOURCE_FPS
+        or proof.time_base <= 0
+        or proof.coded_width <= 0
+        or proof.coded_height <= 0
+        or proof.rotation not in {0, 90, 180, 270}
+        or proof.pixel_aspect <= 0
+    ):
+        raise _proof_mismatch("validation proof contains an invalid media envelope")
+
+
+def _stream_from_proof(
+    container: Any, proof: SourceValidationProof, revision: SourceRevision
+) -> Any:
+    _validate_proof_identity(proof, revision)
+    stream = next(
+        (
+            candidate
+            for candidate in container.streams.video
+            if int(candidate.index) == proof.stream_index
+        ),
+        None,
+    )
+    if stream is None:
+        raise _proof_mismatch("validated video stream is absent")
+    excluded = (
+        av.stream.Disposition.attached_pic
+        | av.stream.Disposition.timed_thumbnails
+        | av.stream.Disposition.still_image
+    )
+    if getattr(stream, "disposition", av.stream.Disposition(0)) & excluded:
+        raise _proof_mismatch("validated stream is not a display video stream")
+    time_base = _fraction_or_none(stream.time_base)
+    codec = stream.codec_context
+    codec_name = _codec_name(codec)
+    declared_duration = (
+        _duration(container, stream, time_base, proof.presentation_origin)
+        if time_base is not None
+        else Fraction(0)
+    )
+    contract = (
+        int(stream.width),
+        int(stream.height),
+        time_base,
+        int(stream.start_time) if stream.start_time is not None else None,
+        declared_duration,
+        int(getattr(stream, "frames", 0)),
+        _fraction_or_none(stream.average_rate),
+        _fraction_or_none(getattr(stream, "base_rate", None)),
+        _fraction_or_none(getattr(stream, "guessed_rate", None)),
+        str(getattr(codec, "pix_fmt", "") or ""),
+        codec_name,
+    )
+    expected = (
+        proof.coded_width,
+        proof.coded_height,
+        proof.time_base,
+        proof.stream_start_time,
+        proof.declared_duration,
+        proof.declared_frame_count,
+        proof.average_rate,
+        proof.base_rate,
+        proof.guessed_rate,
+        proof.pixel_format,
+        proof.codec_name,
+    )
+    if contract != expected:
+        raise _proof_mismatch("fresh stream contract differs from validation proof")
+
+    color_surface = SimpleNamespace(
+        format=SimpleNamespace(name=proof.pixel_format),
+        color_primaries=None,
+        color_trc=None,
+        colorspace=getattr(codec, "colorspace", None),
+        color_range=getattr(codec, "color_range", None),
+        height=proof.coded_height,
+        side_data=(),
+        sample_aspect_ratio=None,
+    )
+    profile = _color_profile(stream, color_surface)
+    if _profile_contract(profile) != _proof_color_contract(proof):
+        raise _proof_mismatch("fresh stream color contract differs from proof")
+    rotation, pixel_aspect = _orientation(
+        stream,
+        color_surface,
+        None,
+        expected_rotation=proof.rotation,
+        expected_pixel_aspect=proof.pixel_aspect,
+    )
+    if (rotation, pixel_aspect) != (proof.rotation, proof.pixel_aspect):
+        raise _proof_mismatch("fresh stream display contract differs from proof")
+    return stream
 
 
 def _decodable_video_stream(
@@ -405,13 +681,20 @@ def _frame_at_timestamp(
     timestamp: Fraction,
     presentation_origin: Fraction,
     is_cancelled: CancelCheck | None,
+    validation_proof: SourceValidationProof | None = None,
 ) -> tuple[Any, Any]:
     candidate = None
     first_frame = None
     # The caller seeks backward to a keyframe, never by frame/fps arithmetic.
     for frame in _decoded_frames(container, stream):
         _raise_if_cancelled(is_cancelled)
-        _validate_frame_color(stream, frame)
+        profile = _validate_frame_color(stream, frame)
+        if validation_proof is not None and _profile_contract(
+            profile
+        ) != _proof_color_contract(validation_proof):
+            raise _proof_mismatch(
+                "decoded target frame color differs from validation proof"
+            )
         if frame.pts is None or frame.time_base is None:
             continue
         frame_pts = _frame_timestamp(frame) - presentation_origin
@@ -575,6 +858,7 @@ def _source_info(
     )
     validation_rate = max(validation_rates) if validation_rates else None
     duration = _duration(container, stream, time_base, presentation_origin)
+    declared_duration = duration
     cfr_rate = _proven_cfr_rate(
         stream,
         duration,
@@ -636,14 +920,55 @@ def _source_info(
     color_space = _metadata_name(getattr(frame, "colorspace", None))
     color_primaries = _metadata_name(getattr(codec, "color_primaries", None))
     color_transfer = _metadata_name(getattr(codec, "color_trc", None))
-    _validate_frame_color(stream, frame)
+    profile = _validate_frame_color(stream, frame)
 
-    frames = int(stream.frames) if getattr(stream, "frames", 0) > 0 else None
+    declared_frame_count = int(getattr(stream, "frames", 0))
+    frames = declared_frame_count if declared_frame_count > 0 else None
     if frames is None and derived is not None:
         frames = derived.frame_count
+    peak_rate = derived.peak_rate if derived is not None else validation_rate
+    if peak_rate is None or peak_rate <= 0:
+        raise _source_error(
+            ErrorCode.SOURCE_FPS_UNSUPPORTED,
+            "source.probe.unknown-cadence",
+            "source cadence could not be proven",
+            "convert-source",
+        )
+    proof = SourceValidationProof(
+        source_revision=revision,
+        stream_index=int(getattr(stream, "index", 0)),
+        stream_start_time=(
+            int(stream.start_time) if stream.start_time is not None else None
+        ),
+        declared_duration=declared_duration,
+        declared_frame_count=declared_frame_count,
+        coded_width=coded_width,
+        coded_height=coded_height,
+        time_base=time_base,
+        presentation_origin=presentation_origin,
+        duration=duration,
+        average_rate=average_rate,
+        base_rate=base_rate,
+        guessed_rate=guessed_rate,
+        peak_rate=peak_rate,
+        frame_count=frames,
+        rotation=rotation,
+        pixel_aspect=pixel_aspect,
+        pixel_format=pixel_format,
+        codec_name=_codec_name(codec),
+        color_matrix=profile.matrix,
+        color_range=profile.color_range,
+        color_transfer=profile.transfer,
+        color_primaries=profile.primaries,
+        rgb_input=profile.rgb_input,
+        proof_version="source-proof-v1",
+        contract_digest="",
+    )
+    proof = replace(proof, contract_digest=proof.computed_digest())
     return SourceInfo(
         path=source,
         revision=revision,
+        validation_proof=proof,
         width=width,
         height=height,
         duration=duration,
@@ -651,7 +976,7 @@ def _source_info(
         average_rate=average_rate,
         base_rate=base_rate,
         guessed_rate=guessed_rate,
-        peak_rate=(derived.peak_rate if derived is not None else validation_rate),
+        peak_rate=peak_rate,
         frame_count=frames,
         rotation=rotation,
         pixel_aspect=pixel_aspect,
@@ -725,7 +1050,14 @@ def _display_dimensions(
     return square_width, square_height
 
 
-def _orientation(stream: Any, frame: Any, metadata_frame: Any) -> tuple[int, Fraction]:
+def _orientation(
+    stream: Any,
+    frame: Any,
+    metadata_frame: Any | None,
+    *,
+    expected_rotation: int | None = None,
+    expected_pixel_aspect: Fraction | None = None,
+) -> tuple[int, Fraction]:
     """Resolve frame > first-frame > stream > legacy orientation surfaces.
 
     Lower-precedence metadata may fill an absent value, but any two explicit
@@ -739,9 +1071,12 @@ def _orientation(stream: Any, frame: Any, metadata_frame: Any) -> tuple[int, Fra
             SimpleNamespace(side_data=getattr(stream, "side_data", ()))
         ),
         _rotation_metadata_candidate(getattr(stream, "metadata", {})),
+        expected_rotation,
     ]
     explicit_rotations = {value for value in rotations if value is not None}
     if len(explicit_rotations) > 1:
+        if expected_rotation is not None:
+            raise _proof_mismatch("decoded frame rotation differs from proof")
         raise _source_error(
             ErrorCode.SOURCE_CORRUPT,
             "source.orientation.conflict",
@@ -756,9 +1091,12 @@ def _orientation(stream: Any, frame: Any, metadata_frame: Any) -> tuple[int, Fra
         _fraction_or_none(getattr(metadata_frame, "sample_aspect_ratio", None)),
         _fraction_or_none(getattr(stream, "sample_aspect_ratio", None)),
         _fraction_or_none(getattr(codec, "sample_aspect_ratio", None)),
+        expected_pixel_aspect,
     ]
     explicit_aspects = {value for value in aspects if value is not None and value > 0}
     if len(explicit_aspects) > 1:
+        if expected_pixel_aspect is not None:
+            raise _proof_mismatch("decoded frame pixel aspect differs from proof")
         raise _source_error(
             ErrorCode.SOURCE_CORRUPT,
             "source.orientation.pixel-aspect-conflict",
@@ -864,7 +1202,7 @@ def _validate_sdr_8bit(frame: Any, codec: Any, pixel_format: str) -> None:
         )
 
 
-def _validate_frame_color(stream: Any, frame: Any) -> None:
+def _validate_frame_color(stream: Any, frame: Any) -> _ColorProfile:
     codec = stream.codec_context
     pixel_format = _pixel_format(frame, codec)
     _validate_sdr_8bit(frame, codec, pixel_format)
@@ -875,7 +1213,7 @@ def _validate_frame_color(stream: Any, frame: Any) -> None:
     }
     if side_data_names & _HDR_SIDE_DATA:
         raise _unsupported_color("HDR side data is unsupported")
-    _color_profile(stream, frame)
+    return _color_profile(stream, frame)
 
 
 @dataclass(frozen=True, slots=True)
@@ -885,6 +1223,28 @@ class _ColorProfile:
     transfer: int
     primaries: int
     rgb_input: bool
+
+
+def _profile_contract(profile: _ColorProfile) -> tuple[int, int, int, int, bool]:
+    return (
+        profile.matrix,
+        profile.color_range,
+        profile.transfer,
+        profile.primaries,
+        profile.rgb_input,
+    )
+
+
+def _proof_color_contract(
+    proof: SourceValidationProof,
+) -> tuple[int, int, int, int, bool]:
+    return (
+        proof.color_matrix,
+        proof.color_range,
+        proof.color_transfer,
+        proof.color_primaries,
+        proof.rgb_input,
+    )
 
 
 def _color_profile(stream: Any, frame: Any) -> _ColorProfile:
@@ -980,12 +1340,28 @@ def _pixel_format(frame: Any, codec: Any) -> str:
     return codec_format if isinstance(codec_format, str) else "unknown"
 
 
+def _codec_name(codec: Any) -> str:
+    codec_descriptor = getattr(codec, "codec", None)
+    name = getattr(codec_descriptor, "name", None)
+    if isinstance(name, str):
+        return name
+    fallback = getattr(codec, "name", None)
+    return fallback if isinstance(fallback, str) else "unknown"
+
+
 def _pixel_format_is_high_depth(name: str) -> bool:
     lowered = name.lower()
     return any(token in lowered for token in ("p9", "p10", "p12", "p14", "p16"))
 
 
-def _normalized_image(frame: Any, stream: Any, metadata_frame: Any) -> Image.Image:
+def _normalized_image(
+    frame: Any,
+    stream: Any,
+    metadata_frame: Any | None,
+    *,
+    expected_rotation: int | None = None,
+    expected_pixel_aspect: Fraction | None = None,
+) -> Image.Image:
     try:
         profile = _color_profile(stream, frame)
         _validate_frame_color(stream, frame)
@@ -1012,7 +1388,13 @@ def _normalized_image(frame: Any, stream: Any, metadata_frame: Any) -> Image.Ima
         image = converted.to_image().convert("RGBA")
         if profile.transfer in {1, 6}:
             image = _convert_bt709_transfer_to_srgb(image)
-        rotation, pixel_aspect = _orientation(stream, frame, metadata_frame)
+        rotation, pixel_aspect = _orientation(
+            stream,
+            frame,
+            metadata_frame,
+            expected_rotation=expected_rotation,
+            expected_pixel_aspect=expected_pixel_aspect,
+        )
         if pixel_aspect != 1:
             display_width = max(
                 1, _round_fraction(Fraction(image.width) * pixel_aspect)
@@ -1073,6 +1455,53 @@ def _fraction_or_none(value: object) -> Fraction | None:
     except (TypeError, ValueError, ZeroDivisionError):
         return None
     return result
+
+
+def _fraction_payload(value: Fraction) -> list[int]:
+    return [value.numerator, value.denominator]
+
+
+def _optional_fraction_payload(value: Fraction | None) -> list[int] | None:
+    return _fraction_payload(value) if value is not None else None
+
+
+def _strict_int(value: object) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise TypeError("expected integer")
+    return value
+
+
+def _payload_int(payload: Mapping[str, object], key: str) -> int:
+    return _strict_int(payload[key])
+
+
+def _optional_payload_int(payload: Mapping[str, object], key: str) -> int | None:
+    value = payload[key]
+    return None if value is None else _strict_int(value)
+
+
+def _payload_str(payload: Mapping[str, object], key: str) -> str:
+    value = payload[key]
+    if not isinstance(value, str):
+        raise TypeError("expected string")
+    return value
+
+
+def _payload_bool(payload: Mapping[str, object], key: str) -> bool:
+    value = payload[key]
+    if not isinstance(value, bool):
+        raise TypeError("expected boolean")
+    return value
+
+
+def _fraction_from_payload(value: object) -> Fraction:
+    if not isinstance(value, list) or len(value) != 2:
+        raise TypeError("expected rational pair")
+    return Fraction(_strict_int(value[0]), _strict_int(value[1]))
+
+
+def _optional_fraction_from_payload(value: object) -> Fraction | None:
+    return None if value is None else _fraction_from_payload(value)
 
 
 def _metadata_int(value: object) -> int | None:

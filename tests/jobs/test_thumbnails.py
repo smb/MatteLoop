@@ -7,6 +7,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from fractions import Fraction
 
+import av
 import pytest
 from PIL import Image
 from PySide6.QtCore import QSize, QSizeF
@@ -29,6 +30,28 @@ from rembggui.jobs.thumbnails import (
     generate_thumbnail,
 )
 from tests.fixtures.media_factory import make_video
+
+
+def _make_seekable_vfr_video(path):
+    with av.open(path, "w") as container:
+        stream = container.add_stream("libx264rgb", rate=20)
+        stream.width = 16
+        stream.height = 8
+        stream.pix_fmt = "rgb24"
+        stream.options = {"g": "10", "keyint_min": "10", "sc_threshold": "0"}
+        stream.codec_context.color_primaries = 1
+        stream.codec_context.color_trc = 13
+        stream.codec_context.colorspace = 0
+        stream.codec_context.color_range = 2
+        for index in range(120):
+            frame = av.VideoFrame.from_image(Image.new("RGB", (16, 8), (index, 0, 0)))
+            frame.pts = index + int(index >= 60)
+            frame.time_base = Fraction(1, 20)
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+    return path
 
 
 def test_thumbnail_worker_returns_only_target_scaled_qimage(tmp_path):
@@ -54,6 +77,92 @@ def test_thumbnail_worker_returns_only_target_scaled_qimage(tmp_path):
     assert result.image.size() == QSize(200, 120)
     assert result.image.width() < 320
     assert result.request == request
+
+
+def test_filmstrip_reuses_one_proof_and_each_thumbnail_decode_is_keyframe_local(
+    tmp_path, monkeypatch
+):
+    path = _make_seekable_vfr_video(tmp_path / "filmstrip.mkv")
+    import rembggui.jobs.source as source_module
+
+    real_open = source_module.av.open
+    real_derive = source_module._derive_timeline
+    decode_counts = []
+    validation_scans = 0
+
+    class CountingContainer:
+        def __init__(self, container):
+            self._container = container
+            self._count = 0
+            decode_counts.append(self)
+
+        def __getattr__(self, name):
+            return getattr(self._container, name)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            self._container.close()
+
+        def decode(self, stream):
+            for frame in self._container.decode(stream):
+                self._count += 1
+                yield frame
+
+    def counted_derive(*args, **kwargs):
+        nonlocal validation_scans
+        validation_scans += 1
+        return real_derive(*args, **kwargs)
+
+    monkeypatch.setattr(
+        source_module.av,
+        "open",
+        lambda *args, **kwargs: CountingContainer(real_open(*args, **kwargs)),
+    )
+    monkeypatch.setattr(source_module, "_derive_timeline", counted_derive)
+
+    info = probe_source(path)
+    mismatched_revision = SourceRevision(
+        device=info.revision.device,
+        inode=info.revision.inode,
+        size=info.revision.size,
+        mtime_ns=info.revision.mtime_ns,
+        ctime_ns=info.revision.ctime_ns + 1,
+    )
+    with pytest.raises(AppError) as mismatch_error:
+        ThumbnailRequest(
+            "filmstrip",
+            Fraction(0),
+            QSize(10, 5),
+            1.0,
+            0,
+            source_fingerprint="a" * 64,
+            source_revision=mismatched_revision,
+            validation_proof=info.validation_proof,
+        )
+    assert mismatch_error.value.code is ErrorCode.INVALID_THUMBNAIL
+
+    for generation, timestamp in enumerate(
+        (Fraction(81, 20), Fraction(101, 20), Fraction(111, 20)),
+        start=1,
+    ):
+        request = ThumbnailRequest(
+            "filmstrip",
+            timestamp,
+            QSize(10, 5),
+            1.0,
+            generation,
+            source_fingerprint="a" * 64,
+            source_revision=info.revision,
+            validation_proof=info.validation_proof,
+        )
+        generate_thumbnail(path, request)
+
+    assert validation_scans == 1
+    assert len(decode_counts) == 4
+    assert decode_counts[0]._count >= 120
+    assert all(container._count < 30 for container in decode_counts[1:])
 
 
 def test_thumbnail_request_copies_and_normalizes_logical_size():

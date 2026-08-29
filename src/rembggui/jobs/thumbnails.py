@@ -14,7 +14,7 @@ from PySide6.QtCore import QSize, QSizeF
 from PySide6.QtGui import QImage
 
 from rembggui.core.errors import AppError, ErrorCode
-from rembggui.jobs.source import SourceRevision, decode_frame
+from rembggui.jobs.source import SourceRevision, SourceValidationProof, decode_frame
 
 MIN_FILMSTRIP_SAMPLES = 12
 MAX_FILMSTRIP_SAMPLES = 48
@@ -34,6 +34,7 @@ class ThumbnailRequest:
     generation: int
     source_fingerprint: str
     source_revision: SourceRevision
+    validation_proof: SourceValidationProof | None
     physical_dimensions: tuple[int, int]
 
     def __init__(
@@ -46,6 +47,7 @@ class ThumbnailRequest:
         *,
         source_fingerprint: str,
         source_revision: SourceRevision,
+        validation_proof: SourceValidationProof | None = None,
     ) -> None:
         width, height = _logical_dimensions(logical_size)
         normalized_dpr = _finite_number(dpr, "dpr")
@@ -69,6 +71,13 @@ class ThumbnailRequest:
             raise _thumbnail_error("source_fingerprint must be a non-empty string")
         if not isinstance(source_revision, SourceRevision):
             raise _thumbnail_error("source_revision must be a SourceRevision")
+        if validation_proof is not None and (
+            not isinstance(validation_proof, SourceValidationProof)
+            or validation_proof.source_revision != source_revision
+        ):
+            raise _thumbnail_error(
+                "validation_proof must match the thumbnail source revision"
+            )
         physical_dimensions = (
             _physical_dimension(width, normalized_dpr),
             _physical_dimension(height, normalized_dpr),
@@ -88,6 +97,7 @@ class ThumbnailRequest:
         object.__setattr__(self, "generation", generation)
         object.__setattr__(self, "source_fingerprint", source_fingerprint)
         object.__setattr__(self, "source_revision", source_revision)
+        object.__setattr__(self, "validation_proof", validation_proof)
         object.__setattr__(self, "physical_dimensions", physical_dimensions)
 
     @property
@@ -129,6 +139,7 @@ def generate_thumbnail(
         request_id=request.generation,
         is_cancelled=is_cancelled,
         expected_revision=request.source_revision,
+        validation_proof=request.validation_proof,
     )
     if decoded.source_revision != request.source_revision:
         raise AppError(
