@@ -206,6 +206,15 @@ requested access and share masks.
 4 failed, 88 deselected in 0.23s
 ```
 
+That recorded RED preceded the mechanical constructor cleanup: each new test
+still supplied the old required `reject_descendant_rebinds` argument, so all four
+reached their share assertions and failed with `DID NOT RAISE`. The final tests
+omit that argument because the obsolete path-oracle option was then removed.
+Consequently, copying the final test text verbatim onto base `042acf7` first stops
+at the old constructor's `TypeError`; retaining that required argument (or making
+only the equivalent signature adapter) reproduces the semantic four-failure RED
+above without changing the old fake's behavior.
+
 The corrected fake keys active opens by the existing directory's filesystem
 identity and applies both Windows compatibility conditions: every existing share
 must allow the new requested access, and the new share must allow every existing
@@ -219,6 +228,29 @@ the failed stage, and preserve the previous valid cut.
 .venv/bin/pytest -q tests/jobs/test_workspace.py -k \
   'windows_share_fake or windows_promotion_reuses_exclusive or windows_journal_failure_cleans_stage'
 6 passed, 86 deselected in 0.23s
+```
+
+A fifth meta-test closes the remaining identity-evidence gap. It opens the same
+real child directory through its direct path and through the lexically distinct
+`child / ".." / child.name`, first confirms that the two paths differ while their
+filesystem identities match, and exercises both incompatible share directions.
+With the fake temporarily mutated to key open records by `str(path)`, the first
+alias conflict was missed:
+
+```text
+.venv/bin/pytest -q tests/jobs/test_workspace.py -k \
+  'keys_lexical_aliases_by_directory_identity'
+1 failed, 92 deselected in 0.20s
+Failed: DID NOT RAISE <class 'OSError'>
+```
+
+Restoring the `(st_dev, st_ino)` namespace-object key makes that same test pass;
+the full sharing, promotion, and journal subset remains green:
+
+```text
+.venv/bin/pytest -q tests/jobs/test_workspace.py -k \
+  'windows_share_fake or windows_promotion_reuses_exclusive or windows_journal_failure_cleans_stage'
+7 passed, 86 deselected in 0.20s
 ```
 
 ## Architecture and safety decisions
@@ -345,8 +377,8 @@ not replace its code, including `JOB_CANCELLED`.
 
 ## Verification
 
-- Focused Task 11 plus native handle suite: `125 passed in 1.27s`.
-- Permitted full suite: `815 passed in 43.85s`.
+- Focused Task 11 plus native handle suite: `126 passed in 1.23s`.
+- Permitted full suite: `816 passed in 43.55s`.
 - `.venv/bin/ruff check .` — passed.
 - `.venv/bin/mypy src` — passed for 28 source files.
 - Ruff format check over Task 11 Python files — passed.

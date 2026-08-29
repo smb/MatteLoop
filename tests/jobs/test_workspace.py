@@ -378,6 +378,53 @@ def test_windows_share_fake_checks_new_share_against_existing_write(
         )
 
 
+def test_windows_share_fake_keys_lexical_aliases_by_directory_identity(
+    tmp_path: Path,
+) -> None:
+    cuts_root = tmp_path / "cuts"
+    child = cuts_root / "candidate"
+    child.mkdir(parents=True)
+    alias = child / ".." / child.name
+    direct_info = child.stat()
+    alias_info = alias.stat()
+    assert child != alias
+    assert (direct_info.st_dev, direct_info.st_ino) == (
+        alias_info.st_dev,
+        alias_info.st_ino,
+    )
+    api = _ExclusiveWindowsCutsApi(cuts_root)
+
+    read_handle = api.open_directory(
+        child,
+        desired_access=0x80000000,
+        share_mode=0x00000001,
+        flags=0,
+    )
+    with pytest.raises(OSError, match="sharing violation"):
+        api.open_directory(
+            alias,
+            desired_access=0x80000000 | 0x40000000,
+            share_mode=0x00000001 | 0x00000002,
+            flags=0,
+        )
+    api.close_handle(read_handle)
+
+    write_handle = api.open_directory(
+        child,
+        desired_access=0x80000000 | 0x40000000,
+        share_mode=0x00000001 | 0x00000002,
+        flags=0,
+    )
+    with pytest.raises(OSError, match="sharing violation"):
+        api.open_directory(
+            alias,
+            desired_access=0x80000000,
+            share_mode=0x00000001,
+            flags=0,
+        )
+    api.close_handle(write_handle)
+
+
 def test_windows_share_fake_distinguishes_ancestor_from_same_child_object(
     tmp_path: Path,
 ) -> None:
