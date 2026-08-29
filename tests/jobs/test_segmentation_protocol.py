@@ -1634,6 +1634,85 @@ def test_production_loop_output_buffer_failure_acks_late_cancel_without_stale_st
         parent.close()
 
 
+class _CustomBytes(bytes):
+    pass
+
+
+@pytest.mark.parametrize(
+    "invalid_payload",
+    [
+        pytest.param(b"\x11" * 15, id="short"),
+        pytest.param(b"\x22" * 17, id="long"),
+        pytest.param(bytearray(b"\x33" * 16), id="non-bytes"),
+        pytest.param(_CustomBytes(b"\x44" * 16), id="bytes-subclass"),
+    ],
+)
+def test_production_loop_rejects_invalid_tobytes_payload_before_output_write(
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_payload: object,
+) -> None:
+    class OutputSlot:
+        name = "output-payload-slot"
+        size = 32
+        instances: list[OutputSlot] = []
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.storage = memoryview(bytearray(b"\xa5" * self.size))
+            type(self).instances.append(self)
+
+        @property
+        def buf(self) -> memoryview:
+            return self.storage
+
+        def close(self) -> None:
+            return
+
+    class InvalidPayloadArray(np.ndarray):
+        def tobytes(self, order: str = "C") -> bytes:
+            return invalid_payload  # type: ignore[return-value]
+
+    inference_calls = 0
+
+    def inference(frame: np.ndarray, _session: object) -> np.ndarray:
+        nonlocal inference_calls
+        inference_calls += 1
+        result = np.zeros(frame.shape[:2] + (4,), dtype=np.uint8)
+        if inference_calls == 1:
+            return result.view(InvalidPayloadArray)
+        return result
+
+    monkeypatch.setattr(segmentation_host_module, "SharedMemory", OutputSlot)
+    parent, thread = _start_production_loop(inference)
+    wire_slot = SharedFrame("output-payload-slot", (2, 2, 3), "uint8", 12)
+    try:
+        parent.send_bytes(
+            encode_parent_message(
+                SegmentRequest(PROTOCOL_VERSION, "j1", "r1", wire_slot)
+            )
+        )
+        failure = _assert_failure_then_late_cancel_ack(parent, thread)
+        assert failure.job_id == "j1"
+        assert failure.request_id == "r1"
+        assert failure.error["code"] == ErrorCode.SEGMENTATION_PROTOCOL_MISMATCH
+        assert bytes(OutputSlot.instances[0].storage) == b"\xa5" * 32
+
+        parent.send_bytes(
+            encode_parent_message(
+                SegmentRequest(PROTOCOL_VERSION, "j1", "r2", wire_slot)
+            )
+        )
+        assert parent.poll(1)
+        response = decode_child_message(parent.recv_bytes(MAX_PROTOCOL_MESSAGE_BYTES))
+        assert response == SegmentResponse(
+            PROTOCOL_VERSION, "j1", "r2", (2, 2, 4), "uint8", 16
+        )
+        parent.send_bytes(encode_parent_message(Shutdown(PROTOCOL_VERSION)))
+        thread.join(timeout=1)
+        assert not thread.is_alive()
+    finally:
+        parent.close()
+
+
 def test_production_loop_poll_transport_failure_does_not_escape(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

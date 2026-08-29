@@ -962,13 +962,14 @@ def _serve_segmentation_connection(
             if shutdown:
                 return
             expected_shape = (source.shape[0], source.shape[1], 4)
+            expected_byte_length = source.shape[0] * source.shape[1] * 4
             if (
                 not isinstance(result, np.ndarray)
                 or result.dtype != np.dtype(np.uint8)
                 or result.shape != expected_shape
                 or not result.flags.c_contiguous
-                or result.nbytes != source.shape[0] * source.shape[1] * 4
-                or result.nbytes > slot.size
+                or result.nbytes != expected_byte_length
+                or expected_byte_length > slot.size
             ):
                 if not _send_child(
                     connection, _failure(message, "inference returned invalid RGBA")
@@ -976,11 +977,18 @@ def _serve_segmentation_connection(
                     return
                 continue
             try:
+                output_bytes = result.tobytes(order="C")
+                if (
+                    type(output_bytes) is not bytes
+                    or len(output_bytes) != expected_byte_length
+                    or len(output_bytes) != result.nbytes
+                    or len(output_bytes) > slot.size
+                ):
+                    raise ValueError("inference returned invalid output bytes")
                 slot_buffer = slot.buf
                 if slot_buffer is None:
                     raise BufferError("shared-memory output buffer is unavailable")
-                output_bytes = result.tobytes(order="C")
-                slot_buffer[: len(output_bytes)] = output_bytes
+                slot_buffer[:expected_byte_length] = output_bytes
             except BaseException:
                 if not _send_child(
                     connection,
