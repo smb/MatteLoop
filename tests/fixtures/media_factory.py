@@ -62,8 +62,10 @@ def make_video(
     if any(frame.size != (width, height) for frame in frames):
         raise ValueError("all frames must have the same dimensions")
 
-    timestamps = tuple(pts) if pts is not None else tuple(
-        Fraction(index, 1) / fps for index in range(len(frames))
+    timestamps = (
+        tuple(pts)
+        if pts is not None
+        else tuple(Fraction(index, 1) / fps for index in range(len(frames)))
     )
     if any(timestamp < 0 for timestamp in timestamps):
         raise ValueError("timestamps must be non-negative")
@@ -81,6 +83,12 @@ def make_video(
         stream.height = height
         stream.pix_fmt = "yuv420p"
         stream.codec_context.time_base = time_base
+        # Task 7 rejects untagged colorimetry rather than pretending it is
+        # sRGB. Synthetic sources therefore declare their authored contract.
+        stream.codec_context.color_primaries = 1  # BT.709
+        stream.codec_context.color_trc = 13  # IEC 61966-2-1 sRGB
+        stream.codec_context.colorspace = 1  # BT.709 YUV matrix
+        stream.codec_context.color_range = 1  # MPEG/limited YUV range
 
         for image, timestamp in zip(frames, timestamps):
             frame = av.VideoFrame.from_image(image.convert("RGB"))

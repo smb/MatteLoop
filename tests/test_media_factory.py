@@ -21,10 +21,17 @@ def test_make_video_writes_tiny_deterministic_video(tmp_path):
         stream = container.streams.video[0]
         frames = list(container.decode(stream))
         rate = stream.average_rate
+        color_contract = (
+            int(stream.codec_context.color_primaries),
+            int(stream.codec_context.color_trc),
+            int(stream.codec_context.colorspace),
+            int(stream.codec_context.color_range),
+        )
 
     assert path.exists()
     assert len(frames) == 2
     assert rate == Fraction(2)
+    assert color_contract == (1, 13, 1, 1)
 
 
 def test_make_video_round_trips_rotation_and_fractional_timestamps(tmp_path):

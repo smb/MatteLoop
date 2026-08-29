@@ -11,6 +11,7 @@ from PIL import Image
 
 from rembggui.core.errors import AppError, ErrorCode
 from rembggui.jobs.source import (
+    MAX_TIMELINE_DECODED_FRAMES,
     DecodedFrame,
     SourceRevision,
     _decodable_video_stream,
@@ -21,6 +22,7 @@ from rembggui.jobs.source import (
     _normalized_image,
     _rotation_from_display_matrix,
     _rotation_from_metadata,
+    _source_info,
     decode_frame,
     probe_source,
 )
@@ -33,6 +35,13 @@ def _solid_frames() -> list[Image.Image]:
         Image.new("RGB", (16, 8), "lime"),
         Image.new("RGB", (16, 8), "blue"),
     ]
+
+
+def _declare_srgb(stream, *, rgb: bool) -> None:
+    stream.codec_context.color_primaries = 1
+    stream.codec_context.color_trc = 13
+    stream.codec_context.colorspace = 0 if rgb else 1
+    stream.codec_context.color_range = 2 if rgb else 1
 
 
 def _make_lossless_oriented_video(path):
@@ -50,6 +59,7 @@ def _make_lossless_oriented_video(path):
         stream.height = 8
         stream.pix_fmt = "rgb24"
         stream.codec_context.time_base = Fraction(1, 20)
+        _declare_srgb(stream, rgb=True)
         stream.sample_aspect_ratio = Fraction(2)
         stream.codec_context.sample_aspect_ratio = Fraction(2)
         stream.metadata["rotate"] = "90"
@@ -71,6 +81,7 @@ def _make_seekable_video(path):
         stream.height = 8
         stream.pix_fmt = "rgb24"
         stream.options = {"g": "10", "keyint_min": "10", "sc_threshold": "0"}
+        _declare_srgb(stream, rgb=True)
         for index in range(120):
             image = Image.new("RGB", (16, 8), (index, 0, 0))
             frame = av.VideoFrame.from_image(image)
@@ -90,6 +101,7 @@ def _make_nonzero_start_video(path):
         stream.height = 8
         stream.pix_fmt = "rgb24"
         stream.codec_context.time_base = Fraction(1)
+        _declare_srgb(stream, rgb=True)
         for pts, color in zip((10, 11, 12), ("red", "lime", "blue")):
             frame = av.VideoFrame.from_image(Image.new("RGB", (16, 8), color))
             frame.pts = pts
@@ -120,6 +132,7 @@ def test_probe_reports_exact_vfr_stream_metadata_and_ignores_fixture_sidecar(
     assert info.duration == Fraction(1, 5)
     assert info.time_base == Fraction(1, 10240)
     assert info.average_rate == Fraction(15)
+    assert info.peak_rate == Fraction(20)
     assert info.frame_count == 3
     assert info.pixel_aspect == Fraction(1)
 
@@ -172,7 +185,7 @@ def test_nonzero_raw_pts_are_normalized_to_presentation_origin(tmp_path):
     first = decode_frame(path, Fraction(0), request_id=1)
     boundary = decode_frame(path, Fraction(1), request_id=2)
 
-    assert info.duration == Fraction(3)
+    assert info.duration == Fraction(13)
     assert first.actual_pts == Fraction(0)
     assert boundary.actual_pts == Fraction(1)
     assert first.image.getpixel((0, 0)) == (255, 0, 0, 255)
@@ -200,11 +213,15 @@ def test_negative_raw_pts_are_selected_on_nonnegative_presentation_timeline():
     assert Fraction(selected.pts) * selected.time_base - Fraction(-2) == Fraction(1)
 
 
-def test_negative_raw_origin_is_removed_from_absolute_end_duration():
+def test_duration_metadata_is_a_span_not_an_absolute_end_timestamp():
     stream = SimpleNamespace(duration=1, start_time=None)
     container = SimpleNamespace(duration=None)
 
-    assert _duration(container, stream, Fraction(1), Fraction(-2)) == Fraction(3)
+    assert _duration(container, stream, Fraction(1), Fraction(-2)) == Fraction(1)
+
+    stream.duration = None
+    container.duration = 2 * int(av.time_base)
+    assert _duration(container, stream, Fraction(1), Fraction(10)) == Fraction(2)
 
 
 def test_decode_rejects_stream_with_only_negative_preroll_frames():
@@ -247,6 +264,159 @@ def test_missing_duration_and_rate_are_derived_from_exact_frame_pts():
     assert derived.duration == Fraction(1, 2)
     assert derived.peak_rate == Fraction(10)
     assert derived.frame_count == 3
+
+
+def test_vfr_peak_rate_is_scanned_even_with_average_and_guessed_rates(tmp_path):
+    frames = [_yuv_frame(81, 90, 240, matrix=1, color_range=1) for _ in range(3)]
+    for frame, pts in zip(frames, (0, 1, 10)):
+        frame.pts = pts
+        frame.time_base = Fraction(1, 100)
+    stream = _color_stream(matrix=1)
+    stream.width = 2
+    stream.height = 2
+    stream.time_base = Fraction(1, 100)
+    stream.start_time = 0
+    stream.duration = 20
+    stream.average_rate = Fraction(30)
+    stream.guessed_rate = Fraction(30)
+    stream.base_rate = Fraction(100)
+    stream.frames = 3
+
+    class Container:
+        duration = None
+
+        def seek(self, *args, **kwargs):
+            return None
+
+        def decode(self, selected_stream):
+            assert selected_stream is stream
+            yield from frames
+
+    with pytest.raises(AppError) as error:
+        _source_info(
+            tmp_path / "vfr.mp4",
+            SourceRevision(1, 2, 3, 4, 5),
+            Container(),
+            stream,
+            frames[0],
+        )
+
+    assert error.value.code is ErrorCode.SOURCE_FPS_UNSUPPORTED
+
+
+def test_exact_consistent_cfr_metadata_is_the_only_scan_free_path(tmp_path):
+    frame = _yuv_frame(81, 90, 240, matrix=1, color_range=1)
+    frame.pts = 0
+    frame.time_base = Fraction(1, 2)
+    stream = _color_stream(matrix=1)
+    stream.width = 2
+    stream.height = 2
+    stream.time_base = Fraction(1, 2)
+    stream.start_time = 0
+    stream.duration = 3
+    stream.average_rate = Fraction(2)
+    stream.guessed_rate = Fraction(2)
+    stream.base_rate = Fraction(2)
+    stream.frames = 3
+
+    class Container:
+        duration = None
+
+        def decode(self, selected_stream):
+            raise AssertionError("metadata-proven CFR must not scan")
+
+    info = _source_info(
+        tmp_path / "cfr.mp4",
+        SourceRevision(1, 2, 3, 4, 5),
+        Container(),
+        stream,
+        frame,
+    )
+
+    assert info.duration == Fraction(3, 2)
+    assert info.peak_rate == Fraction(2)
+
+
+@pytest.mark.parametrize("frame_pts", [(0, 1, 1), (0, 2, 1)])
+def test_timeline_rejects_duplicate_or_decreasing_pts_as_unproven(frame_pts):
+    frames = []
+    for pts in frame_pts:
+        frame = av.VideoFrame.from_image(Image.new("RGB", (2, 2), "red"))
+        frame.pts = pts
+        frame.time_base = Fraction(1, 10)
+        frames.append(frame)
+    stream = _color_stream(matrix=0)
+    stream.time_base = Fraction(1, 10)
+
+    class Container:
+        def seek(self, *args, **kwargs):
+            return None
+
+        def decode(self, selected_stream):
+            yield from frames
+
+    with pytest.raises(AppError) as error:
+        _derive_timeline(Container(), stream, Fraction(0), Fraction(10))
+
+    assert error.value.code is ErrorCode.SOURCE_CORRUPT
+
+
+def test_timeline_fallback_cancels_between_decoded_frames():
+    frames = []
+    for pts in range(5):
+        frame = av.VideoFrame.from_image(Image.new("RGB", (2, 2), "red"))
+        frame.pts = pts
+        frame.time_base = Fraction(1, 10)
+        frames.append(frame)
+    stream = _color_stream(matrix=0)
+    stream.time_base = Fraction(1, 10)
+    checks = 0
+
+    class Container:
+        def seek(self, *args, **kwargs):
+            return None
+
+        def decode(self, selected_stream):
+            yield from frames
+
+    def cancelled():
+        nonlocal checks
+        checks += 1
+        return checks >= 3
+
+    with pytest.raises(AppError) as error:
+        _derive_timeline(
+            Container(),
+            stream,
+            Fraction(0),
+            Fraction(10),
+            is_cancelled=cancelled,
+        )
+
+    assert error.value.code is ErrorCode.JOB_CANCELLED
+    assert checks == 3
+
+
+def test_timeline_bound_counts_frames_without_pts(monkeypatch):
+    import rembggui.jobs.source as source_module
+
+    stream = _color_stream(matrix=0)
+    stream.time_base = Fraction(1, 60)
+
+    class Container:
+        def seek(self, *args, **kwargs):
+            return None
+
+        def decode(self, selected_stream):
+            for pts in range(MAX_TIMELINE_DECODED_FRAMES + 1):
+                yield SimpleNamespace(pts=pts, time_base=Fraction(1, 60))
+
+    monkeypatch.setattr(source_module, "_validate_frame_color", lambda *args: None)
+
+    with pytest.raises(AppError) as error:
+        _derive_timeline(Container(), stream, Fraction(0), Fraction(60))
+
+    assert error.value.code is ErrorCode.SOURCE_DURATION_UNSUPPORTED
 
 
 def test_missing_single_frame_cadence_is_rejected_as_unproven():
@@ -462,7 +632,7 @@ def test_late_decode_seeks_to_a_nearby_keyframe_instead_of_retaining_whole_video
     import rembggui.jobs.source as source_module
 
     real_open = source_module.av.open
-    yielded = 0
+    yielded_since_seek = 0
 
     class CountingContainer:
         def __init__(self, container):
@@ -478,10 +648,15 @@ def test_late_decode_seeks_to_a_nearby_keyframe_instead_of_retaining_whole_video
             self._container.close()
 
         def decode(self, stream):
-            nonlocal yielded
+            nonlocal yielded_since_seek
             for frame in self._container.decode(stream):
-                yielded += 1
+                yielded_since_seek += 1
                 yield frame
+
+        def seek(self, *args, **kwargs):
+            nonlocal yielded_since_seek
+            yielded_since_seek = 0
+            return self._container.seek(*args, **kwargs)
 
     monkeypatch.setattr(
         source_module.av,
@@ -492,7 +667,7 @@ def test_late_decode_seeks_to_a_nearby_keyframe_instead_of_retaining_whole_video
     decoded = decode_frame(path, Fraction(101, 20), request_id=22)
 
     assert decoded.actual_pts == Fraction(101, 20)
-    assert yielded < 30
+    assert yielded_since_seek < 30
 
 
 def test_rotation_metadata_parser_accepts_only_quarter_turns():
@@ -631,6 +806,34 @@ def test_per_frame_p3_or_other_wide_gamut_metadata_is_rejected(primaries):
             _color_stream(matrix=0, primaries=primaries),
             FrameMetadata(),
         )
+    assert error.value.code is ErrorCode.SOURCE_HDR_UNSUPPORTED
+
+
+@pytest.mark.parametrize(
+    ("primaries", "transfer", "matrix", "color_range"),
+    [
+        (2, 13, 1, 1),
+        (1, 2, 1, 1),
+        (5, 13, 5, 1),
+        (6, 13, 6, 1),
+        (1, 13, 2, 1),
+        (1, 13, 1, 0),
+    ],
+)
+def test_unproven_srgb_color_metadata_is_rejected(
+    primaries, transfer, matrix, color_range
+):
+    frame = _yuv_frame(81, 90, 240, matrix=matrix, color_range=color_range)
+    stream = _color_stream(
+        matrix=matrix,
+        transfer=transfer,
+        primaries=primaries,
+    )
+    stream.codec_context.color_range = color_range
+
+    with pytest.raises(AppError) as error:
+        _normalized_image(frame, stream, frame)
+
     assert error.value.code is ErrorCode.SOURCE_HDR_UNSUPPORTED
 
 

@@ -25,6 +25,7 @@ MAX_SOURCE_WIDTH = 3840
 MAX_SOURCE_HEIGHT = 2160
 MAX_SOURCE_FPS = Fraction(60)
 MAX_SOURCE_DURATION = Fraction(10 * 60)
+MAX_TIMELINE_DECODED_FRAMES = 36_002
 SUPPORTED_CONTAINER_SUFFIXES = frozenset({".mp4", ".mov", ".webm", ".mkv"})
 
 _HDR_SIDE_DATA = {
@@ -149,7 +150,12 @@ def decode_frame(
             _validate_container_format(source, container)
             stream, metadata_frame = _decodable_video_stream(container, is_cancelled)
             source_info = _source_info(
-                source, revision, container, stream, metadata_frame
+                source,
+                revision,
+                container,
+                stream,
+                metadata_frame,
+                is_cancelled,
             )
             presentation_origin = _presentation_origin(
                 stream, metadata_frame, source_info.time_base
@@ -446,8 +452,10 @@ def _derive_timeline(
     stream: Any,
     presentation_origin: Fraction,
     nominal_rate: Fraction | None,
+    is_cancelled: CancelCheck | None = None,
 ) -> _DerivedTimeline:
     """Boundedly prove duration and maximum cadence from exact decoded PTS."""
+    _raise_if_cancelled(is_cancelled)
     time_base = Fraction(stream.time_base)
     offset = (
         presentation_origin.numerator
@@ -463,30 +471,38 @@ def _derive_timeline(
             f"could not derive missing timeline metadata: {error}",
             "convert-source",
         ) from error
+    _raise_if_cancelled(is_cancelled)
     timestamps: list[Fraction] = []
+    decoded_count = 0
     for frame in _decoded_frames(container, stream):
-        _validate_frame_color(stream, frame)
-        if frame.pts is None or frame.time_base is None:
-            continue
-        timestamp = _frame_timestamp(frame) - presentation_origin
-        if timestamp < 0:
-            continue
-        if timestamps and timestamp < timestamps[-1]:
-            raise _source_error(
-                ErrorCode.SOURCE_CORRUPT,
-                "source.probe.nonmonotonic-pts",
-                "presentation timestamps are not monotonic",
-                "convert-source",
-            )
-        if not timestamps or timestamp > timestamps[-1]:
-            timestamps.append(timestamp)
-        if len(timestamps) > 36_002:
+        _raise_if_cancelled(is_cancelled)
+        decoded_count += 1
+        if decoded_count > MAX_TIMELINE_DECODED_FRAMES:
             raise _source_error(
                 ErrorCode.SOURCE_DURATION_UNSUPPORTED,
                 "source.probe.unbounded-timeline",
-                "timeline metadata could not be proven within the V1 envelope",
+                "timeline exceeds the bounded decoded-frame proof budget",
                 "trim-or-convert-source",
             )
+        _validate_frame_color(stream, frame)
+        if frame.pts is None or frame.time_base is None:
+            raise _source_error(
+                ErrorCode.SOURCE_CORRUPT,
+                "source.probe.missing-pts",
+                "decoded frame has no provable presentation timestamp",
+                "convert-source",
+            )
+        timestamp = _frame_timestamp(frame) - presentation_origin
+        if timestamp < 0:
+            continue
+        if timestamps and timestamp <= timestamps[-1]:
+            raise _source_error(
+                ErrorCode.SOURCE_CORRUPT,
+                "source.probe.nonmonotonic-pts",
+                "presentation timestamps are duplicate or non-increasing",
+                "convert-source",
+            )
+        timestamps.append(timestamp)
         if timestamp > MAX_SOURCE_DURATION:
             raise _source_error(
                 ErrorCode.SOURCE_DURATION_UNSUPPORTED,
@@ -531,6 +547,7 @@ def _source_info(
     container: Any,
     stream: Any,
     frame: Any,
+    is_cancelled: CancelCheck | None = None,
 ) -> SourceInfo:
     coded_width = int(stream.width)
     coded_height = int(stream.height)
@@ -558,14 +575,27 @@ def _source_info(
     )
     validation_rate = max(validation_rates) if validation_rates else None
     duration = _duration(container, stream, time_base, presentation_origin)
+    cfr_rate = _proven_cfr_rate(
+        stream,
+        duration,
+        average_rate,
+        base_rate,
+        guessed_rate,
+    )
     derived: _DerivedTimeline | None = None
-    if duration <= 0 or validation_rate is None or validation_rate <= 0:
+    if cfr_rate is None:
         derived = _derive_timeline(
-            container, stream, presentation_origin, validation_rate
+            container,
+            stream,
+            presentation_origin,
+            validation_rate,
+            is_cancelled,
         )
         if duration <= 0:
             duration = derived.duration
         validation_rate = max(validation_rate or Fraction(0), derived.peak_rate)
+    else:
+        validation_rate = max(validation_rate or Fraction(0), cfr_rate)
     if duration <= 0:
         raise _source_error(
             ErrorCode.SOURCE_ZERO_DURATION,
@@ -642,16 +672,34 @@ def _duration(
     presentation_origin: Fraction,
 ) -> Fraction:
     if stream.duration is not None:
-        duration = Fraction(stream.duration) * time_base
-        if stream.start_time is None:
-            duration -= presentation_origin
-        return duration
+        return Fraction(stream.duration) * time_base
     if container.duration is not None:
-        duration = Fraction(container.duration, int(av.time_base))
-        if stream.start_time is None:
-            duration -= presentation_origin
-        return duration
+        return Fraction(container.duration, int(av.time_base))
     return Fraction(0)
+
+
+def _proven_cfr_rate(
+    stream: Any,
+    duration: Fraction,
+    average_rate: Fraction | None,
+    base_rate: Fraction | None,
+    guessed_rate: Fraction | None,
+) -> Fraction | None:
+    """Return a metadata-proven CFR rate, else require an exact PTS scan."""
+    rates = (average_rate, base_rate, guessed_rate)
+    if (
+        getattr(stream, "duration", None) is None
+        or duration <= 0
+        or any(rate is None or rate <= 0 for rate in rates)
+    ):
+        return None
+    rate = average_rate
+    if rate is None or any(candidate != rate for candidate in rates):
+        return None
+    frame_count = int(getattr(stream, "frames", 0))
+    if frame_count <= 0 or Fraction(frame_count, rate) != duration:
+        return None
+    return rate
 
 
 def _presentation_origin(stream: Any, frame: Any, time_base: Fraction) -> Fraction:
@@ -867,11 +915,11 @@ def _color_profile(stream: Any, frame: Any) -> _ColorProfile:
         getattr(codec, "color_range", None),
         unspecified=0,
     )
-    if primaries in {9, 11, 12, 22}:
-        raise _unsupported_color("P3, BT.2020, and other wide-gamut primaries")
-    if primaries not in {1, 2, 5, 6}:
-        raise _unsupported_color(f"unsupported color primaries {primaries}")
-    if transfer not in {1, 2, 6, 13}:
+    if primaries != 1:
+        raise _unsupported_color(
+            f"color primaries {primaries} cannot be proven as BT.709/sRGB"
+        )
+    if transfer not in {1, 6, 13}:
         raise _unsupported_color(f"unsupported transfer characteristic {transfer}")
     if matrix not in {0, 1, 2, 5, 6}:
         raise _unsupported_color(f"unsupported YUV matrix {matrix}")
@@ -879,12 +927,16 @@ def _color_profile(stream: Any, frame: Any) -> _ColorProfile:
         raise _unsupported_color(f"unsupported color range {color_range}")
     if rgb_input and matrix not in {0, 2}:
         raise _unsupported_color("RGB input declares a YUV matrix")
+    if not rgb_input and matrix == 2:
+        raise _unsupported_color("YUV input has no declared conversion matrix")
     if not rgb_input and matrix == 0:
         raise _unsupported_color("YUV input declares the RGB identity matrix")
     if matrix == 2:
-        matrix = 1 if int(getattr(frame, "height", 0)) >= 720 else 5
+        matrix = 0
     if color_range == 0:
-        color_range = 2 if rgb_input else 1
+        if not rgb_input:
+            raise _unsupported_color("YUV input has no declared color range")
+        color_range = 2
     return _ColorProfile(matrix, color_range, transfer, primaries, rgb_input)
 
 
