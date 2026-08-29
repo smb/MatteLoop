@@ -1,0 +1,94 @@
+{
+  "name": "Unsigned native packages",
+  "on": {
+    "workflow_dispatch": {}
+  },
+  "permissions": {
+    "contents": "read"
+  },
+  "jobs": {
+    "native-package": {
+      "name": "${{ matrix.target }}",
+      "permissions": {
+        "contents": "read"
+      },
+      "runs-on": "${{ matrix.os }}",
+      "strategy": {
+        "fail-fast": false,
+        "matrix": {
+          "include": [
+            {
+              "target": "windows-2022-x64",
+              "os": "windows-2022",
+              "arch": "x64"
+            },
+            {
+              "target": "macos-15-intel-x64",
+              "os": "macos-15-intel",
+              "arch": "x64"
+            },
+            {
+              "target": "macos-15-arm64",
+              "os": "macos-15",
+              "arch": "arm64"
+            },
+            {
+              "target": "ubuntu-22.04-x64",
+              "os": "ubuntu-22.04",
+              "arch": "x64"
+            }
+          ]
+        }
+      },
+      "steps": [
+        {
+          "name": "Checkout",
+          "uses": "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
+        },
+        {
+          "name": "Install uv and Python",
+          "id": "setup-uv",
+          "uses": "astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9",
+          "with": {
+            "enable-cache": false,
+            "python-version": "3.13",
+            "version": "0.11.32"
+          }
+        },
+        {
+          "name": "Install frozen dependencies",
+          "run": "uv sync --frozen --all-groups --no-cache"
+        },
+        {
+          "name": "Install Linux headless runtime",
+          "if": "runner.os == 'Linux'",
+          "run": "sudo apt-get update && sudo apt-get install --yes xvfb libegl1 libxkbcommon-x11-0"
+        },
+        {
+          "name": "Build native standalone bundle",
+          "run": "uv run pyside6-deploy packaging/entrypoint.py -c packaging/pysidedeploy.spec --force"
+        },
+        {
+          "name": "Smoke native Linux bundle",
+          "if": "runner.os == 'Linux'",
+          "run": "xvfb-run -a uv run python packaging/smoke_child.py dist"
+        },
+        {
+          "name": "Smoke native macOS or Windows bundle",
+          "if": "runner.os != 'Linux'",
+          "run": "uv run python packaging/smoke_child.py dist"
+        },
+        {
+          "name": "Upload unsigned bundle",
+          "id": "upload",
+          "uses": "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+          "with": {
+            "name": "rembgGUI-unsigned-${{ matrix.target }}",
+            "path": "dist",
+            "if-no-files-found": "error"
+          }
+        }
+      ]
+    }
+  }
+}

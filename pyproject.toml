@@ -26,6 +26,8 @@ rembggui = "rembggui.app:main"
 dev = [
   "build>=1.2,<2",
   "mypy>=1.15,<2",
+  "Nuitka==2.8.10",
+  "pip>=25,<26",
   "psutil>=7,<8",
   "pytest>=8.3,<9",
   "pytest-qt>=4.5,<5",

@@ -13,6 +13,7 @@ from typing import NoReturn
 from urllib.parse import unquote, urlsplit
 
 from rembggui.core.errors import AppError, ErrorCode
+from rembggui.resources import resource_path as packaged_resource_path
 
 _SCHEMA_VERSION = 1
 _PINNED_REMBG_VERSION = "2.0.72"
@@ -144,12 +145,18 @@ class ModelCatalog:
         )
 
     @staticmethod
-    def resource_path() -> Path:
-        return Path(__file__).resolve().parents[4] / "resources" / "model-manifest.json"
+    def resource_path(*, runtime_root: Path | None = None) -> Path:
+        return packaged_resource_path("model-manifest.json", runtime_root=runtime_root)
+
+    @staticmethod
+    def provenance_path(*, runtime_root: Path | None = None) -> Path:
+        return packaged_resource_path(
+            "model-provenance.json", runtime_root=runtime_root
+        )
 
     @classmethod
-    def load_resource(cls) -> ModelCatalog:
-        path = cls.resource_path()
+    def load_resource(cls, *, runtime_root: Path | None = None) -> ModelCatalog:
+        path = cls.resource_path(runtime_root=runtime_root)
         try:
             raw = path.read_bytes()
         except OSError as error:

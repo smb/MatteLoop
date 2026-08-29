@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -11,7 +12,7 @@ import pytest
 
 from rembggui.app import main
 
-_GUARDED_SMOKE_SCRIPT = """
+_GUARDED_HEADLESS_SCRIPT = """
 import builtins
 import os
 import socket
@@ -62,7 +63,13 @@ def _run_guarded_smoke_command(
         "U2NET_HOME": str(tmp_path / "model-guard"),
     }
     return subprocess.run(
-        [sys.executable, "-I", "-c", textwrap.dedent(_GUARDED_SMOKE_SCRIPT), argument],
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            textwrap.dedent(_GUARDED_HEADLESS_SCRIPT),
+            argument,
+        ],
         capture_output=True,
         check=False,
         env=environment,
@@ -75,16 +82,62 @@ def test_main_reports_version_without_opening_qt(capsys):
     assert capsys.readouterr().out.strip().startswith("rembgGUI ")
 
 
-def test_main_smoke_test_is_headless(capsys):
+def test_main_smoke_test_prints_machine_readable_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from rembggui import smoke
+
+    monkeypatch.setattr(
+        smoke,
+        "run_smoke",
+        lambda work_dir, use_fake_model=True: smoke.SmokeResult(
+            qt_platform="offscreen",
+            qt_image_formats=("png", "webp"),
+            video_decoded=True,
+            webp_frames=2,
+            webp_has_alpha=True,
+            spawn_start_method="spawn",
+            shared_memory_roundtrip=True,
+            shared_memory_unlinked=True,
+            fake_session_used=True,
+            peak_full_res_rgba_owners=2,
+        ),
+    )
+    monkeypatch.setenv("REMBGGUI_SMOKE_WORK_DIR", str(tmp_path))
+
     assert main(["--smoke-test"]) == 0
-    assert "smoke: ok" in capsys.readouterr().out
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["result"]["webp_frames"] == 2
+
+
+def test_main_smoke_test_prints_structured_nonzero_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from rembggui import smoke
+
+    def fail(_work_dir: Path, use_fake_model: bool = True) -> smoke.SmokeResult:
+        del use_fake_model
+        raise RuntimeError("intentional smoke failure")
+
+    monkeypatch.setattr(smoke, "run_smoke", fail)
+    monkeypatch.setenv("REMBGGUI_SMOKE_WORK_DIR", str(tmp_path))
+
+    assert main(["--smoke-test"]) != 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "error": {
+            "message": "intentional smoke failure",
+            "type": "RuntimeError",
+        },
+        "ok": False,
+    }
 
 
 @pytest.mark.parametrize(
     ("argument", "expected_output"),
     [
         ("--version", f"rembgGUI {version('rembggui')}"),
-        ("--smoke-test", "smoke: ok"),
     ],
 )
 def test_headless_commands_run_in_fresh_guarded_interpreters(

@@ -7,7 +7,7 @@ import shutil
 import stat
 import tempfile
 import warnings
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal
@@ -122,6 +122,8 @@ def encode_lossless_webp(
     frame_paths: Sequence[Path],
     delays_ms: Sequence[int],
     destination: Path,
+    *,
+    rgba_ownership_observer: Callable[[int], None] | None = None,
 ) -> EncodeSummary:
     """Encode PNG-backed RGBA frames and atomically replace *destination*."""
     frames = _validate_frame_inputs(frame_paths, delays_ms)
@@ -132,7 +134,7 @@ def encode_lossless_webp(
         if len(frames.paths) == 1:
             _encode_still(frames.paths[0], frames.identities[0], temporary)
         else:
-            _encode_animation(frames, temporary)
+            _encode_animation(frames, temporary, rgba_ownership_observer)
         _fsync_file(temporary)
         info = validate_webp(
             temporary,
@@ -146,7 +148,12 @@ def encode_lossless_webp(
             raise _invalid_output(
                 "encoded frame delays do not match the input sequence"
             )
-        _validate_encoded_pixels(frames.paths, temporary, frames.identities)
+        _validate_encoded_pixels(
+            frames.paths,
+            temporary,
+            frames.identities,
+            rgba_ownership_observer,
+        )
         os.replace(temporary, destination)
     except AppError as error:
         primary = error
@@ -396,9 +403,7 @@ def _validate_frame_inputs(
     return _FrameSet(tuple(paths), delays, expected_size, tuple(identities))
 
 
-def _encode_still(
-    source: Path, identity: _FileIdentity, destination: Path
-) -> None:
+def _encode_still(source: Path, identity: _FileIdentity, destination: Path) -> None:
     with _open_stable_binary(source, identity) as (input_file, _opened_identity):
         with _open_pillow(input_file) as image:
             image.load()
@@ -416,7 +421,11 @@ def _encode_still(
             )
 
 
-def _encode_animation(frames: _FrameSet, destination: Path) -> None:
+def _encode_animation(
+    frames: _FrameSet,
+    destination: Path,
+    rgba_ownership_observer: Callable[[int], None] | None,
+) -> None:
     width, height = frames.size
     container = av.open(
         str(destination), mode="w", format="webp", options={"loop": "0"}
@@ -446,8 +455,14 @@ def _encode_animation(frames: _FrameSet, destination: Path) -> None:
             ):
                 with _open_pillow(input_file) as image:
                     image.load()
-                    frame = av.VideoFrame.from_ndarray(
-                        np.asarray(image), format="rgba"
+                    pixels = np.asarray(image)
+                    frame = av.VideoFrame.from_ndarray(pixels, format="rgba")
+                    _observe_rgba_owners(
+                        rgba_ownership_observer,
+                        frames.size,
+                        image,
+                        pixels,
+                        frame,
                     )
             frame.pts = timestamp
             frame.duration = delay
@@ -503,9 +518,7 @@ def _parse_riff(path: Path, actual_size: int) -> _RiffFacts:
         if first[0] == b"VP8L":
             if first[4] != actual_size:
                 raise _invalid_output("still WebP must contain a single VP8L chunk")
-            width, height, has_alpha = _parse_vp8l_header(
-                source, first[2], first[1]
-            )
+            width, height, has_alpha = _parse_vp8l_header(source, first[2], first[1])
             _require_zero_padding(source, first[3], first[1])
             return _RiffFacts(width, height, (), 0, has_alpha)
         if first[0] != b"VP8X":
@@ -667,6 +680,7 @@ def _validate_encoded_pixels(
     source_paths: tuple[Path, ...],
     output: Path,
     expected_identities: tuple[_FileIdentity, ...] | None = None,
+    rgba_ownership_observer: Callable[[int], None] | None = None,
 ) -> None:
     try:
         with _open_pillow(output) as encoded:
@@ -677,17 +691,32 @@ def _validate_encoded_pixels(
                     if expected_identities is not None
                     else None
                 )
-                with _open_stable_binary(
-                    source_path, expected_identity
-                ) as (input_file, _opened_identity):
+                with _open_stable_binary(source_path, expected_identity) as (
+                    input_file,
+                    _opened_identity,
+                ):
                     with _open_pillow(input_file) as source:
                         source.load()
                         if encoded.mode == "RGBA":
                             difference = ImageChops.difference(source, encoded)
+                            _observe_rgba_owners(
+                                rgba_ownership_observer,
+                                source.size,
+                                source,
+                                encoded,
+                                difference,
+                            )
                         else:
                             converted = encoded.convert("RGBA")
                             try:
                                 difference = ImageChops.difference(source, converted)
+                                _observe_rgba_owners(
+                                    rgba_ownership_observer,
+                                    source.size,
+                                    source,
+                                    converted,
+                                    difference,
+                                )
                             finally:
                                 converted.close()
                         with difference:
@@ -700,6 +729,29 @@ def _validate_encoded_pixels(
         raise
     except (OSError, EOFError, ValueError) as error:
         raise _invalid_output(f"cannot compare encoded WebP pixels: {error}") from error
+
+
+def _observe_rgba_owners(
+    observer: Callable[[int], None] | None,
+    size: tuple[int, int],
+    *owners: object,
+) -> None:
+    if observer is None:
+        return
+    width, height = size
+    count = 0
+    for owner in owners:
+        if isinstance(owner, Image.Image):
+            count += owner.mode == "RGBA" and owner.size == size
+        elif isinstance(owner, np.ndarray):
+            count += owner.shape == (height, width, 4)
+        elif isinstance(owner, av.VideoFrame):
+            count += (
+                owner.width == width
+                and owner.height == height
+                and owner.format.name in {"rgba", "bgra"}
+            )
+    observer(count)
 
 
 def _resize_from_sources(
@@ -834,9 +886,7 @@ def _sibling_temporary(destination: Path) -> Path:
         descriptor = None
         return temporary
     except OSError as error:
-        wrapped = _invalid_output(
-            f"cannot create sibling output temporary: {error}"
-        )
+        wrapped = _invalid_output(f"cannot create sibling output temporary: {error}")
         if descriptor is not None:
             try:
                 os.close(descriptor)
