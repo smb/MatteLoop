@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import multiprocessing
 from collections.abc import Sequence
 
 from rembggui import __version__
@@ -10,6 +11,7 @@ from rembggui import __version__
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run rembgGUI, handling headless diagnostics before Qt is imported."""
+    multiprocessing.freeze_support()
     parser = argparse.ArgumentParser(prog="rembggui")
     parser.add_argument("--version", action="store_true", help="show the version")
     parser.add_argument(
