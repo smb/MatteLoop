@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import gc
+import os
+import warnings
 import weakref
 from collections.abc import Sequence
 from dataclasses import replace
@@ -11,7 +13,8 @@ import pytest
 from PIL import Image, ImageSequence
 
 import rembggui.core.webp as webp_module
-from rembggui.core.errors import AppError, ErrorCode
+from rembggui.core.errors import AppError, ErrorCode, ValidationError
+from rembggui.core.specs import MAX_FINAL_DIMENSION
 from rembggui.core.webp import (
     EncodeSummary,
     encode_lossless_webp,
@@ -56,6 +59,168 @@ def noisy_rgba(path: Path, size: tuple[int, int] = (256, 256)) -> Path:
     with Image.frombytes("RGBA", size, pixels) as image:
         image.save(path)
     return path
+
+
+def riff_chunks(data: bytes | bytearray) -> list[tuple[int, bytes, int, int]]:
+    chunks: list[tuple[int, bytes, int, int]] = []
+    position = 12
+    while position < len(data):
+        size = int.from_bytes(data[position + 4 : position + 8], "little")
+        padded_end = position + 8 + size + (size & 1)
+        chunks.append(
+            (position, bytes(data[position : position + 4]), size, padded_end)
+        )
+        position = padded_end
+    return chunks
+
+
+def set_riff_size(data: bytearray) -> None:
+    data[4:8] = (len(data) - 8).to_bytes(4, "little")
+
+
+def replace_animation_delays(
+    data: bytearray, delays_ms: tuple[int, ...]
+) -> bytearray:
+    frame_chunks = [chunk for chunk in riff_chunks(data) if chunk[1] == b"ANMF"]
+    assert len(frame_chunks) == len(delays_ms)
+    for chunk, delay in zip(frame_chunks, delays_ms, strict=True):
+        data[chunk[0] + 20 : chunk[0] + 23] = delay.to_bytes(3, "little")
+    return data
+
+
+def mutate_animation_bytes(data: bytearray, mutation: str) -> bytearray:
+    chunks = riff_chunks(data)
+    vp8x = next(chunk for chunk in chunks if chunk[1] == b"VP8X")
+    anim = next(chunk for chunk in chunks if chunk[1] == b"ANIM")
+    anmf = next(chunk for chunk in chunks if chunk[1] == b"ANMF")
+    if mutation == "vp8x-reserved-flag":
+        data[vp8x[0] + 8] |= 0x80
+    elif mutation == "vp8x-reserved-bytes":
+        data[vp8x[0] + 9] = 1
+    elif mutation == "vp8x-missing-animation":
+        data[vp8x[0] + 8] &= ~0x02
+    elif mutation == "vp8x-duplicate":
+        data[anim[0] : anim[0]] = data[vp8x[0] : vp8x[3]]
+        set_riff_size(data)
+    elif mutation == "anim-before-vp8x":
+        first = bytes(data[vp8x[0] : vp8x[3]])
+        second = bytes(data[anim[0] : anim[3]])
+        data[vp8x[0] : anim[3]] = second + first
+    elif mutation == "anim-duplicate":
+        data[anmf[0] : anmf[0]] = data[anim[0] : anim[3]]
+        set_riff_size(data)
+    elif mutation == "anmf-reserved":
+        data[anmf[0] + 8 + 15] |= 0x80
+    elif mutation == "anmf-zero-duration":
+        data[anmf[0] + 8 + 12 : anmf[0] + 8 + 15] = b"\0\0\0"
+    elif mutation == "anmf-outside-canvas":
+        data[anmf[0] + 8 : anmf[0] + 11] = (1).to_bytes(3, "little")
+    elif mutation == "anmf-vp8l-size-mismatch":
+        data[anmf[0] + 8 + 6 : anmf[0] + 8 + 9] = (126).to_bytes(
+            3, "little"
+        )
+    elif mutation == "nested-lossy-vp8":
+        nested = anmf[0] + 8 + 16
+        data[nested : nested + 4] = b"VP8 "
+    elif mutation == "nested-vp8l-duplicate":
+        nested = anmf[0] + 8 + 16
+        nested_size = int.from_bytes(data[nested + 4 : nested + 8], "little")
+        nested_end = nested + 8 + nested_size + (nested_size & 1)
+        duplicate = bytes(data[nested:nested_end])
+        insert_at = anmf[0] + 8 + anmf[2]
+        data[insert_at:insert_at] = duplicate
+        data[anmf[0] + 4 : anmf[0] + 8] = (anmf[2] + len(duplicate)).to_bytes(
+            4, "little"
+        )
+        set_riff_size(data)
+    elif mutation == "alpha-flag-mismatch":
+        data[vp8x[0] + 8] &= ~0x10
+    elif mutation == "nonzero-padding":
+        for frame_chunk in chunks:
+            if frame_chunk[1] != b"ANMF":
+                continue
+            nested = frame_chunk[0] + 8 + 16
+            nested_size = int.from_bytes(data[nested + 4 : nested + 8], "little")
+            if nested_size & 1:
+                break
+        else:
+            raise AssertionError("fixture must contain an odd nested VP8L chunk")
+        data[nested + 8 + nested_size] = 1
+    else:
+        raise AssertionError(f"unknown mutation {mutation}")
+    return data
+
+
+def test_pillow_pixel_policy_covers_the_legal_final_canvas() -> None:
+    assert Image.MAX_IMAGE_PIXELS == MAX_FINAL_DIMENSION**2
+
+
+@pytest.mark.parametrize("failure", ["warning", "error"])
+def test_pillow_decompression_bombs_are_structured_without_allocating(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    source = save_rgba(tmp_path / "source.png", (128, 128), (1, 2, 3, 4))
+    actual_open = webp_module.Image.open
+
+    def bomb_open(*args: Any, **kwargs: Any) -> Image.Image:
+        if failure == "warning":
+            warnings.warn("synthetic oversized image", Image.DecompressionBombWarning)
+        else:
+            raise Image.DecompressionBombError("synthetic oversized image")
+        return actual_open(*args, **kwargs)
+
+    monkeypatch.setattr(webp_module.Image, "open", bomb_open)
+
+    with pytest.raises((AppError, ValidationError)) as exc:
+        encode_lossless_webp((source,), (100,), tmp_path / "out.webp")
+
+    assert exc.value.code is ErrorCode.INVALID_FINAL_DIMENSIONS
+    assert "Pillow" in exc.value.technical_detail
+
+
+def test_specs_exposes_one_shared_local_path_syntax_policy() -> None:
+    import rembggui.core.specs as specs_module
+
+    policy = specs_module.is_local_path_syntax
+
+    assert policy(Path("frames/frame.png"))
+    assert policy(Path(r"C:\frames\frame.png"))
+    assert not policy(Path("https://example.test/frame.png"))
+    assert not policy(Path(r"file:\server\frame.png"))
+    assert not policy(Path("//server/share/frame.png"))
+    assert not policy(Path(r"\\server\share\frame.png"))
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        Path("https://example.test/frame.png"),
+        Path(r"file:\server\frame.png"),
+        Path("//server/share/frame.png"),
+        Path(r"\\server\share\frame.png"),
+    ],
+)
+def test_webp_rejects_uri_and_network_path_syntax_before_filesystem_access(
+    tmp_path: Path, path: Path
+) -> None:
+    local_source = save_rgba(
+        tmp_path / "source.png", (128, 128), (1, 2, 3, 4)
+    )
+
+    calls = (
+        lambda: encode_lossless_webp((path,), (100,), tmp_path / "out.webp"),
+        lambda: encode_lossless_webp((local_source,), (100,), path),
+        lambda: fit_webp_to_size(
+            (local_source,), (100,), 100_000, path, tmp_path / "out.webp"
+        ),
+    )
+    for call in calls:
+        with pytest.raises(AppError) as exc:
+            call()
+        assert exc.value.code is ErrorCode.INVALID_OUTPUT
+        assert "local path syntax" in exc.value.technical_detail
 
 
 def test_animated_webp_is_lossless_alpha_and_has_expected_duration(
@@ -123,7 +288,86 @@ def test_animated_webp_stores_each_odd_delay_exactly(tmp_path: Path) -> None:
 
     encode_lossless_webp(paths, (17, 16, 17, 17, 16, 17), output)
 
-    assert validate_webp(output, 6, 100).duration_ms == 100
+    info = validate_webp(output, 6, 100)
+
+    assert info.duration_ms == 100
+    assert info.delays_ms == (17, 16, 17, 17, 16, 17)
+
+
+def test_direct_encode_rejects_same_total_delay_redistribution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "out.webp"
+    output.write_bytes(b"existing")
+    actual_rewrite = webp_module._rewrite_animation_durations
+
+    def redistribute(path: Path, delays_ms: tuple[int, ...]) -> None:
+        actual_rewrite(path, delays_ms)
+        offsets = webp_module._animation_duration_offsets(path)
+        with path.open("r+b") as encoded:
+            for offset, delay in zip(offsets, (66, 66, 68), strict=True):
+                encoded.seek(offset)
+                encoded.write(delay.to_bytes(3, "little"))
+
+    monkeypatch.setattr(webp_module, "_rewrite_animation_durations", redistribute)
+
+    with pytest.raises(AppError) as exc:
+        encode_lossless_webp(
+            rgba_fixture_paths(tmp_path), (67, 66, 67), output
+        )
+
+    assert exc.value.code is ErrorCode.INVALID_OUTPUT
+    assert output.read_bytes() == b"existing"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "detail"),
+    [
+        ("vp8x-reserved-flag", "reserved"),
+        ("vp8x-reserved-bytes", "reserved"),
+        ("vp8x-missing-animation", "animation flag"),
+        ("vp8x-duplicate", "VP8X"),
+        ("anim-before-vp8x", "VP8X"),
+        ("anim-duplicate", "ANIM"),
+        ("anmf-reserved", "reserved"),
+        ("anmf-zero-duration", "positive"),
+        ("anmf-outside-canvas", "canvas"),
+        ("anmf-vp8l-size-mismatch", "dimensions"),
+        ("nested-lossy-vp8", "lossless"),
+        ("nested-vp8l-duplicate", "exactly one"),
+        ("alpha-flag-mismatch", "alpha"),
+        ("nonzero-padding", "padding"),
+    ],
+)
+def test_strict_riff_state_machine_rejects_real_byte_mutations(
+    tmp_path: Path, mutation: str, detail: str
+) -> None:
+    output = tmp_path / "animation.webp"
+    encode_lossless_webp(rgba_fixture_paths(tmp_path), (67, 66, 67), output)
+    output.write_bytes(mutate_animation_bytes(bytearray(output.read_bytes()), mutation))
+
+    with pytest.raises(AppError) as exc:
+        validate_webp(output, expected_frames=3, expected_duration_ms=200)
+
+    assert exc.value.code is ErrorCode.INVALID_OUTPUT
+    assert detail in exc.value.technical_detail
+
+
+def test_strict_still_shape_rejects_a_duplicate_vp8l_chunk(tmp_path: Path) -> None:
+    source = save_rgba(tmp_path / "still.png", (128, 128), (1, 2, 3, 4))
+    output = tmp_path / "still.webp"
+    encode_lossless_webp((source,), (100,), output)
+    data = bytearray(output.read_bytes())
+    chunk = riff_chunks(data)[0]
+    data.extend(data[chunk[0] : chunk[3]])
+    set_riff_size(data)
+    output.write_bytes(data)
+
+    with pytest.raises(AppError) as exc:
+        validate_webp(output, expected_frames=1, expected_duration_ms=0)
+
+    assert exc.value.code is ErrorCode.INVALID_OUTPUT
+    assert "single VP8L" in exc.value.technical_detail
 
 
 def test_validation_rejects_a_finite_animation_loop(tmp_path: Path) -> None:
@@ -256,6 +500,98 @@ def test_frame_count_guard_runs_before_iterating_or_opening_paths(
     assert exc.value.code is ErrorCode.INVALID_OUTPUT
 
 
+def test_encode_rejects_symlink_frame_inputs(tmp_path: Path) -> None:
+    source = save_rgba(tmp_path / "source.png", (128, 128), (1, 2, 3, 4))
+    linked = tmp_path / "linked.png"
+    try:
+        linked.symlink_to(source)
+    except OSError as error:
+        pytest.skip(f"symlinks unavailable: {error}")
+
+    with pytest.raises(AppError) as exc:
+        encode_lossless_webp((linked,), (100,), tmp_path / "out.webp")
+
+    assert exc.value.code is ErrorCode.INVALID_OUTPUT
+    assert "symlink" in exc.value.technical_detail
+
+
+def test_direct_encode_rejects_identical_path_replacement_during_encode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = save_rgba(tmp_path / "source.png", (128, 128), (1, 2, 3, 4))
+    replacement = save_rgba(
+        tmp_path / "replacement.png", (128, 128), (1, 2, 3, 4)
+    )
+    output = tmp_path / "out.webp"
+    output.write_bytes(b"existing")
+    actual_encode = webp_module._encode_still
+
+    def replace_after_encode(*args: Any) -> None:
+        actual_encode(*args)
+        os.replace(replacement, source)
+
+    monkeypatch.setattr(webp_module, "_encode_still", replace_after_encode)
+
+    with pytest.raises(AppError) as exc:
+        encode_lossless_webp((source,), (100,), output)
+
+    assert exc.value.code is ErrorCode.INVALID_OUTPUT
+    assert "changed" in exc.value.technical_detail
+    assert output.read_bytes() == b"existing"
+
+
+def test_fit_encodes_only_from_a_private_source_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = save_rgba(tmp_path / "source.png", (128, 128), (1, 2, 3, 4))
+    actual_encode = webp_module.encode_lossless_webp
+    observed: list[tuple[Path, ...]] = []
+
+    def observe_sources(
+        paths: Sequence[Path], delays: Sequence[int], destination: Path
+    ) -> EncodeSummary:
+        observed.append(tuple(paths))
+        return actual_encode(paths, delays, destination)
+
+    monkeypatch.setattr(webp_module, "encode_lossless_webp", observe_sources)
+
+    fit_webp_to_size(
+        (source,), (100,), 1_000_000, tmp_path / "work", tmp_path / "out.webp"
+    )
+
+    assert observed
+    assert all(paths[0] != source for paths in observed)
+    assert all(paths[0].parent.name == "source-snapshot" for paths in observed)
+
+
+def test_fit_rejects_concurrent_source_replacement_during_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = save_rgba(tmp_path / "source.png", (128, 128), (1, 2, 3, 4))
+    replacement = save_rgba(
+        tmp_path / "replacement.png", (128, 128), (1, 2, 3, 4)
+    )
+    output = tmp_path / "out.webp"
+    output.write_bytes(b"existing")
+    actual_copy = webp_module.shutil.copyfileobj
+
+    def replace_during_copy(input_file: Any, output_file: Any, length: int) -> None:
+        actual_copy(input_file, output_file, length)
+        if Path(input_file.name) == source:
+            os.replace(replacement, source)
+
+    monkeypatch.setattr(webp_module.shutil, "copyfileobj", replace_during_copy)
+
+    with pytest.raises(AppError) as exc:
+        fit_webp_to_size(
+            (source,), (100,), 1_000_000, tmp_path / "work", output
+        )
+
+    assert exc.value.code is ErrorCode.INVALID_OUTPUT
+    assert "changed" in exc.value.technical_detail
+    assert output.read_bytes() == b"existing"
+
+
 def test_encoder_opens_frames_lazily_and_closes_every_handle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -326,7 +662,9 @@ def test_encode_cancellation_cleans_partial_sibling_and_preserves_destination(
     output = tmp_path / "out.webp"
     output.write_bytes(b"existing")
 
-    def cancel_encode(_source: Path, temporary: Path) -> None:
+    def cancel_encode(
+        _source: Path, _identity: object, temporary: Path
+    ) -> None:
         temporary.write_bytes(b"partial")
         raise Cancelled
 
@@ -335,6 +673,108 @@ def test_encode_cancellation_cleans_partial_sibling_and_preserves_destination(
     with pytest.raises(Cancelled):
         encode_lossless_webp((source,), (100,), output)
 
+    assert output.read_bytes() == b"existing"
+    assert not tuple(tmp_path.glob(".out.webp.*.tmp.webp"))
+
+
+def test_primary_exception_keeps_cleanup_failure_as_an_observable_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Cancelled(BaseException):
+        pass
+
+    source = save_rgba(tmp_path / "source.png", (128, 128), (1, 2, 3, 4))
+    output = tmp_path / "out.webp"
+    output.write_bytes(b"existing")
+    actual_unlink = Path.unlink
+
+    def cancel_encode(*args: Any) -> None:
+        temporary = args[-1]
+        temporary.write_bytes(b"partial")
+        raise Cancelled("cancelled")
+
+    def fail_partial_unlink(path: Path, *args: Any, **kwargs: Any) -> None:
+        if path.name.startswith(".out.webp."):
+            raise OSError("injected unlink failure")
+        actual_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(webp_module, "_encode_still", cancel_encode)
+    monkeypatch.setattr(Path, "unlink", fail_partial_unlink)
+
+    with pytest.raises(Cancelled) as exc:
+        encode_lossless_webp((source,), (100,), output)
+
+    assert any("cleanup" in note for note in exc.value.__notes__)
+    assert output.read_bytes() == b"existing"
+    assert tuple(tmp_path.glob(".out.webp.*.tmp.webp"))
+
+
+def test_successful_fit_cleanup_failure_prevents_destination_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = save_rgba(tmp_path / "source.png", (128, 128), (1, 2, 3, 4))
+    output = tmp_path / "out.webp"
+    output.write_bytes(b"existing")
+    actual_rmtree = webp_module.shutil.rmtree
+
+    def fail_scratch(path: Any, *args: Any, **kwargs: Any) -> None:
+        if Path(path).name.startswith("webp-fit-"):
+            raise OSError("injected rmtree failure")
+        actual_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(webp_module.shutil, "rmtree", fail_scratch)
+
+    with pytest.raises(AppError) as exc:
+        fit_webp_to_size(
+            (source,), (100,), 1_000_000, tmp_path / "work", output
+        )
+
+    assert exc.value.code is ErrorCode.INVALID_OUTPUT
+    assert "cleanup" in exc.value.technical_detail
+    assert output.read_bytes() == b"existing"
+
+
+def test_primary_fit_error_survives_rmtree_failure_with_cleanup_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = save_rgba(tmp_path / "source.png", (128, 128), (1, 2, 3, 4))
+    output = tmp_path / "out.webp"
+    output.write_bytes(b"existing")
+    actual_rmtree = webp_module.shutil.rmtree
+
+    def fail_scratch(path: Any, *args: Any, **kwargs: Any) -> None:
+        if Path(path).name.startswith("webp-fit-"):
+            raise OSError("injected rmtree failure")
+        actual_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(webp_module.shutil, "rmtree", fail_scratch)
+
+    with pytest.raises(AppError) as exc:
+        fit_webp_to_size((source,), (100,), 1, tmp_path / "work", output)
+
+    assert exc.value.code is ErrorCode.IMPOSSIBLE_SIZE
+    assert any("cleanup" in note for note in exc.value.__notes__)
+    assert output.read_bytes() == b"existing"
+
+
+def test_mkstemp_descriptor_close_failure_cleans_created_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = save_rgba(tmp_path / "source.png", (128, 128), (1, 2, 3, 4))
+    output = tmp_path / "out.webp"
+    output.write_bytes(b"existing")
+    actual_close = webp_module.os.close
+
+    def close_then_fail(descriptor: int) -> None:
+        actual_close(descriptor)
+        raise OSError("injected descriptor close failure")
+
+    monkeypatch.setattr(webp_module.os, "close", close_then_fail)
+
+    with pytest.raises(AppError) as exc:
+        encode_lossless_webp((source,), (100,), output)
+
+    assert exc.value.code is ErrorCode.INVALID_OUTPUT
     assert output.read_bytes() == b"existing"
     assert not tuple(tmp_path.glob(".out.webp.*.tmp.webp"))
 
@@ -376,7 +816,10 @@ def test_fit_resizes_from_immutable_sources_and_stops_after_twelve_encodes(
 
     assert exc.value.code is ErrorCode.IMPOSSIBLE_SIZE
     assert encode_count == 12
-    assert resize_sources == [sources] * 11
+    assert len(resize_sources) == 11
+    assert all(paths == resize_sources[0] for paths in resize_sources)
+    assert resize_sources[0] != sources
+    assert resize_sources[0][0].parent.name == "source-snapshot"
     assert prior_scaled_directory_counts == [0] * 11
     assert output.read_bytes() == b"existing"
     assert not tuple((tmp_path / "work").glob("webp-fit-*"))
@@ -418,3 +861,102 @@ def test_fit_revalidates_final_bytes_before_replacing_destination(
     assert exc.value.code is ErrorCode.IMPOSSIBLE_SIZE
     assert output.read_bytes() == b"existing"
     assert not tuple((tmp_path / "work").glob("webp-fit-*"))
+
+
+def test_fit_rejects_wrong_but_valid_final_copy_before_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = save_rgba(tmp_path / "source.png", (128, 128), (1, 2, 3, 4))
+    wrong_source = save_rgba(
+        tmp_path / "wrong.png", (129, 128), (20, 30, 40, 50)
+    )
+    wrong_webp = tmp_path / "wrong.webp"
+    encode_lossless_webp((wrong_source,), (100,), wrong_webp)
+    output = tmp_path / "out.webp"
+    output.write_bytes(b"existing")
+    actual_copy = webp_module.shutil.copyfileobj
+
+    def substitute_valid_webp(source_file: Any, destination: Any, length: int) -> None:
+        if Path(source_file.name).suffix == ".webp":
+            with wrong_webp.open("rb") as replacement:
+                actual_copy(replacement, destination, length)
+        else:
+            actual_copy(source_file, destination, length)
+
+    monkeypatch.setattr(webp_module.shutil, "copyfileobj", substitute_valid_webp)
+
+    with pytest.raises(AppError) as exc:
+        fit_webp_to_size(
+            (source,), (100,), 1_000_000, tmp_path / "work", output
+        )
+
+    assert exc.value.code is ErrorCode.INVALID_OUTPUT
+    assert "dimensions" in exc.value.technical_detail
+    assert output.read_bytes() == b"existing"
+
+
+def test_fit_rejects_same_total_delay_redistribution_during_final_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sources = rgba_fixture_paths(tmp_path)
+    output = tmp_path / "out.webp"
+    output.write_bytes(b"existing")
+    actual_copy = webp_module.shutil.copyfileobj
+
+    def redistribute_final_copy(
+        source_file: Any, destination: Any, length: int
+    ) -> None:
+        if Path(source_file.name).suffix == ".webp":
+            mutated = replace_animation_delays(
+                bytearray(source_file.read()), (66, 66, 68)
+            )
+            destination.write(mutated)
+        else:
+            actual_copy(source_file, destination, length)
+
+    monkeypatch.setattr(webp_module.shutil, "copyfileobj", redistribute_final_copy)
+
+    with pytest.raises(AppError) as exc:
+        fit_webp_to_size(
+            sources,
+            (67, 66, 67),
+            1_000_000,
+            tmp_path / "work",
+            output,
+        )
+
+    assert exc.value.code is ErrorCode.INVALID_OUTPUT
+    assert "delays" in exc.value.technical_detail
+    assert output.read_bytes() == b"existing"
+
+
+def test_fit_rejects_wrong_pixels_with_valid_dimensions_during_final_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = save_rgba(tmp_path / "source.png", (128, 128), (1, 2, 3, 4))
+    wrong_source = save_rgba(
+        tmp_path / "wrong.png", (128, 128), (20, 30, 40, 50)
+    )
+    wrong_webp = tmp_path / "wrong.webp"
+    encode_lossless_webp((wrong_source,), (100,), wrong_webp)
+    output = tmp_path / "out.webp"
+    output.write_bytes(b"existing")
+    actual_copy = webp_module.shutil.copyfileobj
+
+    def substitute_pixels(source_file: Any, destination: Any, length: int) -> None:
+        if Path(source_file.name).suffix == ".webp":
+            with wrong_webp.open("rb") as replacement:
+                actual_copy(replacement, destination, length)
+        else:
+            actual_copy(source_file, destination, length)
+
+    monkeypatch.setattr(webp_module.shutil, "copyfileobj", substitute_pixels)
+
+    with pytest.raises(AppError) as exc:
+        fit_webp_to_size(
+            (source,), (100,), 1_000_000, tmp_path / "work", output
+        )
+
+    assert exc.value.code is ErrorCode.INVALID_OUTPUT
+    assert "RGBA source" in exc.value.technical_detail
+    assert output.read_bytes() == b"existing"

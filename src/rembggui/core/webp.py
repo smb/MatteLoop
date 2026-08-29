@@ -6,7 +6,9 @@ import os
 import shutil
 import stat
 import tempfile
-from collections.abc import Sequence
+import warnings
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal
 from fractions import Fraction
@@ -17,9 +19,13 @@ import av
 import numpy as np
 from PIL import Image, ImageChops
 
-from rembggui.core.errors import AppError, ErrorCode
+from rembggui.core.errors import AppError, ErrorCode, ValidationError
 from rembggui.core.geometry import FramingPlan, solve_proportional_scale
-from rembggui.core.specs import MIN_FINAL_DIMENSION, FramingSpec
+from rembggui.core.specs import (
+    MIN_FINAL_DIMENSION,
+    FramingSpec,
+    is_local_path_syntax,
+)
 from rembggui.core.timebase import MAX_OUTPUT_FRAMES
 
 _RIFF_LIMIT = 1 << 32
@@ -35,6 +41,7 @@ class WebPInfo:
     height: int
     frames: int
     duration_ms: int
+    delays_ms: tuple[int, ...]
     loop: int
     has_alpha: bool
     lossless: bool
@@ -74,6 +81,7 @@ class _FrameSet:
     paths: tuple[Path, ...]
     delays_ms: tuple[int, ...]
     size: tuple[int, int]
+    identities: tuple[_FileIdentity, ...]
 
     @property
     def encoded_duration_ms(self) -> int:
@@ -82,11 +90,32 @@ class _FrameSet:
 
 @dataclass(frozen=True)
 class _RiffFacts:
-    frames: int
-    duration_ms: int
+    width: int
+    height: int
+    delays_ms: tuple[int, ...]
     loop: int
-    lossless: bool
     has_alpha_flag: bool
+
+    @property
+    def frames(self) -> int:
+        return len(self.delays_ms) if self.delays_ms else 1
+
+    @property
+    def duration_ms(self) -> int:
+        return sum(self.delays_ms)
+
+    @property
+    def lossless(self) -> bool:
+        return True
+
+
+@dataclass(frozen=True)
+class _FileIdentity:
+    device: int
+    inode: int
+    size: int
+    modified_ns: int
+    changed_ns: int
 
 
 def encode_lossless_webp(
@@ -98,9 +127,10 @@ def encode_lossless_webp(
     frames = _validate_frame_inputs(frame_paths, delays_ms)
     destination = _validate_destination(destination)
     temporary = _sibling_temporary(destination)
+    primary: BaseException | None = None
     try:
         if len(frames.paths) == 1:
-            _encode_still(frames.paths[0], temporary)
+            _encode_still(frames.paths[0], frames.identities[0], temporary)
         else:
             _encode_animation(frames, temporary)
         _fsync_file(temporary)
@@ -111,14 +141,25 @@ def encode_lossless_webp(
         )
         if (info.width, info.height) != frames.size:
             raise _invalid_output("encoded dimensions do not match the input frames")
-        _validate_encoded_pixels(frames.paths, temporary)
+        expected_delays = frames.delays_ms if len(frames.paths) > 1 else ()
+        if info.delays_ms != expected_delays:
+            raise _invalid_output(
+                "encoded frame delays do not match the input sequence"
+            )
+        _validate_encoded_pixels(frames.paths, temporary, frames.identities)
         os.replace(temporary, destination)
-    except AppError:
+    except AppError as error:
+        primary = error
         raise
     except (OSError, ValueError, av.FFmpegError) as error:
-        raise _invalid_output(f"lossless WebP encoding failed: {error}") from error
+        wrapped = _invalid_output(f"lossless WebP encoding failed: {error}")
+        primary = wrapped
+        raise wrapped from error
+    except BaseException as error:
+        primary = error
+        raise
     finally:
-        _unlink_if_present(temporary)
+        _cleanup_file(temporary, primary)
 
     return EncodeSummary(
         destination=destination,
@@ -157,7 +198,7 @@ def validate_webp(
         if file_size >= _RIFF_LIMIT:
             raise _invalid_output("WebP output must be smaller than 4 GiB")
         riff = _parse_riff(path, file_size)
-        with Image.open(path) as image:
+        with _open_pillow(path) as image:
             if image.format != "WEBP":
                 raise _invalid_output("output is not a WebP image")
             width, height = FramingSpec().validate_final_dimensions(*image.size)
@@ -178,6 +219,8 @@ def validate_webp(
         )
     if riff.duration_ms != expected_duration_ms:
         raise _invalid_output("WebP duration does not match the expected duration")
+    if (width, height) != (riff.width, riff.height):
+        raise _invalid_output("decoded dimensions do not match the RIFF canvas")
     if riff.loop != 0:
         raise _invalid_output("animated WebP must loop infinitely")
     if not riff.lossless:
@@ -190,6 +233,7 @@ def validate_webp(
         height=height,
         frames=decoded_frames,
         duration_ms=riff.duration_ms,
+        delays_ms=riff.delays_ms,
         loop=riff.loop,
         has_alpha=has_alpha,
         lossless=riff.lossless,
@@ -220,15 +264,36 @@ def fit_webp_to_size(
     except OSError as error:
         raise _invalid_output(f"cannot create auto-fit workspace: {error}") from error
 
-    cumulative_scale = Decimal(1)
-    current_paths = source.paths
-    active_scaled_dir: Path | None = None
+    primary: BaseException | None = None
+    prepared_output: Path | None = None
+    scratch_cleaned = False
     try:
+        source = _snapshot_frame_set(source, scratch / "source-snapshot")
+        cumulative_scale = Decimal(1)
+        current_paths = source.paths
+        current_size = source.size
+        active_scaled_dir: Path | None = None
         for attempt in range(_MAX_FIT_ENCODINGS):
             candidate = scratch / f"candidate-{attempt:02d}.webp"
             summary = encode_lossless_webp(current_paths, source.delays_ms, candidate)
             if summary.file_size <= target_bytes:
-                _promote_candidate(candidate, destination, source, target_bytes)
+                prepared_output = _prepare_candidate(
+                    candidate,
+                    destination,
+                    current_paths,
+                    source.delays_ms,
+                    current_size,
+                    target_bytes,
+                )
+                _cleanup_tree(scratch, None)
+                scratch_cleaned = True
+                try:
+                    os.replace(prepared_output, destination)
+                except OSError as error:
+                    raise _invalid_output(
+                        f"cannot atomically promote fitted WebP: {error}"
+                    ) from error
+                prepared_output = None
                 return destination
 
             if attempt + 1 == _MAX_FIT_ENCODINGS:
@@ -253,16 +318,12 @@ def fit_webp_to_size(
                 == next_size
             ):
                 break
-            _unlink_if_present(candidate)
+            _cleanup_file(candidate, None)
             if active_scaled_dir is not None:
-                try:
-                    shutil.rmtree(active_scaled_dir)
-                except OSError as error:
-                    raise _invalid_output(
-                        f"cannot clean prior auto-fit frames: {error}"
-                    ) from error
+                _cleanup_tree(active_scaled_dir, None)
             scaled_dir = scratch / f"scaled-{attempt + 1:02d}"
             current_paths = _resize_from_sources(source.paths, next_size, scaled_dir)
+            current_size = next_size
             active_scaled_dir = scaled_dir
             cumulative_scale = next_scale
 
@@ -270,8 +331,14 @@ def fit_webp_to_size(
             "lossless WebP cannot meet the requested size within 12 encodes and "
             "the 128 px minimum"
         )
+    except BaseException as error:
+        primary = error
+        raise
     finally:
-        shutil.rmtree(scratch, ignore_errors=True)
+        if prepared_output is not None:
+            _cleanup_file(prepared_output, primary)
+        if not scratch_cleaned:
+            _cleanup_tree(scratch, primary)
 
 
 def _validate_frame_inputs(
@@ -299,26 +366,23 @@ def _validate_frame_inputs(
         )
 
     paths: list[Path] = []
+    identities: list[_FileIdentity] = []
     expected_size: tuple[int, int] | None = None
     for raw_path in frame_paths:
         path = _require_path(raw_path, "frame path")
         try:
-            path_stat = path.stat()
-            if not stat.S_ISREG(path_stat.st_mode):
-                raise _invalid_output(f"frame is not a regular file: {path}")
-            with path.open("rb"):
-                pass
-            with Image.open(path) as image:
-                if image.format != "PNG" or image.mode != "RGBA":
-                    raise _invalid_output(f"frame must be an RGBA PNG: {path}")
-                size = FramingSpec().validate_final_dimensions(*image.size)
-                if expected_size is None:
-                    expected_size = size
-                elif size != expected_size:
-                    raise _invalid_output(
-                        "all input frames must have identical dimensions"
-                    )
-                image.verify()
+            with _open_stable_binary(path) as (input_file, identity):
+                with _open_pillow(input_file) as image:
+                    if image.format != "PNG" or image.mode != "RGBA":
+                        raise _invalid_output(f"frame must be an RGBA PNG: {path}")
+                    size = FramingSpec().validate_final_dimensions(*image.size)
+                    if expected_size is None:
+                        expected_size = size
+                    elif size != expected_size:
+                        raise _invalid_output(
+                            "all input frames must have identical dimensions"
+                        )
+                    image.verify()
         except AppError:
             raise
         except (OSError, EOFError, ValueError, SyntaxError) as error:
@@ -326,26 +390,30 @@ def _validate_frame_inputs(
                 f"unreadable or corrupt frame {path}: {error}"
             ) from error
         paths.append(path)
+        identities.append(identity)
 
     assert expected_size is not None
-    return _FrameSet(tuple(paths), delays, expected_size)
+    return _FrameSet(tuple(paths), delays, expected_size, tuple(identities))
 
 
-def _encode_still(source: Path, destination: Path) -> None:
-    with Image.open(source) as image:
-        image.load()
-        image.save(
-            destination,
-            format="WEBP",
-            lossless=True,
-            quality=100,
-            alpha_quality=100,
-            method=6,
-            exact=True,
-            icc_profile=None,
-            exif=b"",
-            xmp=b"",
-        )
+def _encode_still(
+    source: Path, identity: _FileIdentity, destination: Path
+) -> None:
+    with _open_stable_binary(source, identity) as (input_file, _opened_identity):
+        with _open_pillow(input_file) as image:
+            image.load()
+            image.save(
+                destination,
+                format="WEBP",
+                lossless=True,
+                quality=100,
+                alpha_quality=100,
+                method=6,
+                exact=True,
+                icc_profile=None,
+                exif=b"",
+                xmp=b"",
+            )
 
 
 def _encode_animation(frames: _FrameSet, destination: Path) -> None:
@@ -369,10 +437,18 @@ def _encode_animation(frames: _FrameSet, destination: Path) -> None:
             "compression_level": "6",
         }
         timestamp = 0
-        for path, delay in zip(frames.paths, frames.delays_ms, strict=True):
-            with Image.open(path) as image:
-                image.load()
-                frame = av.VideoFrame.from_ndarray(np.asarray(image), format="rgba")
+        for path, identity, delay in zip(
+            frames.paths, frames.identities, frames.delays_ms, strict=True
+        ):
+            with _open_stable_binary(path, identity) as (
+                input_file,
+                _opened_identity,
+            ):
+                with _open_pillow(input_file) as image:
+                    image.load()
+                    frame = av.VideoFrame.from_ndarray(
+                        np.asarray(image), format="rgba"
+                    )
             frame.pts = timestamp
             frame.duration = delay
             frame.time_base = Fraction(1, 1000)
@@ -419,83 +495,152 @@ def _animation_duration_offsets(path: Path) -> tuple[int, ...]:
 
 
 def _parse_riff(path: Path, actual_size: int) -> _RiffFacts:
-    frames = 0
-    duration_ms = 0
-    loop: int | None = None
-    top_level_lossless = False
-    all_animation_frames_lossless = True
-    has_alpha_flag = False
-    animated_flag = False
     with path.open("rb") as source:
         declared_size = _read_riff_header(source)
         if declared_size != actual_size:
             raise _invalid_output("RIFF length does not match the complete file")
-        position = 12
+        first = _chunk_at(source, 12, actual_size)
+        if first[0] == b"VP8L":
+            if first[4] != actual_size:
+                raise _invalid_output("still WebP must contain a single VP8L chunk")
+            width, height, has_alpha = _parse_vp8l_header(
+                source, first[2], first[1]
+            )
+            _require_zero_padding(source, first[3], first[1])
+            return _RiffFacts(width, height, (), 0, has_alpha)
+        if first[0] != b"VP8X":
+            raise _invalid_output("animated WebP must begin with one VP8X chunk")
+
+        width, height, has_alpha_flag = _parse_vp8x(source, first)
+        second = _chunk_at(source, first[4], actual_size)
+        if second[0] != b"ANIM":
+            if second[0] == b"VP8X":
+                raise _invalid_output("animated WebP contains a duplicate VP8X chunk")
+            raise _invalid_output("VP8X must be followed by one ANIM chunk")
+        if second[1] != 6:
+            raise _invalid_output("WebP has an invalid ANIM chunk")
+        source.seek(second[2])
+        animation_data = _read_exact(source, 6)
+        loop = int.from_bytes(animation_data[4:6], "little")
+        _require_zero_padding(source, second[3], second[1])
+
+        position = second[4]
+        delays: list[int] = []
+        frame_alpha: list[bool] = []
         while position < actual_size:
-            source.seek(position)
-            tag, size = _read_chunk_header(source)
-            payload = position + 8
-            end = payload + size
-            padded_end = end + (size & 1)
-            if padded_end > actual_size:
-                raise _invalid_output("WebP contains a truncated RIFF chunk")
-            if tag == b"VP8X":
-                if size != 10:
-                    raise _invalid_output("WebP has an invalid VP8X chunk")
-                flags = _read_exact(source, 1)[0]
-                animated_flag = bool(flags & 0x02)
-                has_alpha_flag = bool(flags & 0x10)
-            elif tag == b"ANIM":
-                if size != 6:
-                    raise _invalid_output("WebP has an invalid ANIM chunk")
-                data = _read_exact(source, 6)
-                loop = int.from_bytes(data[4:6], "little")
-            elif tag == b"ANMF":
-                if size < 16:
-                    raise _invalid_output("WebP has an invalid ANMF chunk")
-                header = _read_exact(source, 16)
-                duration_ms += int.from_bytes(header[12:15], "little")
-                frames += 1
-                if not _animation_frame_is_lossless(source, payload + 16, end):
-                    all_animation_frames_lossless = False
-            elif tag == b"VP8L":
-                top_level_lossless = True
-            position = padded_end
-        if position != actual_size:
-            raise _invalid_output("WebP RIFF chunks do not consume the complete file")
-
-    if frames:
-        if not animated_flag or loop is None:
-            raise _invalid_output("animated WebP is missing animation control data")
-        return _RiffFacts(
-            frames, duration_ms, loop, all_animation_frames_lossless, has_alpha_flag
-        )
-    if animated_flag or loop is not None:
-        raise _invalid_output("WebP animation control data has no frames")
-    if not top_level_lossless:
-        raise _invalid_output("still WebP is missing a lossless VP8L image")
-    return _RiffFacts(1, 0, 0, True, has_alpha_flag)
+            chunk = _chunk_at(source, position, actual_size)
+            if chunk[0] == b"ANIM":
+                raise _invalid_output("animated WebP contains a duplicate ANIM chunk")
+            if chunk[0] == b"VP8X":
+                raise _invalid_output("animated WebP contains a duplicate VP8X chunk")
+            if chunk[0] != b"ANMF":
+                raise _invalid_output("animated WebP may contain only ANMF frames")
+            delay, alpha = _parse_anmf(source, chunk, (width, height))
+            delays.append(delay)
+            frame_alpha.append(alpha)
+            if len(delays) > MAX_OUTPUT_FRAMES:
+                raise _invalid_output("WebP frame count exceeds 100000")
+            position = chunk[4]
+        if not delays:
+            raise _invalid_output("animated WebP must contain at least one ANMF frame")
+        if has_alpha_flag != any(frame_alpha):
+            raise _invalid_output("VP8X alpha flag does not match VP8L frame alpha")
+        return _RiffFacts(width, height, tuple(delays), loop, has_alpha_flag)
 
 
-def _animation_frame_is_lossless(
-    source: BinaryIO, position: int, frame_end: int
-) -> bool:
-    lossless = False
-    while position < frame_end:
-        source.seek(position)
-        tag, size = _read_chunk_header(source)
-        end = position + 8 + size
-        padded_end = end + (size & 1)
-        if padded_end > frame_end:
-            raise _invalid_output("WebP contains a truncated animation frame")
-        if tag == b"VP8 ":
-            return False
-        if tag == b"VP8L":
-            lossless = True
-        position = padded_end
-    if position != frame_end:
-        raise _invalid_output("WebP animation frame has invalid chunk padding")
-    return lossless
+def _parse_vp8x(
+    source: BinaryIO, chunk: tuple[bytes, int, int, int, int]
+) -> tuple[int, int, bool]:
+    _tag, size, payload, end, _padded_end = chunk
+    if size != 10:
+        raise _invalid_output("WebP has an invalid VP8X chunk")
+    source.seek(payload)
+    data = _read_exact(source, 10)
+    flags = data[0]
+    if flags & 0xC1 or data[1:4] != b"\0\0\0":
+        raise _invalid_output("VP8X reserved bits must be zero")
+    if not flags & 0x02:
+        raise _invalid_output("VP8X animation flag must be set")
+    if flags & ~0x12:
+        raise _invalid_output("VP8X contains unsupported metadata flags")
+    width = int.from_bytes(data[4:7], "little") + 1
+    height = int.from_bytes(data[7:10], "little") + 1
+    if width * height > (1 << 32) - 1:
+        raise _invalid_output("VP8X canvas pixel count exceeds the format limit")
+    _require_zero_padding(source, end, size)
+    return width, height, bool(flags & 0x10)
+
+
+def _parse_anmf(
+    source: BinaryIO,
+    chunk: tuple[bytes, int, int, int, int],
+    canvas: tuple[int, int],
+) -> tuple[int, bool]:
+    _tag, size, payload, end, _padded_end = chunk
+    if size < 16:
+        raise _invalid_output("WebP has an invalid ANMF chunk")
+    source.seek(payload)
+    header = _read_exact(source, 16)
+    if header[15] & 0xFC:
+        raise _invalid_output("ANMF reserved bits must be zero")
+    x = int.from_bytes(header[0:3], "little") * 2
+    y = int.from_bytes(header[3:6], "little") * 2
+    width = int.from_bytes(header[6:9], "little") + 1
+    height = int.from_bytes(header[9:12], "little") + 1
+    delay = int.from_bytes(header[12:15], "little")
+    if delay <= 0:
+        raise _invalid_output("ANMF duration must be a positive integer")
+    if x + width > canvas[0] or y + height > canvas[1]:
+        raise _invalid_output("ANMF frame rectangle exceeds the VP8X canvas")
+
+    nested = _chunk_at(source, payload + 16, end)
+    if nested[0] != b"VP8L" or nested[4] != end:
+        raise _invalid_output("ANMF must contain exactly one lossless VP8L chunk")
+    bitstream_width, bitstream_height, has_alpha = _parse_vp8l_header(
+        source, nested[2], nested[1]
+    )
+    if (bitstream_width, bitstream_height) != (width, height):
+        raise _invalid_output("ANMF VP8L dimensions do not match the frame header")
+    _require_zero_padding(source, nested[3], nested[1])
+    _require_zero_padding(source, end, size)
+    return delay, has_alpha
+
+
+def _parse_vp8l_header(
+    source: BinaryIO, payload: int, size: int
+) -> tuple[int, int, bool]:
+    if size < 5:
+        raise _invalid_output("VP8L bitstream is too short")
+    source.seek(payload)
+    data = _read_exact(source, 5)
+    if data[0] != 0x2F:
+        raise _invalid_output("VP8L bitstream has an invalid signature")
+    bits = int.from_bytes(data[1:5], "little")
+    if bits >> 29:
+        raise _invalid_output("VP8L reserved version bits must be zero")
+    return (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1, bool(bits & (1 << 28))
+
+
+def _chunk_at(
+    source: BinaryIO, position: int, limit: int
+) -> tuple[bytes, int, int, int, int]:
+    if position + 8 > limit:
+        raise _invalid_output("WebP file is truncated before a chunk header")
+    source.seek(position)
+    tag, size = _read_chunk_header(source)
+    payload = position + 8
+    end = payload + size
+    padded_end = end + (size & 1)
+    if padded_end > limit:
+        raise _invalid_output("WebP contains a truncated RIFF chunk")
+    return tag, size, payload, end, padded_end
+
+
+def _require_zero_padding(source: BinaryIO, end: int, size: int) -> None:
+    if size & 1:
+        source.seek(end)
+        if _read_exact(source, 1) != b"\0":
+            raise _invalid_output("RIFF padding bytes must be zero")
 
 
 def _read_riff_header(source: BinaryIO) -> int:
@@ -518,26 +663,39 @@ def _read_exact(source: BinaryIO, count: int) -> bytes:
     return data
 
 
-def _validate_encoded_pixels(source_paths: tuple[Path, ...], output: Path) -> None:
+def _validate_encoded_pixels(
+    source_paths: tuple[Path, ...],
+    output: Path,
+    expected_identities: tuple[_FileIdentity, ...] | None = None,
+) -> None:
     try:
-        with Image.open(output) as encoded:
+        with _open_pillow(output) as encoded:
             for index, source_path in enumerate(source_paths):
                 encoded.seek(index)
-                with Image.open(source_path) as source:
-                    source.load()
-                    if encoded.mode == "RGBA":
-                        difference = ImageChops.difference(source, encoded)
-                    else:
-                        converted = encoded.convert("RGBA")
-                        try:
-                            difference = ImageChops.difference(source, converted)
-                        finally:
-                            converted.close()
-                    with difference:
-                        if difference.getbbox(alpha_only=False) is not None:
-                            raise _invalid_output(
-                                f"encoded frame {index} does not match its RGBA source"
-                            )
+                expected_identity = (
+                    expected_identities[index]
+                    if expected_identities is not None
+                    else None
+                )
+                with _open_stable_binary(
+                    source_path, expected_identity
+                ) as (input_file, _opened_identity):
+                    with _open_pillow(input_file) as source:
+                        source.load()
+                        if encoded.mode == "RGBA":
+                            difference = ImageChops.difference(source, encoded)
+                        else:
+                            converted = encoded.convert("RGBA")
+                            try:
+                                difference = ImageChops.difference(source, converted)
+                            finally:
+                                converted.close()
+                        with difference:
+                            if difference.getbbox(alpha_only=False) is not None:
+                                raise _invalid_output(
+                                    f"encoded frame {index} does not match its "
+                                    "RGBA source"
+                                )
     except AppError:
         raise
     except (OSError, EOFError, ValueError) as error:
@@ -551,9 +709,13 @@ def _resize_from_sources(
     output_paths: list[Path] = []
     for index, source_path in enumerate(source_paths):
         output = destination / f"frame-{index:06d}.png"
-        with Image.open(source_path) as source:
-            source.load()
-            premultiplied = source.convert("RGBa")
+        with _open_stable_binary(source_path) as (
+            input_file,
+            _opened_identity,
+        ):
+            with _open_pillow(input_file) as source:
+                source.load()
+                premultiplied = source.convert("RGBa")
         try:
             resized = premultiplied.resize(size, Image.Resampling.LANCZOS)
         finally:
@@ -570,6 +732,25 @@ def _resize_from_sources(
     return tuple(output_paths)
 
 
+def _snapshot_frame_set(source: _FrameSet, destination: Path) -> _FrameSet:
+    destination.mkdir()
+    snapshot_paths: list[Path] = []
+    for index, (path, identity) in enumerate(
+        zip(source.paths, source.identities, strict=True)
+    ):
+        snapshot = destination / f"frame-{index:06d}.png"
+        with _open_stable_binary(path, identity) as (
+            input_file,
+            _opened_identity,
+        ):
+            with snapshot.open("xb") as output:
+                shutil.copyfileobj(input_file, output, length=1024 * 1024)
+                output.flush()
+                os.fsync(output.fileno())
+        snapshot_paths.append(snapshot)
+    return _validate_frame_inputs(tuple(snapshot_paths), source.delays_ms)
+
+
 def _scaled_dimensions(
     source_size: tuple[int, int], cumulative_scale: Decimal
 ) -> tuple[int, int]:
@@ -584,13 +765,16 @@ def _scaled_dimensions(
     return horizontal.output_size[0], vertical.output_size[0]
 
 
-def _promote_candidate(
+def _prepare_candidate(
     candidate: Path,
     destination: Path,
-    source: _FrameSet,
+    current_frame_paths: tuple[Path, ...],
+    delays_ms: tuple[int, ...],
+    expected_dimensions: tuple[int, int],
     target_bytes: int,
-) -> None:
+) -> Path:
     temporary = _sibling_temporary(destination)
+    primary: BaseException | None = None
     try:
         with candidate.open("rb") as encoded, temporary.open("wb") as output:
             shutil.copyfileobj(encoded, output, length=1024 * 1024)
@@ -598,22 +782,33 @@ def _promote_candidate(
             os.fsync(output.fileno())
         info = validate_webp(
             temporary,
-            expected_frames=len(source.paths),
-            expected_duration_ms=source.encoded_duration_ms,
+            expected_frames=len(current_frame_paths),
+            expected_duration_ms=sum(delays_ms) if len(delays_ms) > 1 else 0,
         )
+        expected_delays = delays_ms if len(delays_ms) > 1 else ()
+        if info.delays_ms != expected_delays:
+            raise _invalid_output("fitted WebP frame delays changed during promotion")
+        if (info.width, info.height) != expected_dimensions:
+            raise _invalid_output("fitted WebP dimensions changed during promotion")
+        _validate_encoded_pixels(current_frame_paths, temporary)
         if info.file_size > target_bytes:
             raise _impossible_size(
                 "validated WebP remains larger than the requested byte target"
             )
-        os.replace(temporary, destination)
-    except AppError:
+        return temporary
+    except AppError as error:
+        primary = error
         raise
     except OSError as error:
-        raise _invalid_output(
-            f"cannot atomically promote fitted WebP: {error}"
-        ) from error
+        wrapped = _invalid_output(f"cannot prepare fitted WebP: {error}")
+        primary = wrapped
+        raise wrapped from error
+    except BaseException as error:
+        primary = error
+        raise
     finally:
-        _unlink_if_present(temporary)
+        if primary is not None:
+            _cleanup_file(temporary, primary)
 
 
 def _validate_destination(destination: Path) -> Path:
@@ -626,18 +821,32 @@ def _validate_destination(destination: Path) -> Path:
 
 
 def _sibling_temporary(destination: Path) -> Path:
+    descriptor: int | None = None
+    temporary: Path | None = None
     try:
         descriptor, raw_path = tempfile.mkstemp(
             prefix=f".{destination.name}.",
             suffix=".tmp.webp",
             dir=destination.parent,
         )
+        temporary = _require_path(Path(raw_path), "sibling temporary")
         os.close(descriptor)
-        return Path(raw_path)
+        descriptor = None
+        return temporary
     except OSError as error:
-        raise _invalid_output(
+        wrapped = _invalid_output(
             f"cannot create sibling output temporary: {error}"
-        ) from error
+        )
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError as retry_error:
+                wrapped.add_note(
+                    f"additional descriptor cleanup failure: {retry_error}"
+                )
+        if temporary is not None:
+            _cleanup_file(temporary, wrapped)
+        raise wrapped from error
 
 
 def _fsync_file(path: Path) -> None:
@@ -648,14 +857,130 @@ def _fsync_file(path: Path) -> None:
 def _require_path(value: object, name: str) -> Path:
     if not isinstance(value, Path):
         raise _invalid_output(f"{name} must be a pathlib.Path")
+    if not is_local_path_syntax(value):
+        raise _invalid_output(f"{name} must use local path syntax")
     return value
 
 
-def _unlink_if_present(path: Path) -> None:
+@contextmanager
+def _open_stable_binary(
+    path: Path, expected: _FileIdentity | None = None
+) -> Iterator[tuple[BinaryIO, _FileIdentity]]:
+    before = _path_identity(path)
+    if expected is not None and before != expected:
+        raise _invalid_output(f"input frame changed before it was opened: {path}")
     try:
-        path.unlink(missing_ok=True)
-    except OSError:
-        pass
+        input_file = path.open("rb")
+    except OSError as error:
+        raise _invalid_output(
+            f"cannot open local regular file {path}: {error}"
+        ) from error
+    primary: BaseException | None = None
+    try:
+        opened = _identity_from_stat(os.fstat(input_file.fileno()))
+        after_open = _path_identity(path)
+        if opened != before or after_open != before:
+            raise _invalid_output(f"input frame changed while it was opened: {path}")
+        yield input_file, before
+        final_open = _identity_from_stat(os.fstat(input_file.fileno()))
+        final_path = _path_identity(path)
+        if final_open != before or final_path != before:
+            raise _invalid_output(
+                f"input frame changed while it was being read: {path}"
+            )
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        try:
+            input_file.close()
+        except OSError as close_error:
+            if primary is not None:
+                primary.add_note(f"additional file cleanup failure: {close_error}")
+            else:
+                raise _invalid_output(
+                    f"cannot close stable local input file {path}: {close_error}"
+                ) from close_error
+
+
+def _path_identity(path: Path) -> _FileIdentity:
+    try:
+        path_stat = path.lstat()
+    except OSError as error:
+        raise _invalid_output(
+            f"cannot stat local input frame {path}: {error}"
+        ) from error
+    if stat.S_ISLNK(path_stat.st_mode):
+        raise _invalid_output(f"input frame must not be a symlink: {path}")
+    if not stat.S_ISREG(path_stat.st_mode):
+        raise _invalid_output(f"frame is not a regular file: {path}")
+    return _identity_from_stat(path_stat)
+
+
+def _identity_from_stat(path_stat: os.stat_result) -> _FileIdentity:
+    return _FileIdentity(
+        device=path_stat.st_dev,
+        inode=path_stat.st_ino,
+        size=path_stat.st_size,
+        modified_ns=path_stat.st_mtime_ns,
+        changed_ns=path_stat.st_ctime_ns,
+    )
+
+
+@contextmanager
+def _open_pillow(source: Path | BinaryIO) -> Iterator[Image.Image]:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(source) as image:
+                yield image
+    except (Image.DecompressionBombWarning, Image.DecompressionBombError) as error:
+        raise ValidationError(
+            ErrorCode.INVALID_FINAL_DIMENSIONS,
+            "webp",
+            f"Pillow rejected an image outside the configured pixel policy: {error}",
+        ) from error
+
+
+def _cleanup_file(path: Path, primary: BaseException | None) -> None:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        _handle_cleanup_failure(primary, "inspect temporary file", path, error)
+        return
+    try:
+        path.unlink()
+    except OSError as error:
+        _handle_cleanup_failure(primary, "remove temporary file", path, error)
+
+
+def _cleanup_tree(path: Path, primary: BaseException | None) -> None:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        _handle_cleanup_failure(primary, "inspect temporary tree", path, error)
+        return
+    try:
+        shutil.rmtree(path)
+    except OSError as error:
+        _handle_cleanup_failure(primary, "remove temporary tree", path, error)
+
+
+def _handle_cleanup_failure(
+    primary: BaseException | None,
+    action: str,
+    path: Path,
+    error: OSError,
+) -> None:
+    detail = f"cleanup could not {action} {path}: {error}"
+    if primary is not None:
+        primary.add_note(detail)
+        return
+    raise _invalid_output(detail) from error
 
 
 def _invalid_output(detail: str) -> AppError:

@@ -283,7 +283,9 @@ class OutputSpec:
         return cls(directory, filename, max_bytes, collision_policy)
 
     def validate(self) -> None:
-        if not isinstance(self.directory, Path) or not _is_local_path(self.directory):
+        if not isinstance(self.directory, Path) or not is_local_path_syntax(
+            self.directory
+        ):
             raise ValidationError(
                 ErrorCode.INVALID_OUTPUT,
                 "output",
@@ -341,7 +343,7 @@ class RenderRequest:
     def validate(self) -> None:
         if (
             not isinstance(self.source, Path)
-            or not _is_local_path(self.source)
+            or not is_local_path_syntax(self.source)
             or self.source.suffix.lower() not in _SUPPORTED_SOURCE_SUFFIXES
         ):
             raise ValidationError(
@@ -403,7 +405,7 @@ class RenderRequest:
         return self.framing.validate_final_dimensions(*final_dimensions)
 
 
-def _is_local_path(path: Path) -> bool:
+def is_local_path_syntax(path: Path) -> bool:
     """Reject URI and network path syntaxes while retaining relative local paths."""
     raw_path = str(path)
     if raw_path.startswith(("//", "\\\\")):
