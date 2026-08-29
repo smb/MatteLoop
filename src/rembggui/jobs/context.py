@@ -7,7 +7,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from threading import Lock
+from threading import Lock, RLock
 from types import TracebackType
 
 from rembggui.core.errors import AppError, ErrorCode
@@ -90,7 +90,10 @@ class JobContext:
         self.progress_sink = progress_sink
         self.cancellation = cancellation
         self._terminal_sink = _terminal_sink
-        self._lock = Lock()
+        # Publication and terminal transitions share one reentrant lock.  The
+        # sink may inspect or cancel this context synchronously, while another
+        # thread cannot publish a terminal transition until the callback ends.
+        self._lock = RLock()
         self._terminal_state = JobTerminalState.RUNNING
 
     @property
@@ -127,7 +130,7 @@ class JobContext:
                 JobTerminalState.CANCEL_PENDING,
             }:
                 raise RuntimeError("terminal jobs cannot report progress")
-        self.progress_sink(event)
+            self.progress_sink(event)
         return event
 
     def request_cancel(self) -> bool:
@@ -142,6 +145,7 @@ class JobContext:
     def acknowledge_cancel(self, acknowledgement: CancelAck) -> bool:
         if (
             not isinstance(acknowledgement, CancelAck)
+            or type(acknowledgement.protocol_version) is not int
             or acknowledgement.protocol_version != PROTOCOL_VERSION
             or acknowledgement.job_id != self.job_id
         ):

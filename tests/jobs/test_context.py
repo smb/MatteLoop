@@ -116,7 +116,7 @@ def test_job_context_supports_the_public_five_argument_constructor(
     assert context.terminal_state is JobTerminalState.SUCCEEDED
 
 
-def test_progress_sink_is_reentrant_and_runs_outside_context_lock(
+def test_progress_sink_is_reentrant_through_publication_lock(
     tmp_path: Path,
 ) -> None:
     callback_finished = Event()
@@ -142,3 +142,54 @@ def test_progress_sink_is_reentrant_and_runs_outside_context_lock(
     assert not thread.is_alive()
     assert callback_finished.is_set()
     assert context.terminal_state is JobTerminalState.CANCEL_PENDING
+
+
+def test_terminal_transition_waits_for_inflight_progress_publication(
+    tmp_path: Path,
+) -> None:
+    sink_entered = Event()
+    release_sink = Event()
+    terminal_finished = Event()
+    observed: list[str] = []
+
+    def sink(_event: ProgressEvent) -> None:
+        sink_entered.set()
+        assert release_sink.wait(timeout=1)
+        observed.append("progress")
+
+    context = JobContext(
+        "direct",
+        JobKind.RENDER,
+        tmp_path,
+        sink,
+        CancellationState(),
+    )
+    progress_thread = Thread(target=lambda: context.progress("segment", 1))
+
+    def complete() -> None:
+        assert context.complete()
+        observed.append("terminal")
+        terminal_finished.set()
+
+    terminal_thread = Thread(target=complete)
+    progress_thread.start()
+    assert sink_entered.wait(timeout=1)
+    terminal_thread.start()
+    assert not terminal_finished.is_set()
+    release_sink.set()
+    progress_thread.join(timeout=1)
+    terminal_thread.join(timeout=1)
+    assert observed == ["progress", "terminal"]
+    with pytest.raises(RuntimeError, match="terminal"):
+        context.progress("late", 2)
+
+
+def test_cancel_ack_rejects_bool_protocol_version(tmp_path: Path) -> None:
+    scheduler = ExclusiveJobScheduler()
+    lease = scheduler.claim(JobKind.RENDER, "j1", workspace=tmp_path)
+    context = lease.__enter__()
+    assert context.request_cancel()
+    assert not context.acknowledge_cancel(CancelAck(True, "j1"))
+    assert scheduler.active is context
+    assert context.acknowledge_cancel(CancelAck(PROTOCOL_VERSION, "j1"))
+    lease.__exit__(None, None, None)

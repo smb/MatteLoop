@@ -59,6 +59,8 @@ def fake_segmentation_child(connection: Connection, model_spec: object) -> None:
                 os._exit(23)
             if mode == "crash":
                 os._exit(23)
+            if mode == "hang":
+                time.sleep(5)
             if mode == "unsolicited-ack":
                 _send(connection, CancelAck(PROTOCOL_VERSION, message.job_id))
                 continue

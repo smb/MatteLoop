@@ -9,11 +9,13 @@ Ownership and lock/protocol order::
       then Cancel        -- send_bytes -----> observed after inference
     validates metadata   <- recv_bytes ------ Response OR matching CancelAck
 
-The active identity is published before request transport. Wire serialization is
-always ``SegmentRequest`` then an admitted ``CancelRequest``. Code never holds the
-state lock while acquiring the wire/lifecycle locks; nested order is
-``wire -> lifecycle -> state``. A dead child, malformed bytes, protocol mismatch,
-or teardown anomaly invalidates the slot and cannot implicitly spawn a replacement.
+Local validation, slot preparation, and bounded encoding finish before an active
+identity exists. Publication and request transport are one wire-locked operation,
+so an admitted cancel can only follow a request already on the wire. Code never
+holds the state lock while acquiring the wire/lifecycle locks; nested order is
+``operation -> wire -> lifecycle -> state``. A dead child, malformed bytes,
+protocol mismatch, or teardown anomaly invalidates the slot and cannot implicitly
+spawn a replacement.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ import math
 import multiprocessing
 import time
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from multiprocessing.connection import Connection
 from multiprocessing.context import BaseContext
 from multiprocessing.process import BaseProcess
@@ -61,6 +63,8 @@ _MAX_FRAME_DIMENSION = 16_383
 _MAX_LAUNCH_PAYLOAD_BYTES = 16 * 1024
 _MAX_LAUNCH_DEPTH = 6
 _MAX_LAUNCH_ITEMS = 256
+_MAX_LAUNCH_NODES = 2_048
+_MAX_LAUNCH_TEXT_BYTES = 16 * 1024
 
 type Uint8Frame = NDArray[np.uint8]
 type ChildTarget = Callable[[Connection, object], None]
@@ -96,6 +100,8 @@ class SegmentationClient:
         self._connection: Connection | None = None
         self._slot: SharedMemory | None = None
         self._slot_capacity = 0
+        self._slot_closed = False
+        self._slot_unlinked = False
         self._active_job_id: str | None = None
         self._active_request_id: str | None = None
         self._request_sent = False
@@ -125,44 +131,55 @@ class SegmentationClient:
 
     def start(self) -> None:
         """Start a fresh child; after invalidation this is the explicit retry."""
-        with self._lifecycle_lock:
-            if self._is_running_unlocked():
-                return
-            self._discard_process_unlocked(graceful=False)
-            parent, child = self._mp_context.Pipe(duplex=True)
-            process = self._mp_context.Process(  # type: ignore[attr-defined]
-                target=self._child_target,
-                args=(child, self._model_spec),
-                name="rembggui-segmentation",
-                daemon=True,
-            )
-            try:
-                process.start()
-            except BaseException as error:
-                parent.close()
-                child.close()
-                raise self._crash_error(
-                    "segmentation process could not be spawned", cause=error
-                ) from error
-            child.close()
-            self._process = process
-            self._connection = parent
-            try:
-                message = self._receive_child_unlocked(self._startup_timeout)
-                if (
-                    not isinstance(message, WorkerReady)
-                    or message.process_id != process.pid
-                ):
-                    raise self._protocol_error_unlocked(
-                        "child startup acknowledgement identity mismatch"
-                    )
-                if not _safe_alive(process):
-                    raise self._crash_error(
-                        "segmentation process exited immediately after startup"
-                    )
-            except BaseException:
+        if not self._operation_lock.acquire(blocking=False):
+            raise self._busy_error(self.active_job_id)
+        try:
+            self._start_operation_owned()
+        finally:
+            self._operation_lock.release()
+
+    def _start_operation_owned(self) -> None:
+        with self._wire_lock:
+            with self._lifecycle_lock:
+                if self._is_running_unlocked():
+                    return
                 self._discard_process_unlocked(graceful=False)
-                raise
+                parent, child = self._mp_context.Pipe(duplex=True)
+                process = self._mp_context.Process(  # type: ignore[attr-defined]
+                    target=self._child_target,
+                    args=(child, self._model_spec),
+                    name="rembggui-segmentation",
+                    daemon=True,
+                )
+                try:
+                    process.start()
+                except BaseException as error:
+                    parent.close()
+                    child.close()
+                    raise self._crash_error(
+                        "segmentation process could not be spawned", cause=error
+                    ) from error
+                child.close()
+                self._process = process
+                self._connection = parent
+                try:
+                    message = self._receive_child_unlocked(
+                        self._startup_timeout, expected_job_id=None
+                    )
+                    if (
+                        not isinstance(message, WorkerReady)
+                        or message.process_id != process.pid
+                    ):
+                        raise self._protocol_error_unlocked(
+                            "child startup acknowledgement identity mismatch"
+                        )
+                    if not _safe_alive(process):
+                        raise self._crash_error(
+                            "segmentation process exited immediately after startup"
+                        )
+                except BaseException:
+                    self._discard_process_unlocked(graceful=False)
+                    raise
 
     def segment(
         self, image: np.ndarray[Any, Any], request: SegmentRequest
@@ -174,11 +191,12 @@ class SegmentationClient:
             )
         try:
             self._validate_request(request)
-            self._publish_active(request)
             frame = self._validate_image(image)
             with self._lifecycle_lock:
                 if not self._is_running_unlocked():
-                    self._discard_process_unlocked(graceful=False)
+                    self._discard_process_unlocked(
+                        graceful=False, job_id=request.job_id
+                    )
                     raise self._crash_error(
                         "segmentation process is not running; explicit retry required",
                         job_id=request.job_id,
@@ -187,9 +205,20 @@ class SegmentationClient:
                 output_capacity = frame.shape[0] * frame.shape[1] * 4
                 slot = self._ensure_slot_unlocked(output_capacity, request.job_id)
                 input_bytes = frame.tobytes(order="C")
-                slot_buffer = slot.buf
-                assert slot_buffer is not None
-                slot_buffer[: len(input_bytes)] = input_bytes
+                try:
+                    slot_buffer = slot.buf
+                    if slot_buffer is None:
+                        raise BufferError("shared-memory buffer is unavailable")
+                    slot_buffer[: len(input_bytes)] = input_bytes
+                except (BufferError, OSError, TypeError, ValueError) as error:
+                    self._discard_process_unlocked(
+                        graceful=False, job_id=request.job_id
+                    )
+                    raise self._crash_error(
+                        "could not write the parent-owned segmentation frame slot",
+                        job_id=request.job_id,
+                        cause=error,
+                    ) from error
                 wire_request = replace(
                     request,
                     slot=SharedFrame(
@@ -201,14 +230,28 @@ class SegmentationClient:
                 )
                 connection = self._connection
                 assert connection is not None
+                payload = self._encode_parent(wire_request, request.job_id)
+            self._after_local_preparation()
             with self._wire_lock:
-                self._before_request_wire_send()
-                self._send_parent(connection, wire_request, request.job_id)
-                with self._state_lock:
-                    self._request_sent = True
-                    send_cancel = self._cancel_requested and not self._cancel_wire_sent
-                if send_cancel:
-                    self._send_cancel_on_wire(connection, request.job_id)
+                with self._lifecycle_lock:
+                    if (
+                        not self._is_running_unlocked()
+                        or self._connection is not connection
+                    ):
+                        self._discard_process_unlocked(
+                            graceful=False, job_id=request.job_id
+                        )
+                        raise self._crash_error(
+                            "segmentation process closed during local preparation",
+                            job_id=request.job_id,
+                        )
+                    self._reject_pending_messages_unlocked(request.job_id)
+                    self._before_request_wire_send()
+                    self._publish_active(request)
+                    self._send_parent_bytes(connection, payload, request.job_id)
+                    with self._state_lock:
+                        if self._active_job_id == request.job_id:
+                            self._request_sent = True
             return self._await_result(frame.shape[:2], request)
         finally:
             self._clear_active()
@@ -216,25 +259,24 @@ class SegmentationClient:
 
     def cancel(self, job_id: str) -> bool:
         """Admit one cancel and serialize it strictly after its SegmentRequest."""
-        if not isinstance(job_id, str) or not job_id:
+        if type(job_id) is not str or not job_id:
             return False
-        with self._state_lock:
-            if self._active_job_id != job_id or self._cancel_requested:
-                return False
-            self._cancel_requested = True
-        self._after_cancel_admitted()
         with self._wire_lock:
             with self._state_lock:
-                should_send = (
-                    self._active_job_id == job_id
-                    and self._request_sent
-                    and not self._cancel_wire_sent
-                )
-            if should_send:
-                with self._lifecycle_lock:
-                    if not self._is_running_unlocked() or self._connection is None:
-                        return False
-                    connection = self._connection
+                if (
+                    self._active_job_id != job_id
+                    or not self._request_sent
+                    or self._cancel_requested
+                ):
+                    return False
+                self._cancel_requested = True
+            with self._lifecycle_lock:
+                if not self._is_running_unlocked() or self._connection is None:
+                    with self._state_lock:
+                        if self._active_job_id == job_id:
+                            self._cancel_requested = False
+                    return False
+                connection = self._connection
                 self._send_cancel_on_wire(connection, job_id)
         return True
 
@@ -248,7 +290,7 @@ class SegmentationClient:
                 with self._lifecycle_lock:
                     self._discard_process_unlocked(graceful=True)
                     self._model_spec = normalized
-            self.start()
+            self._start_operation_owned()
         finally:
             self._operation_lock.release()
 
@@ -256,13 +298,15 @@ class SegmentationClient:
         """Stop, prove dead, and unlink parent state; safe to call repeatedly."""
         with self._wire_lock:
             with self._lifecycle_lock:
-                self._discard_process_unlocked(graceful=True)
+                with self._state_lock:
+                    job_id = self._active_job_id
+                self._discard_process_unlocked(graceful=True, job_id=job_id)
 
     def _before_request_wire_send(self) -> None:
         """Test seam called while the wire lock enforces Request-before-Cancel."""
 
-    def _after_cancel_admitted(self) -> None:
-        """Test seam called after state admission and before wire serialization."""
+    def _after_local_preparation(self) -> None:
+        """Test seam after local preparation but before active publication."""
 
     def _publish_active(self, request: SegmentRequest) -> None:
         with self._state_lock:
@@ -290,10 +334,12 @@ class SegmentationClient:
         self, source_size: tuple[int, int], request: SegmentRequest
     ) -> Uint8Frame:
         try:
-            message = self._receive_child_unlocked(self._response_timeout)
+            message = self._receive_child_unlocked(
+                self._response_timeout, expected_job_id=request.job_id
+            )
         except AppError:
             with self._lifecycle_lock:
-                self._discard_process_unlocked(graceful=False)
+                self._discard_process_unlocked(graceful=False, job_id=request.job_id)
             raise
         if isinstance(message, CancelAck):
             self._raise_cancelled(message, request)
@@ -315,7 +361,9 @@ class SegmentationClient:
                 )
             if error.code is ErrorCode.SEGMENTATION_PROTOCOL_MISMATCH:
                 with self._lifecycle_lock:
-                    self._discard_process_unlocked(graceful=False)
+                    self._discard_process_unlocked(
+                        graceful=False, job_id=request.job_id
+                    )
             raise error
         if not isinstance(message, SegmentResponse):
             raise self._protocol_error(
@@ -343,7 +391,7 @@ class SegmentationClient:
                 raise self._crash_error(
                     "segmentation connection disappeared", job_id=request.job_id
                 )
-            if self._connection.poll():
+            if self._poll_connection_unlocked(request.job_id):
                 raise self._protocol_error_unlocked(
                     "unexpected late or duplicate child response", request.job_id
                 )
@@ -365,10 +413,12 @@ class SegmentationClient:
 
     def _await_cancel_ack(self, request: SegmentRequest) -> None:
         try:
-            acknowledgement = self._receive_child_unlocked(self._response_timeout)
+            acknowledgement = self._receive_child_unlocked(
+                self._response_timeout, expected_job_id=request.job_id
+            )
         except AppError:
             with self._lifecycle_lock:
-                self._discard_process_unlocked(graceful=False)
+                self._discard_process_unlocked(graceful=False, job_id=request.job_id)
             raise
         if not isinstance(acknowledgement, CancelAck):
             raise self._protocol_error(
@@ -423,6 +473,7 @@ class SegmentationClient:
     def _validate_request(self, request: object) -> None:
         if (
             type(request) is not SegmentRequest
+            or type(request.protocol_version) is not int
             or request.protocol_version != PROTOCOL_VERSION
             or type(request.job_id) is not str
             or not request.job_id
@@ -456,12 +507,17 @@ class SegmentationClient:
         return frame
 
     def _ensure_slot_unlocked(self, capacity: int, job_id: str) -> SharedMemory:
-        if self._slot is not None and self._slot_capacity >= capacity:
+        if (
+            self._slot is not None
+            and not self._slot_closed
+            and not self._slot_unlinked
+            and self._slot_capacity >= capacity
+        ):
             return self._slot
         cleanup_errors: list[str] = []
         self._discard_slot_unlocked(cleanup_errors)
         if cleanup_errors:
-            raise _cleanup_error("; ".join(cleanup_errors))
+            raise _cleanup_error("; ".join(cleanup_errors), job_id)
         try:
             self._slot = SharedMemory(create=True, size=capacity)
         except (OSError, ValueError) as error:
@@ -471,24 +527,48 @@ class SegmentationClient:
                 cause=error,
             ) from error
         self._slot_capacity = capacity
+        self._slot_closed = False
+        self._slot_unlinked = False
         return self._slot
 
     def _reject_pending_messages_unlocked(self, job_id: str) -> None:
-        if self._connection is not None and self._connection.poll():
+        if self._connection is not None and self._poll_connection_unlocked(job_id):
             raise self._protocol_error_unlocked(
                 "stale child response remained before a new request", job_id
             )
 
-    def _receive_child_unlocked(self, timeout: float) -> ChildMessage:
+    def _poll_connection_unlocked(self, job_id: str) -> bool:
+        connection = self._connection
+        if connection is None:
+            raise self._crash_error(
+                "segmentation process has no live connection", job_id=job_id
+            )
+        try:
+            return connection.poll()
+        except (BrokenPipeError, EOFError, OSError) as error:
+            self._discard_process_unlocked(graceful=False, job_id=job_id)
+            raise self._crash_error(
+                "segmentation connection failed while checking pending bytes",
+                job_id=job_id,
+                cause=error,
+            ) from error
+
+    def _receive_child_unlocked(
+        self, timeout: float, *, expected_job_id: str | None
+    ) -> ChildMessage:
         connection = self._connection
         process = self._process
         if connection is None or process is None:
-            raise self._crash_error("segmentation process has no live connection")
+            raise self._crash_error(
+                "segmentation process has no live connection", job_id=expected_job_id
+            )
         deadline = time.monotonic() + timeout
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise self._crash_error("segmentation process timed out")
+                raise self._crash_error(
+                    "segmentation process timed out", job_id=expected_job_id
+                )
             try:
                 if connection.poll(min(remaining, 0.05)):
                     raw = connection.recv_bytes(MAX_PROTOCOL_MESSAGE_BYTES)
@@ -496,42 +576,57 @@ class SegmentationClient:
                         return decode_child_message(raw)
                     except ProtocolCodecError as error:
                         raise _protocol_app_error(
-                            f"invalid child protocol bytes: {error}"
+                            f"invalid child protocol bytes: {error}", expected_job_id
                         ) from error
             except AppError:
                 raise
             except (EOFError, BrokenPipeError) as error:
                 raise self._crash_error(
-                    "segmentation process connection closed unexpectedly", cause=error
+                    "segmentation process connection closed unexpectedly",
+                    job_id=expected_job_id,
+                    cause=error,
                 ) from error
             except OSError as error:
                 if "bad message length" in str(error).lower() and _safe_alive(process):
                     raise _protocol_app_error(
-                        f"invalid or oversized child transport frame: {error}"
+                        f"invalid or oversized child transport frame: {error}",
+                        expected_job_id,
                     ) from error
                 raise self._crash_error(
-                    "segmentation process connection closed unexpectedly", cause=error
+                    "segmentation process connection closed unexpectedly",
+                    job_id=expected_job_id,
+                    cause=error,
                 ) from error
             if not _safe_alive(process):
                 raise self._crash_error(
-                    f"segmentation process exited with code {process.exitcode}"
+                    f"segmentation process exited with code {process.exitcode}",
+                    job_id=expected_job_id,
                 )
 
     def _send_parent(
         self, connection: Connection, message: ParentMessage, job_id: str
     ) -> None:
+        payload = self._encode_parent(message, job_id)
+        self._send_parent_bytes(connection, payload, job_id)
+
+    def _encode_parent(self, message: ParentMessage, job_id: str) -> bytes:
         try:
-            payload = encode_parent_message(message)
-            connection.send_bytes(payload)
+            return encode_parent_message(message)
         except ProtocolCodecError as error:
             with self._lifecycle_lock:
-                self._discard_process_unlocked(graceful=False)
+                self._discard_process_unlocked(graceful=False, job_id=job_id)
             raise _protocol_app_error(
                 f"invalid parent protocol message: {error}", job_id
             ) from error
+
+    def _send_parent_bytes(
+        self, connection: Connection, payload: bytes, job_id: str
+    ) -> None:
+        try:
+            connection.send_bytes(payload)
         except (BrokenPipeError, EOFError, OSError) as error:
             with self._lifecycle_lock:
-                self._discard_process_unlocked(graceful=False)
+                self._discard_process_unlocked(graceful=False, job_id=job_id)
             raise self._crash_error(
                 "segmentation connection closed while sending",
                 job_id=job_id,
@@ -545,14 +640,18 @@ class SegmentationClient:
     def _protocol_error_unlocked(
         self, detail: str, job_id: str | None = None
     ) -> AppError:
-        self._discard_process_unlocked(graceful=False)
+        self._discard_process_unlocked(graceful=False, job_id=job_id)
         return _protocol_app_error(detail, job_id)
 
-    def _discard_process_unlocked(self, *, graceful: bool) -> None:
+    def _discard_process_unlocked(
+        self, *, graceful: bool, job_id: str | None = None
+    ) -> None:
         connection = self._connection
         process = self._process
         errors: list[str] = []
         process_alive = process is not None and _safe_alive(process, errors)
+        connection_closed = connection is None
+        process_closed = process is None
         try:
             if graceful and connection is not None and process_alive:
                 try:
@@ -566,6 +665,7 @@ class SegmentationClient:
             if connection is not None:
                 try:
                     connection.close()
+                    connection_closed = True
                 except BaseException as error:
                     errors.append(
                         f"connection close failed: {type(error).__name__}: {error}"
@@ -584,42 +684,52 @@ class SegmentationClient:
                     _attempt_process_action(process, "join", errors)
                     process_alive = _safe_alive(process, errors)
                 if not process_alive:
-                    _attempt_process_action(process, "close", errors)
+                    process_closed = _attempt_process_action(process, "close", errors)
         finally:
-            self._connection = None
-            self._process = process if process_alive else None
+            self._connection = None if connection_closed else connection
+            self._process = process if process_alive or not process_closed else None
             self._discard_slot_unlocked(errors)
             self._clear_active()
         if process_alive:
             errors.append("old segmentation process remained alive after kill")
+        if self._connection is not None:
+            errors.append("segmentation connection handle remains after close")
+        if self._process is not None and not process_alive:
+            errors.append("dead segmentation process handle remains after close")
+        if self._slot is not None:
+            errors.append("segmentation shared-memory handle remains after cleanup")
         if errors:
-            raise _cleanup_error("; ".join(errors))
+            raise _cleanup_error("; ".join(errors), job_id)
 
     def _discard_slot_unlocked(self, errors: list[str] | None = None) -> None:
         slot = self._slot
         if slot is None:
             return
-        try:
-            slot.close()
-        except BaseException as error:
-            if errors is not None:
-                errors.append(
-                    f"shared memory close failed: {type(error).__name__}: {error}"
-                )
-        unlinked = False
-        try:
-            slot.unlink()
-            unlinked = True
-        except FileNotFoundError:
-            unlinked = True
-        except BaseException as error:
-            if errors is not None:
-                errors.append(
-                    f"shared memory unlink failed: {type(error).__name__}: {error}"
-                )
-        if unlinked:
+        if not self._slot_closed:
+            try:
+                slot.close()
+                self._slot_closed = True
+            except BaseException as error:
+                if errors is not None:
+                    errors.append(
+                        f"shared memory close failed: {type(error).__name__}: {error}"
+                    )
+        if not self._slot_unlinked:
+            try:
+                slot.unlink()
+                self._slot_unlinked = True
+            except FileNotFoundError:
+                self._slot_unlinked = True
+            except BaseException as error:
+                if errors is not None:
+                    errors.append(
+                        f"shared memory unlink failed: {type(error).__name__}: {error}"
+                    )
+        if self._slot_closed and self._slot_unlinked:
             self._slot = None
             self._slot_capacity = 0
+            self._slot_closed = False
+            self._slot_unlinked = False
 
     def _is_running_unlocked(self) -> bool:
         return (
@@ -690,7 +800,6 @@ def _serve_segmentation_connection(
         connection, WorkerReady(PROTOCOL_VERSION, CONTROL_JOB_ID, process_id)
     ):
         return
-    cancelled: set[str] = set()
     while True:
         message = _receive_parent(connection)
         if message is None:
@@ -698,47 +807,61 @@ def _serve_segmentation_connection(
         if isinstance(message, Shutdown):
             return
         if isinstance(message, CancelRequest):
-            if message.job_id not in cancelled:
-                cancelled.add(message.job_id)
-                if not _send_child(
-                    connection, CancelAck(PROTOCOL_VERSION, message.job_id)
-                ):
-                    return
+            if not _send_child(connection, CancelAck(PROTOCOL_VERSION, message.job_id)):
+                return
             continue
         if not isinstance(message, SegmentRequest) or message.slot is None:
             return
         descriptor_error = _validate_wire_descriptor(message.slot)
         if descriptor_error is not None:
-            _send_child(connection, _failure(message, descriptor_error))
-            return
+            if not _send_child(connection, _failure(message, descriptor_error)):
+                return
+            continue
         try:
             slot = SharedMemory(name=message.slot.name, create=False)
         except (FileNotFoundError, OSError, ValueError):
-            _send_child(
+            if not _send_child(
                 connection, _failure(message, "shared-memory slot is unavailable")
-            )
-            return
+            ):
+                return
+            continue
         try:
             required_capacity = max(
                 message.slot.byte_length,
                 message.slot.shape[0] * message.slot.shape[1] * 4,
             )
             if slot.size < required_capacity:
-                _send_child(
+                if not _send_child(
                     connection,
                     _failure(message, "shared-memory slot capacity is invalid"),
-                )
-                return
-            source = np.ndarray(
-                message.slot.shape, dtype=np.uint8, buffer=slot.buf
-            ).copy()
+                ):
+                    return
+                continue
+            try:
+                source = np.ndarray(
+                    message.slot.shape, dtype=np.uint8, buffer=slot.buf
+                ).copy()
+            except BaseException:
+                if not _send_child(
+                    connection,
+                    _failure(message, "shared-memory source buffer is invalid"),
+                ):
+                    return
+                continue
             try:
                 result = inference(source, session)
             except BaseException as error:
-                _send_child(connection, _inference_failure(message, error))
+                if not _send_child(connection, _inference_failure(message, error)):
+                    return
                 continue
             shutdown = False
-            while connection.poll():
+            cancel_requested = False
+            while True:
+                pending_available = _poll_parent(connection)
+                if pending_available is None:
+                    return
+                if not pending_available:
+                    break
                 pending = _receive_parent(connection)
                 if pending is None:
                     return
@@ -748,12 +871,12 @@ def _serve_segmentation_connection(
                     isinstance(pending, CancelRequest)
                     and pending.job_id == message.job_id
                 ):
-                    cancelled.add(pending.job_id)
+                    cancel_requested = True
                 else:
                     return
             if shutdown:
                 return
-            if message.job_id in cancelled:
+            if cancel_requested:
                 if not _send_child(
                     connection, CancelAck(PROTOCOL_VERSION, message.job_id)
                 ):
@@ -768,10 +891,11 @@ def _serve_segmentation_connection(
                 or result.nbytes != source.shape[0] * source.shape[1] * 4
                 or result.nbytes > slot.size
             ):
-                _send_child(
+                if not _send_child(
                     connection, _failure(message, "inference returned invalid RGBA")
-                )
-                return
+                ):
+                    return
+                continue
             slot_buffer = slot.buf
             assert slot_buffer is not None
             slot_buffer[: result.nbytes] = result.tobytes(order="C")
@@ -796,6 +920,13 @@ def _receive_parent(connection: Connection) -> ParentMessage | None:
         raw = connection.recv_bytes(MAX_PROTOCOL_MESSAGE_BYTES)
         return decode_parent_message(raw)
     except (EOFError, BrokenPipeError, OSError, ProtocolCodecError):
+        return None
+
+
+def _poll_parent(connection: Connection) -> bool | None:
+    try:
+        return connection.poll()
+    except (EOFError, BrokenPipeError, OSError):
         return None
 
 
@@ -843,10 +974,58 @@ def _validate_wire_descriptor(slot: SharedFrame) -> str | None:
     return None
 
 
+@dataclass(slots=True)
+class _LaunchBudget:
+    nodes: int = 0
+    text_bytes: int = 0
+    estimated_bytes: int = 0
+
+    def add_node(self, estimated_bytes: int = 1) -> None:
+        self.nodes += 1
+        self.estimated_bytes += estimated_bytes
+        if self.nodes > _MAX_LAUNCH_NODES:
+            raise _protocol_app_error("model launch payload has too many nodes")
+        if self.estimated_bytes > _MAX_LAUNCH_PAYLOAD_BYTES:
+            raise _protocol_app_error("model launch payload exceeds its byte limit")
+
+    def add_estimate(self, estimated_bytes: int) -> None:
+        self.estimated_bytes += estimated_bytes
+        if self.estimated_bytes > _MAX_LAUNCH_PAYLOAD_BYTES:
+            raise _protocol_app_error("model launch payload exceeds its byte limit")
+
+    def add_text(self, value: str, *, key: bool = False) -> None:
+        if len(value) > _MAX_LAUNCH_TEXT_BYTES:
+            raise _protocol_app_error("model launch payload text is too large")
+        byte_length = len(value.encode("utf-8"))
+        self.text_bytes += byte_length
+        self.estimated_bytes += _json_string_encoded_length(value)
+        if key:
+            self.estimated_bytes += 1
+        if self.text_bytes > _MAX_LAUNCH_TEXT_BYTES:
+            raise _protocol_app_error("model launch payload text budget is exceeded")
+        if self.estimated_bytes > _MAX_LAUNCH_PAYLOAD_BYTES:
+            raise _protocol_app_error("model launch payload exceeds its byte limit")
+
+
+def _json_string_encoded_length(value: str) -> int:
+    length = 2
+    for character in value:
+        codepoint = ord(character)
+        if character in {'"', "\\"}:
+            length += 2
+        elif codepoint < 0x20 or codepoint <= 0xFFFF and codepoint > 0x7E:
+            length += 6
+        elif codepoint > 0xFFFF:
+            length += 12
+        else:
+            length += 1
+    return length
+
+
 def _normalize_launch_payload(value: object) -> dict[str, object]:
     if type(value) is not dict:
         raise _protocol_app_error("model launch payload must be an exact built-in dict")
-    cloned = _clone_json_safe(value, depth=0)
+    cloned = _clone_json_safe(value, depth=0, budget=_LaunchBudget(), ancestors=set())
     assert type(cloned) is dict
     try:
         encoded = json.dumps(
@@ -865,34 +1044,81 @@ def _normalize_launch_payload(value: object) -> dict[str, object]:
     return normalized
 
 
-def _clone_json_safe(value: object, *, depth: int) -> object:
+def _clone_json_safe(
+    value: object,
+    *,
+    depth: int,
+    budget: _LaunchBudget,
+    ancestors: set[int],
+) -> object:
     if depth > _MAX_LAUNCH_DEPTH:
         raise _protocol_app_error("model launch payload nesting is too deep")
-    if value is None or type(value) in {str, bool, int}:
+    budget.add_node()
+    if value is None or type(value) is bool:
+        return value
+    if type(value) is str:
+        budget.add_text(value)
+        return value
+    if type(value) is int:
+        estimated_digits = max(1, math.ceil(value.bit_length() * math.log10(2)))
+        if value < 0:
+            estimated_digits += 1
+        budget.add_estimate(estimated_digits)
         return value
     if type(value) is float:
         if not math.isfinite(value):
             raise _protocol_app_error("model launch payload has a non-finite number")
+        budget.add_estimate(32)
         return value
     if type(value) is list:
         if len(value) > _MAX_LAUNCH_ITEMS:
             raise _protocol_app_error("model launch list has too many items")
-        return [_clone_json_safe(item, depth=depth + 1) for item in value]
+        identity = id(value)
+        if identity in ancestors:
+            raise _protocol_app_error("model launch payload contains a cycle")
+        ancestors.add(identity)
+        try:
+            return [
+                _clone_json_safe(
+                    item,
+                    depth=depth + 1,
+                    budget=budget,
+                    ancestors=ancestors,
+                )
+                for item in value
+            ]
+        finally:
+            ancestors.remove(identity)
     if type(value) is dict:
         if len(value) > _MAX_LAUNCH_ITEMS:
             raise _protocol_app_error("model launch object has too many fields")
-        result: dict[str, object] = {}
-        for key, item in value.items():
-            if type(key) is not str or not key or len(key) > 256:
-                raise _protocol_app_error("model launch keys must be bounded strings")
-            result[key] = _clone_json_safe(item, depth=depth + 1)
-        return result
+        identity = id(value)
+        if identity in ancestors:
+            raise _protocol_app_error("model launch payload contains a cycle")
+        ancestors.add(identity)
+        try:
+            result: dict[str, object] = {}
+            for key, item in value.items():
+                if type(key) is not str or not key or len(key) > 256:
+                    raise _protocol_app_error(
+                        "model launch keys must be bounded strings"
+                    )
+                budget.add_text(key, key=True)
+                result[key] = _clone_json_safe(
+                    item,
+                    depth=depth + 1,
+                    budget=budget,
+                    ancestors=ancestors,
+                )
+            return result
+        finally:
+            ancestors.remove(identity)
     raise _protocol_app_error("model launch payload contains a custom object")
 
 
 def _attempt_process_action(
     process: BaseProcess, action: str, errors: list[str]
-) -> None:
+) -> bool:
     try:
         method = getattr(process, action)
         if action == "join":
@@ -901,6 +1127,8 @@ def _attempt_process_action(
             method()
     except BaseException as error:
         errors.append(f"process {action} failed: {type(error).__name__}: {error}")
+        return False
+    return True
 
 
 def _safe_alive(process: BaseProcess, errors: list[str] | None = None) -> bool:
@@ -950,13 +1178,14 @@ def _protocol_app_error(detail: str, job_id: str | None = None) -> AppError:
     )
 
 
-def _cleanup_error(detail: str) -> AppError:
+def _cleanup_error(detail: str, job_id: str | None = None) -> AppError:
     return AppError(
         ErrorCode.SEGMENTATION_CLEANUP_FAILED,
         "segmentation-cleanup",
         "error.segmentation.cleanup-failed",
         detail,
         "restart-application",
+        job_id,
     )
 
 
