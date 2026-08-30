@@ -41,7 +41,7 @@ Nothing else gates V1. When that sentence is true end to end, V1 is done.
 | Area | V1 commitment |
 |---|---|
 | Platform | **macOS 13+ arm64 only.** Run from source (`uv run rembggui`) is sufficient; a packaged `.app` is a stretch goal, not a gate. |
-| Models | **4 models**: `birefnet-portrait` (default), `birefnet-general-lite`, `u2net`, `isnet-general-use`. |
+| Models | **13 models**: `birefnet-portrait` (default), `u2net`, `u2netp`, `u2net_human_seg`, `silueta`, `isnet-general-use`, `isnet-anime`, `birefnet-general`, `birefnet-general-lite`, `birefnet-dis`, `birefnet-hrsod`, `birefnet-cod`, `birefnet-massive`. Excluded: `bria-rmbg` (model-specific licence requires its own consent flow) and `u2net_cloth_seg` (needs a clothing-category input the UI cannot provide). |
 | Edge treatment | `Standard` and `Decontaminate colors`. |
 | Source media | Local 8-bit SDR MP4/MOV, H.264/H.265. |
 | Output | Lossless animated WebP, plus the still-image single-frame case. |
@@ -64,7 +64,7 @@ code that already exists stays as it is; it is not deleted, and it is not grown.
 |---|---|---|
 | **Rebuild-from-edited-cuts workflow and its UI** | Task 11 / 12 | The most expensive feature in the plan. Its value cannot be judged before a first real render exists. The persistence engine already exists; the *workflow* waits. |
 | **Custom `QAccessible` virtual-child tree** for timeline and crop | Task 14 | Standard-widget accessibility is committed for V1. A bespoke accessible tree for custom-painted canvases is a large, untestable-on-one-machine surface. |
-| **Remaining 11 models** | Design catalog | The catalog may list them as visible-but-disabled. `bria-rmbg` in particular carries a licence caveat that needs a decision, not code. |
+| **`bria-rmbg` and `u2net_cloth_seg`** | Design catalog | `bria-rmbg` requires a model-specific licence consent flow; `u2net_cloth_seg` needs a clothing-category input the UI cannot provide. |
 | `ViTMatte`, alpha-matting edge mode | Design | Already outside committed scope; stays there. |
 | **Windows and Linux artifacts**, four-target build matrix | Task 10 / 17 | One platform proves the product. Porting is mechanical afterwards. |
 | **Manual four-artifact release qualification** | Design | Presupposes artifacts that V1 does not promise. |

@@ -1303,6 +1303,7 @@ def _instantiate_verified_rembg_session(
 
     runtime: Any = ort_module
     session_options = runtime.SessionOptions()
+    session_options.enable_profiling = False
     threads = os.getenv("OMP_NUM_THREADS")
     if threads is not None:
         thread_count = int(threads)

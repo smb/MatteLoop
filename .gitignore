@@ -16,3 +16,4 @@ dist/
 .rembggui-work/
 .rembggui-local-media/
 .worktrees/
+onnxruntime_profile__*.json

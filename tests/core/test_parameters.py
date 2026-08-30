@@ -5,7 +5,10 @@ from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 
+import pytest
+
 from rembggui.core.parameters import (
+    V1_MODEL_IDS,
     AlphaThresholdChanged,
     EdgeModeChanged,
     GlobalTrimChanged,
@@ -30,6 +33,7 @@ from rembggui.core.state import (
     SourceLoadRequested,
     reduce,
 )
+from rembggui.jobs.models.catalog import ModelCatalog
 
 
 @dataclass(frozen=True)
@@ -65,6 +69,34 @@ def test_parameter_defaults_match_the_v1_mapping() -> None:
     assert parameters.padding == 0
     assert parameters.stretch_x == Decimal("1.0")
     assert parameters.max_mib == Decimal("0")
+
+
+def test_each_enabled_model_id_resolves_in_the_authoritative_catalog() -> None:
+    catalog = ModelCatalog.load_resource()
+
+    enabled_ids = tuple(catalog.get(model_id).id for model_id in V1_MODEL_IDS)
+
+    assert enabled_ids == (
+        "u2net",
+        "u2netp",
+        "u2net_human_seg",
+        "silueta",
+        "isnet-general-use",
+        "isnet-anime",
+        "birefnet-general",
+        "birefnet-general-lite",
+        "birefnet-portrait",
+        "birefnet-dis",
+        "birefnet-hrsod",
+        "birefnet-cod",
+        "birefnet-massive",
+    )
+
+
+@pytest.mark.parametrize("model_id", ("bria-rmbg", "u2net_cloth_seg"))
+def test_excluded_models_are_rejected_by_v1_parameters(model_id: str) -> None:
+    with pytest.raises(ValueError, match="outside the V1 catalog"):
+        ParameterState(model_id=model_id)
 
 
 def test_segmentation_parameter_changes_stale_the_current_preview() -> None:

@@ -28,7 +28,7 @@
     "long_functions": 11
   },
   "src/rembggui/jobs/segmentation_host.py": {
-    "lines": 1629,
+    "lines": 1630,
     "long_functions": 8
   },
   "src/rembggui/jobs/source.py": {

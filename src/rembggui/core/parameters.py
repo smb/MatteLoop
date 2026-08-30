@@ -23,17 +23,20 @@ if TYPE_CHECKING:
     from rembggui.core.state import AppState
 
 V1_MODEL_IDS = (
-    "birefnet-portrait",
-    "birefnet-general-lite",
     "u2net",
+    "u2netp",
+    "u2net_human_seg",
+    "silueta",
     "isnet-general-use",
+    "isnet-anime",
+    "birefnet-general",
+    "birefnet-general-lite",
+    "birefnet-portrait",
+    "birefnet-dis",
+    "birefnet-hrsod",
+    "birefnet-cod",
+    "birefnet-massive",
 )
-V1_MODEL_DISPLAY_NAMES = {
-    "birefnet-portrait": "BiRefNet Portrait",
-    "birefnet-general-lite": "BiRefNet General Lite",
-    "u2net": "U²-Net",
-    "isnet-general-use": "IS-Net General Use",
-}
 
 
 @dataclass(frozen=True, slots=True)

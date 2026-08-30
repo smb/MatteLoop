@@ -627,7 +627,7 @@ def test_child_creates_session_only_after_hash_proof_without_parent_env_mutation
     assert len(calls) == 1
 
 
-def test_verified_instantiation_passes_same_immutable_bytes_directly_to_ort() -> None:
+def test_verified_instantiation_uses_bytes_without_onnxruntime_profiling() -> None:
     original_download_called = False
     captured: list[bytes] = []
     model_bytes = b"already-verified"
@@ -646,6 +646,7 @@ def test_verified_instantiation_passes_same_immutable_bytes_directly_to_ort() ->
     class FakeOptions:
         inter_op_num_threads = 0
         intra_op_num_threads = 0
+        enable_profiling = True
 
     class FakeOrt:
         @staticmethod
@@ -661,6 +662,7 @@ def test_verified_instantiation_passes_same_immutable_bytes_directly_to_ort() ->
             content: bytes, *, sess_options: object, providers: list[str]
         ) -> object:
             assert isinstance(sess_options, FakeOptions)
+            assert sess_options.enable_profiling is False
             assert providers == ["CPUExecutionProvider"]
             captured.append(content)
             return object()

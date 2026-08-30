@@ -21,7 +21,6 @@ from PySide6.QtWidgets import (
 
 from rembggui.core.crop_state import CropChanged, CropToggleChanged, ResetCrop
 from rembggui.core.parameters import (
-    V1_MODEL_DISPLAY_NAMES,
     V1_MODEL_IDS,
     AlphaThresholdChanged,
     EdgeModeChanged,
@@ -36,6 +35,7 @@ from rembggui.core.parameters import (
 )
 from rembggui.core.specs import CropSpec, EdgeMode
 from rembggui.core.timeline import DurationChanged, EndChanged, StartChanged
+from rembggui.jobs.models.catalog import ModelCatalog
 from rembggui.ui.crop_presentation import CropPresentation
 from rembggui.ui.parameter_presentation import (
     ParameterPresentation,
@@ -43,6 +43,7 @@ from rembggui.ui.parameter_presentation import (
     fraction_from_widget_value,
 )
 from rembggui.ui.ports import OutputDirectoryRequested
+from rembggui.ui.source_presentation import format_source_file_size
 
 _DISCLOSURES = (
     ("segmentation", "Segmentation", True),
@@ -120,17 +121,26 @@ class Inspector(QFrame):
         self.model_picker = QComboBox()
         self.model_picker.setObjectName("model_picker")
         self.model_picker.setAccessibleName("Segmentation model")
+        catalog = ModelCatalog.load_resource()
         for model_id in V1_MODEL_IDS:
+            spec = catalog.get(model_id)
+            artifact = spec.artifact
+            size = format_source_file_size(
+                artifact.size_bytes if artifact is not None else None
+            )
             availability = self._model_options.get(model_id, False)
-            status = "available locally" if availability else "not downloaded"
+            status = "cached locally" if availability else "not cached locally"
             self.model_picker.addItem(
-                f"{V1_MODEL_DISPLAY_NAMES[model_id]} — {status}", model_id
+                f"{spec.display_name} — {size} — {status}", model_id
             )
             self.model_picker.setItemData(
                 self.model_picker.count() - 1,
-                f"{V1_MODEL_DISPLAY_NAMES[model_id]} ({status})",
+                f"{spec.display_name} ({size}; {status})",
                 Qt.ItemDataRole.ToolTipRole,
             )
+        self.model_picker.setCurrentIndex(
+            self.model_picker.findData(catalog.default_id)
+        )
         self.edge_picker = QComboBox()
         self.edge_picker.setObjectName("edge_picker")
         self.edge_picker.setAccessibleName("Edge treatment")
