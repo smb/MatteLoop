@@ -240,21 +240,20 @@ def validate_webp(
         with _open_webp_validation_source(source) as (held, file_size):
             if file_size >= _RIFF_LIMIT:
                 raise _invalid_output("WebP output must be smaller than 4 GiB")
-            with _duplicate_binary(held) as validation_input:
-                riff = _parse_riff(validation_input, file_size)
-                validation_input.seek(0)
-                with _open_pillow(validation_input) as image:
-                    if image.format != "WEBP":
-                        raise _invalid_output("output is not a WebP image")
-                    width, height = FramingSpec().validate_final_dimensions(*image.size)
-                    decoded_frames = getattr(image, "n_frames", 1)
-                    has_alpha = False
-                    for index in range(decoded_frames):
-                        image.seek(index)
-                        image.load()
-                        if rgba_ownership_tracker is not None:
-                            rgba_ownership_tracker.register(image)
-                        has_alpha = has_alpha or image.mode in {"RGBA", "LA"}
+            riff = _parse_riff(held, file_size)
+            held.seek(0)
+            with _open_pillow(held) as image:
+                if image.format != "WEBP":
+                    raise _invalid_output("output is not a WebP image")
+                width, height = FramingSpec().validate_final_dimensions(*image.size)
+                decoded_frames = getattr(image, "n_frames", 1)
+                has_alpha = False
+                for index in range(decoded_frames):
+                    image.seek(index)
+                    image.load()
+                    if rgba_ownership_tracker is not None:
+                        rgba_ownership_tracker.register(image)
+                    has_alpha = has_alpha or image.mode in {"RGBA", "LA"}
     except AppError:
         raise
     except (OSError, EOFError, ValueError, SyntaxError) as error:
@@ -1137,26 +1136,58 @@ def _open_webp_validation_source(
         for method in ("fileno", "read", "seek", "tell")
     ):
         raise _invalid_output("WebP source must be a path or seekable binary file")
+    duplicate_descriptor = -1
+    duplicate: BinaryIO | None = None
     try:
         descriptor = source.fileno()
-        before = _identity_from_stat(os.fstat(descriptor))
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        if type(descriptor) is not int or descriptor < 0:
+            raise _invalid_output(
+                "open WebP source fileno must return a non-negative integer"
+            )
+        duplicate_descriptor = os.dup(descriptor)
+        opened_stat = os.fstat(duplicate_descriptor)
+        before = _identity_from_stat(opened_stat)
+        if not stat.S_ISREG(opened_stat.st_mode):
             raise _invalid_output("WebP source must be a regular file")
         position = source.tell()
-    except AppError:
+        duplicate = os.fdopen(duplicate_descriptor, "rb")
+        held_descriptor = duplicate_descriptor
+        duplicate_descriptor = -1
+    except AppError as error:
+        if duplicate_descriptor >= 0:
+            try:
+                os.close(duplicate_descriptor)
+            except OSError as cleanup_error:
+                error.add_note(
+                    f"additional duplicate WebP source cleanup failure: {cleanup_error}"
+                )
         raise
-    except (OSError, ValueError) as error:
+    except (OSError, TypeError, ValueError) as error:
+        if duplicate_descriptor >= 0:
+            try:
+                os.close(duplicate_descriptor)
+            except OSError as cleanup_error:
+                error.add_note(
+                    f"additional duplicate WebP source cleanup failure: {cleanup_error}"
+                )
         raise _invalid_output(f"cannot inspect open WebP source: {error}") from error
 
     primary: BaseException | None = None
     try:
-        yield source, before.size
-        if _identity_from_stat(os.fstat(descriptor)) != before:
+        yield duplicate, before.size
+        if _identity_from_stat(os.fstat(held_descriptor)) != before:
             raise _invalid_output("open WebP source changed during validation")
     except BaseException as error:
         primary = error
         raise
     finally:
+        close_error: OSError | None = None
+        try:
+            duplicate.close()
+        except OSError as error:
+            close_error = error
+            if primary is not None:
+                primary.add_note(f"cannot close duplicate WebP source: {error}")
         try:
             source.seek(position)
         except (OSError, ValueError) as error:
@@ -1165,35 +1196,10 @@ def _open_webp_validation_source(
                 primary.add_note(detail)
             else:
                 raise _invalid_output(detail) from error
-
-
-@contextmanager
-def _duplicate_binary(source: BinaryIO) -> Iterator[BinaryIO]:
-    try:
-        descriptor = os.dup(source.fileno())
-    except (OSError, ValueError) as error:
-        raise _invalid_output(f"cannot duplicate open WebP source: {error}") from error
-    duplicate: BinaryIO | None = None
-    primary: BaseException | None = None
-    try:
-        duplicate = os.fdopen(descriptor, "rb")
-        descriptor = -1
-        yield duplicate
-    except BaseException as error:
-        primary = error
-        raise
-    finally:
-        try:
-            if duplicate is not None:
-                duplicate.close()
-            elif descriptor >= 0:
-                os.close(descriptor)
-        except OSError as error:
-            detail = f"cannot close duplicate WebP source: {error}"
-            if primary is not None:
-                primary.add_note(detail)
-            else:
-                raise _invalid_output(detail) from error
+        if primary is None and close_error is not None:
+            raise _invalid_output(
+                f"cannot close duplicate WebP source: {close_error}"
+            ) from close_error
 
 
 @contextmanager

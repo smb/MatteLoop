@@ -460,6 +460,81 @@ def test_validation_of_an_open_binary_preserves_position_and_caller_ownership(
         assert not held.closed
 
 
+def test_validation_captures_an_open_binary_descriptor_exactly_once(
+    tmp_path: Path,
+) -> None:
+    source = save_rgba(tmp_path / "source.png", (128, 128), (10, 30, 220, 91))
+    valid = tmp_path / "valid.webp"
+    encode_lossless_webp((source,), (100,), valid)
+    invalid = tmp_path / "invalid.webp"
+    invalid.write_bytes(b"X" + valid.read_bytes()[1:])
+
+    class SwitchingBinary:
+        def __init__(self, primary, substitute) -> None:
+            self.primary = primary
+            self.substitute = substitute
+            self.fileno_calls = 0
+
+        def fileno(self):
+            self.fileno_calls += 1
+            if self.fileno_calls == 1:
+                return self.primary.fileno()
+            return self.substitute.fileno()
+
+        def read(self, size=-1):
+            return self.primary.read(size)
+
+        def seek(self, offset, whence=0):
+            return self.primary.seek(offset, whence)
+
+        def tell(self):
+            return self.primary.tell()
+
+    with invalid.open("rb") as primary, valid.open("rb") as substitute:
+        primary.seek(11)
+        switching = SwitchingBinary(primary, substitute)
+
+        with pytest.raises(AppError) as exc:
+            validate_webp(switching, expected_frames=1, expected_duration_ms=0)
+
+        assert exc.value.code is ErrorCode.INVALID_OUTPUT
+        assert switching.fileno_calls == 1
+        assert primary.tell() == 11
+        assert not primary.closed
+        assert not substitute.closed
+
+
+@pytest.mark.parametrize("fileno_result", [True, "3", -1])
+def test_validation_rejects_non_exact_or_negative_binary_descriptors(
+    fileno_result: object,
+) -> None:
+    class MalformedBinary:
+        fileno_calls = 0
+
+        def fileno(self):
+            self.fileno_calls += 1
+            return fileno_result
+
+        def read(self, size=-1):
+            del size
+            return b""
+
+        def seek(self, offset, whence=0):
+            del whence
+            return offset
+
+        def tell(self):
+            return 0
+
+    source = MalformedBinary()
+
+    with pytest.raises(AppError) as exc:
+        validate_webp(source, expected_frames=1, expected_duration_ms=0)
+
+    assert exc.value.code is ErrorCode.INVALID_OUTPUT
+    assert source.fileno_calls == 1
+
+
 def test_animated_webp_stores_each_odd_delay_exactly(tmp_path: Path) -> None:
     paths = rgba_fixture_paths(tmp_path, count=6)
     output = tmp_path / "odd-delays.webp"

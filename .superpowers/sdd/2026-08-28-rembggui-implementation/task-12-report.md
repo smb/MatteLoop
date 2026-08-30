@@ -116,6 +116,56 @@ The final GREEN boundary is descriptor-based end to end:
 The direct race/ownership suite is **9 passed**, the complete WebP and render
 orchestration gate is **117 passed**, and the final full suite is **918 passed**.
 
+A third publication review then targeted the remaining file-identity
+linearization gaps. Each finding first received a deterministic RED reproducer:
+
+- a caller-owned BinaryIO could return one descriptor during inspection and a
+  different descriptor when validation duplicated it;
+- REPLACE, no-clobber, and rollback could accept a destination swap occurring
+  inside the held-descriptor SHA read because the pathname was checked only
+  before that read;
+- a failed REPLACE with no previous output blindly unlinked whatever pathname
+  occupied the destination during rollback;
+- rollback allocated its only durable recovery after destructive commit, so
+  ENOSPC or EACCES during recovery could lose the old bytes and return the wrong
+  stage/action;
+- successful no-clobber publication used hard-link-plus-unlink, leaving a
+  check-to-unlink race for the private stage; and
+- candidate cleanup had the same impossible-to-make-portable conditional
+  pathname deletion.
+
+The GREEN implementation captures and validates `fileno()` exactly once,
+immediately duplicates that exact non-Boolean non-negative integer, and performs
+all RIFF and Pillow work on the owned duplicate. Every long publication content
+check now has the same ordering: held identity plus path identity before SHA,
+SHA through the held descriptor, then both identities again. The second path
+check is the publication verification linearization point.
+
+REPLACE now creates and fsyncs a durable recovery before its first destructive
+rename. A same-filesystem hard link is preferred and a fully copied/fsynced
+descriptor snapshot is the fallback. Recovery lives in a mode-0700 private
+namespace with one fixed slot per destination, is reused when already exact,
+and is replaced by the next successful transaction. Restore attempts copy only
+from its held descriptor and never depend on allocating a recovery after
+failure. Exhausted restore attempts return `publish-rollback` /
+`recover-output` and the exact verified recovery path; hostile replacement of
+that path is detected and explicitly reported without claiming that the path
+still contains old bytes.
+
+No-clobber publication now consumes a private fsynced stage with the platform's
+native exclusive rename: `renamex_np(RENAME_EXCL)` on macOS,
+`renameat2(RENAME_NOREPLACE)` on Linux, and `MoveFileExW` without replace flags
+on Windows. A concurrent target wins without being modified. Private
+publication and recovery slots are fixed per destination, so collisions and
+subsequent jobs reuse bounded storage. On POSIX there is no portable
+identity-conditional unlink; ambiguous or still-addressable candidate/temp
+paths are therefore retained with an exact diagnostic instead of risking
+deletion of foreign bytes. Successful native publication consumes its stage,
+and REPLACE consumes its candidate.
+
+This round's complete jobs contract gate is **526 passed** and the complete
+WebP contract gate is **72 passed**.
+
 ## Architecture and safety decisions
 
 - `cut_cache_key_inputs()` is the only authoritative cut-input mapping. The
@@ -142,12 +192,12 @@ orchestration gate is **117 passed**, and the final full suite is **918 passed**
   production integration records peak at most three and current zero.
 - The encoder never receives the final path. It returns only a descriptor-bound,
   SHA-verified `ValidatedCandidate`. WebP parsing/decoding never reopens its
-  pathname. `REPLACE` uses atomic replacement followed by descriptor/byte
-  verification and restoration from the held prior-output descriptor;
-  `CHOOSE_ANOTHER_NAME` and `CANCEL` reserve via an identity-bound private copy
-  and atomic hard link. Actual disk-full, quota, permission, read-only,
-  candidate/stage-swap, collision, and publication failures cannot report
-  attacker or concurrent bytes as a successful output.
+  pathname. `REPLACE` first persists its bounded recovery slot, then atomically
+  replaces and descriptor-verifies; `CHOOSE_ANOTHER_NAME` and `CANCEL` consume
+  a bounded private copy through native exclusive rename. Actual disk-full,
+  quota, permission, read-only, candidate/stage/SHA swaps, collision, and
+  publication failures cannot report attacker or concurrent bytes as a
+  successful output.
 - `JobContext.commit_if_not_cancelled()` serializes cancellation against the
   one final publish linearization. Artifact identity and cleanup complete before
   that commit, and there is no cancellation checkpoint afterward. Cleanup errors
@@ -155,12 +205,12 @@ orchestration gate is **117 passed**, and the final full suite is **918 passed**
 
 ## Verification
 
-- `uv run pytest -q` — **918 passed in 48.27s** outside the restricted
+- `uv run pytest -q` — **941 passed in 48.98s** outside the restricted
   shared-memory sandbox.
-- Final WebP/render/preview/Rebuild gate — **117 passed in 34.36s**; direct
-  publication-race and descriptor-ownership gate — **9 passed in 0.51s**.
+- Complete jobs contract gate — **526 passed in 14.65s**; complete WebP
+  contract gate — **72 passed in 31.87s**.
 - `uv run ruff check .` — passed.
-- `uv run ruff format --check` over all 4 publication-fix Python files — passed.
+- `uv run ruff format --check` over all 5 changed Python files — passed.
 - `uv run mypy src` — passed for 29 source files.
 - `git diff --check` — passed.
 
@@ -171,6 +221,14 @@ models or invoke live ONNX/rembg inference. The exact documented rembg kwargs ar
 unit-tested at the child boundary, and the real local lossless WebP path is
 integration-tested; a manual release qualification with already-cached model
 weights remains appropriate before shipping the GUI integration.
-The Windows `CreateFileW` sharing branch remains type-checked and isolated behind
-the same identity contracts, but this race-hardening round executed real
-filesystem mutations on POSIX/macOS rather than a Windows host.
+On failed/ambiguous cleanup, a hidden candidate or private temporary may remain
+with its diagnostic rather than risk deleting bytes installed by another
+actor. Publication/recovery slots are bounded per destination and reused;
+unverified encoder candidates are bounded per failed job and can accumulate
+until an explicit maintenance pass. This is the deliberate portable safety
+tradeoff because POSIX has no atomic conditional unlink by held inode identity.
+
+The Windows `CreateFileW` sharing branch and `MoveFileExW` no-replace flags are
+type-checked and covered through injected platform contracts, but this
+race-hardening round executed real filesystem mutations on macOS rather than a
+Windows or Linux host.
