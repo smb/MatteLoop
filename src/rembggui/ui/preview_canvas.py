@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+
+# DESIGN.md: result transparency uses this checkerboard pair.
+CHECKERBOARD_LIGHT = "#343A3F"
+CHECKERBOARD_DARK = "#252A2E"
 
 
 class PreviewCanvas(QLabel):
@@ -50,9 +54,34 @@ class PreviewCanvas(QLabel):
         self.setText("")
         self._update_pixmap()
 
+    def set_presented_frame(self, image: object, placeholder: str) -> None:
+        """Display a presented QImage or restore its placeholder message."""
+        if isinstance(image, QImage) and not image.isNull():
+            self.set_frame(image)
+        else:
+            self.set_frame(None)
+            self.setText(placeholder)
+
     def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         super().resizeEvent(event)
         self._update_pixmap()
+
+    def paintEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        if self.property("checkerboard") is True:
+            painter = QPainter(self)
+            tile = 16
+            light = QColor(CHECKERBOARD_LIGHT)
+            dark = QColor(CHECKERBOARD_DARK)
+            for row, y in enumerate(range(0, self.height(), tile)):
+                for column, x in enumerate(range(0, self.width(), tile)):
+                    painter.fillRect(
+                        x,
+                        y,
+                        tile,
+                        tile,
+                        light if (row + column) % 2 == 0 else dark,
+                    )
+        super().paintEvent(event)
 
     def _update_pixmap(self) -> None:
         if self._frame is None:

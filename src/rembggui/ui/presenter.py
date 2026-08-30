@@ -63,6 +63,7 @@ class PresentationModel:
     source_file_size: str
     source_path: str | None
     source_frame: object | None
+    result_frame: object | None
     source_loading: bool
     inspector_enabled: bool
 
@@ -203,6 +204,9 @@ def present(state: AppState) -> PresentationModel:
         workspace_open=state.edited_cuts or state.edited_cuts_error is not None,
         **s(state.source_value if ready else None, state.source is SourceState.LOADING),
         source_frame=state.source_frame,
+        result_frame=(
+            state.preview_result.value if state.preview_result is not None else None
+        ),
         source_loading=state.source is SourceState.LOADING,
         inspector_enabled=not active
         and state.source in {SourceState.EMPTY, SourceState.READY},

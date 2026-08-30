@@ -263,7 +263,7 @@ class MainWindow(QMainWindow):
         self.original_canvas.set_frame(
             source_frame if isinstance(source_frame, QImage) else None
         )
-        self.result_canvas.setText(model.result_message)
+        self.result_canvas.set_presented_frame(model.result_frame, model.result_message)
         self.result_canvas.setAccessibleName(model.result_accessible_name)
         self.result_canvas.setAccessibleDescription(model.result_accessible_description)
         self.result_canvas.setProperty("status", model.result_status)

@@ -1,0 +1,241 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from fractions import Fraction
+from pathlib import Path
+from threading import Event, get_ident
+
+import pytest
+from PIL import Image
+from PySide6.QtCore import QSettings, Qt
+
+from rembggui.core.state import (
+    CancelRequested,
+    JobStageChanged,
+    ModelPrepared,
+    PreviewRequested,
+    PreviewState,
+    PreviewSucceeded,
+)
+from rembggui.jobs.context import JobContext
+from rembggui.jobs.render import ImmutableRgba, PreparedSegmentation, PreviewResult
+from rembggui.ui.controller import SourceController, SourceLoadResult
+from rembggui.ui.main_window import MainWindow
+from rembggui.ui.ports import PreviewFrameRequested, VideoDropped
+from rembggui.ui.preview_controller import (
+    PreviewController,
+    PreviewJobDialog,
+    PreviewRuntime,
+)
+from rembggui.ui.store import ReducerStore
+
+
+@dataclass(frozen=True)
+class Metadata:
+    path: Path
+    width: int = 128
+    height: int = 128
+    duration: Fraction = Fraction(2)
+
+
+class FakeSourceAdapter:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def load(self, path: Path, request_id: int) -> SourceLoadResult:
+        del request_id
+        return SourceLoadResult(
+            Metadata(path),
+            Image.new("RGB", (128, 128), (20, 40, 60)),
+        )
+
+
+class FakePreviewRuntime(PreviewRuntime):
+    def __init__(self) -> None:
+        self.prepare_calls: list[tuple[str, dict[str, object]]] = []
+        self.requests = []
+        self.thread_ids: list[int] = []
+
+    def prepare(
+        self, model_id: str, extras: dict[str, object], context: JobContext
+    ) -> PreparedSegmentation:
+        self.prepare_calls.append((model_id, extras))
+        context.progress(
+            "Downloading model",
+            64,
+            total=128,
+            detail="64 / 128 bytes",
+        )
+        return PreparedSegmentation(
+            self,
+            "birefnet-portrait",
+            "ab" * 32,
+            "2.0.72",
+            frozenset({"standard"}),
+        )
+
+    def segment(self, frame, request):
+        del request
+        return frame
+
+    def preview(
+        self, request, playhead: Fraction, context: JobContext
+    ) -> PreviewResult:
+        self.thread_ids.append(get_ident())
+        self.requests.append((request, playhead))
+        context.progress("Segmentation", 0, detail="")
+        image = Image.new("RGBA", (128, 128), (200, 100, 40, 255))
+        return PreviewResult(
+            "preview-fingerprint",
+            playhead,
+            playhead,
+            ImmutableRgba(128, 128, image.tobytes()),
+            ImmutableRgba(128, 128, image.tobytes()),
+            None,
+            None,
+            False,
+            False,
+            1,
+        )
+
+    def close(self) -> None:
+        return
+
+
+class BlockingPreviewRuntime(FakePreviewRuntime):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = Event()
+
+    def preview(
+        self, request, playhead: Fraction, context: JobContext
+    ) -> PreviewResult:
+        del request, playhead
+        self.started.set()
+        while not context.cancellation.requested:
+            Event().wait(0.01)
+        context.checkpoint("segmentation")
+        raise AssertionError("cancellation checkpoint must raise")
+
+
+class RecordingStore(ReducerStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[object] = []
+
+    def dispatch(self, event) -> None:
+        self.events.append(event)
+        super().dispatch(event)
+
+
+def _settings() -> QSettings:
+    settings = QSettings(
+        QSettings.IniFormat, QSettings.UserScope, "rembggui-preview-test", "ui"
+    )
+    settings.clear()
+    return settings
+
+
+def test_preview_request_prepares_model_and_displays_the_first_frame_cutout(
+    tmp_path: Path, qtbot
+) -> None:
+    path = tmp_path / "source.mp4"
+    path.write_bytes(b"fixture")
+    runtime = FakePreviewRuntime()
+    store = RecordingStore()
+    controller = SourceController(
+        store,
+        source_adapter=FakeSourceAdapter(path),
+        preview_runtime=runtime,
+    )
+    window = MainWindow(store, controller, _settings())
+    qtbot.addWidget(window)
+    window.show()
+
+    controller.dispatch(VideoDropped(path))
+    qtbot.waitUntil(lambda: store.state.source.value == "ready", timeout=5000)
+    controller.dispatch(PreviewFrameRequested())
+
+    qtbot.waitUntil(
+        lambda: store.state.preview is PreviewState.CURRENT,
+        timeout=5000,
+    )
+
+    assert runtime.prepare_calls == [("birefnet-portrait", {})]
+    assert runtime.thread_ids and runtime.thread_ids[0] != get_ident()
+    request, playhead = runtime.requests[0]
+    assert playhead == Fraction(0)
+    assert request.source == path
+    assert request.sampling.start == Fraction(0)
+    assert request.sampling.end == Fraction(2)
+    assert request.sampling.fps == 1
+    assert (request.crop.x, request.crop.y) == (0, 0)
+    assert (request.crop.width, request.crop.height) == (128, 128)
+    assert request.segmentation.model_id == "birefnet-portrait"
+    assert request.segmentation.edge_mode.value == "standard"
+    assert request.framing.trim is False
+    assert request.framing.padding == 0
+    assert request.framing.stretch_x == 1
+
+    assert any(isinstance(event, PreviewRequested) for event in store.events)
+    assert any(isinstance(event, ModelPrepared) for event in store.events)
+    assert any(isinstance(event, JobStageChanged) for event in store.events)
+    assert any(isinstance(event, PreviewSucceeded) for event in store.events)
+    assert window.result_canvas.pixmap() is not None
+    assert not window.result_canvas.pixmap().isNull()
+    assert window.result_canvas.property("checkerboard") is True
+    assert window.primary_action_name() == "render"
+    assert window.render_button.isEnabled()
+    assert window.requested_focus_name() == "result_canvas"
+
+
+@pytest.mark.parametrize("use_escape", [False, True])
+def test_cancel_keeps_modal_dialog_open_until_the_safe_checkpoint(
+    tmp_path: Path, qtbot, use_escape: bool
+) -> None:
+    path = tmp_path / "source.mp4"
+    path.write_bytes(b"fixture")
+    runtime = BlockingPreviewRuntime()
+    store = RecordingStore()
+    preview_controller = PreviewController(store, runtime=runtime)
+    controller = SourceController(
+        store,
+        source_adapter=FakeSourceAdapter(path),
+        preview_controller=preview_controller,
+    )
+    window = MainWindow(store, controller, _settings())
+    qtbot.addWidget(window)
+    window.show()
+
+    controller.dispatch(VideoDropped(path))
+    qtbot.waitUntil(lambda: store.state.source.value == "ready", timeout=5000)
+    controller.dispatch(PreviewFrameRequested())
+    qtbot.waitUntil(runtime.started.is_set, timeout=5000)
+    dialog = preview_controller.dialog
+    assert dialog is not None and dialog.isVisible()
+
+    if use_escape:
+        qtbot.keyClick(dialog, Qt.Key.Key_Escape)
+    else:
+        qtbot.mouseClick(dialog.cancel_button, Qt.MouseButton.LeftButton)
+    assert store.state.job.phase.value == "cancelling"
+    assert dialog.isVisible()
+    assert not dialog.cancel_button.isEnabled()
+    assert dialog.cancel_button.text() == "Cancelling…"
+    assert sum(isinstance(event, CancelRequested) for event in store.events) == 1
+
+    qtbot.waitUntil(lambda: store.state.job.phase.value == "idle", timeout=5000)
+    assert not dialog.isVisible()
+
+
+def test_job_dialog_rejects_user_close_until_terminal_event(qtbot) -> None:
+    dialog = PreviewJobDialog()
+    qtbot.addWidget(dialog)
+    dialog.open()
+    qtbot.waitUntil(dialog.isVisible, timeout=1000)
+
+    dialog.close()
+    assert dialog.isVisible()
+
+    dialog.close_for_terminal()
+    assert not dialog.isVisible()

@@ -35,6 +35,7 @@ from rembggui.ui.ports import (
     VideoDropped,
     WindowCommand,
 )
+from rembggui.ui.preview_controller import PreviewController, PreviewRuntime
 
 VIDEO_FILE_FILTER = "Video files (*.mp4 *.mov *.webm *.mkv)"
 _THREAD_SHUTDOWN_TIMEOUT_MS = 5000
@@ -125,6 +126,8 @@ class SourceController(QObject):
         store: StateStore,
         *,
         source_adapter: SourceAdapter | None = None,
+        preview_controller: PreviewController | None = None,
+        preview_runtime: PreviewRuntime | None = None,
         dialog_parent: QWidget | None = None,
         parent: QObject | None = None,
     ) -> None:
@@ -132,6 +135,12 @@ class SourceController(QObject):
         self._store = store
         self._source_adapter = source_adapter or PyAVSourceAdapter()
         self._dialog_parent = dialog_parent
+        self._preview_controller = preview_controller or PreviewController(
+            store,
+            runtime=preview_runtime,
+            dialog_parent=dialog_parent,
+            parent=self,
+        )
         self._decode_request_ids = count(1)
         self._threads: dict[str, tuple[QThread, _SourceLoadWorker]] = {}
         self._closed = False
@@ -139,6 +148,7 @@ class SourceController(QObject):
     def set_dialog_parent(self, parent: QWidget) -> None:
         """Set the window used as the parent for native source dialogs."""
         self._dialog_parent = parent
+        self._preview_controller.set_dialog_parent(parent)
 
     @property
     def active_load_count(self) -> int:
@@ -153,8 +163,7 @@ class SourceController(QObject):
         elif isinstance(command, VideoDropped):
             self._start_load(command.path)
         elif isinstance(command, PreviewFrameRequested):
-            # TODO(next slice: preview): wire PreviewFrameRequested to the preview job.
-            return
+            self._preview_controller.dispatch(command)
         elif isinstance(command, RenderVideoRequested):
             # TODO(next slice: render): wire RenderVideoRequested to the render job.
             return
@@ -177,6 +186,7 @@ class SourceController(QObject):
     def shutdown(self) -> None:
         """Stop accepting results while the application is closing."""
         self._closed = True
+        self._preview_controller.shutdown()
         threads = tuple(self._threads.items())
         for _request_id, (thread, _worker) in threads:
             thread.quit()
