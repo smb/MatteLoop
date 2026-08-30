@@ -7,7 +7,8 @@ orchestration. Preview and normal Render share one private cut-frame pipeline;
 normal Render validates and durably promotes editable PNG cuts before framing or
 encoding; Rebuild validates and snapshots those cuts and performs no source
 probe, hash, decode, or segmentation I/O. Both render modes converge on the same
-bounded second pass and publish only a validated sibling WebP candidate.
+bounded second pass and publish only a descriptor-validated WebP candidate
+owned by that job's private scratch directory.
 
 The public services are `PreviewService.preview(request, playhead, context)`,
 `RenderService.render(request, context)`, and
@@ -156,8 +157,8 @@ still contains old bytes.
 No-clobber publication now consumes a private fsynced stage with the platform's
 native exclusive rename: `renamex_np(RENAME_EXCL)` on macOS,
 `renameat2(RENAME_NOREPLACE)` on Linux, and Windows
-`FILE_RENAME_INFORMATION` with `ReplaceIfExists=false` against an explicitly
-bound destination-directory handle. A concurrent target wins without being
+`FILE_RENAME_INFORMATION_EX` (information class 65) with POSIX rename semantics
+and no replace flag against an explicitly bound destination-directory handle. A concurrent target wins without being
 modified. Private
 publication and recovery slots are fixed per destination, so collisions and
 subsequent jobs reuse bounded storage. On POSIX there is no portable
@@ -217,8 +218,69 @@ publication files use a separate, narrowly scoped READ|WRITE|DELETE sharing
 contract, including the held pending descriptor, stable read handles, lstat,
 and delete-access rename handles. Existing cache file methods retain their
 READ-only sharing and lock guarantees. Windows rename supplies both bound
-directory handles to native `FILE_RENAME_INFORMATION`, including the
+directory handles to native `FILE_RENAME_INFORMATION_EX`, including the
 same-directory REPLACE case; no close-before-rename workaround exists.
+
+The release-hardening review then found one final cluster at the native output
+boundary. The previous Windows final-parent handle combined generic read/write
+access with cache-style READ-only sharing, and publication still used the older
+rename information class while held file handles remained open. Final output
+rename and rollback also omitted the post-rename source/target directory sync;
+native workspace errors could cross the public publisher boundary; a full
+deferred-close registry could lose its retry owner during cleanup aggregation;
+and a normal job left its complete UUID encoder candidate beside the output.
+
+Each item received a deterministic RED before the implementation change. The
+Windows fakes enforce sharing in both directions, inspect the native structure,
+information class, RootDirectory, and flags, and keep read/write descriptors
+open through stat/hash/rename. Durability tests record the exact commit → source
+private-directory sync → output-parent sync order for both policies and the
+corresponding rollback order after an injected target-sync EIO. Error tests
+inject reparse and bound-close failures. Registry-capacity-zero tests force a
+persistent CloseHandle failure, collect garbage, and then retry the exact
+retained owner. Render and Rebuild failure tests verify that partial candidates
+are removed with their job scratch rather than accumulating in the output
+parent.
+
+The GREEN design now has three deliberately separate Windows directory-open
+contracts. Cache/cut ancestors retain their restrictive READ sharing. Only the
+final `PublicationDirectory` parent and its private publication/recovery
+children use granular directory rights (`FILE_LIST_DIRECTORY`,
+`FILE_ADD_FILE`, `FILE_ADD_SUBDIRECTORY`, `FILE_TRAVERSE`,
+`FILE_DELETE_CHILD`, `FILE_READ_ATTRIBUTES`, and `SYNCHRONIZE`) with
+READ|WRITE|DELETE sharing. Publication rename uses
+`FILE_RENAME_INFORMATION_EX` / class 65 with
+`FILE_RENAME_POSIX_SEMANTICS`; REPLACE additionally sets
+`FILE_RENAME_REPLACE_IF_EXISTS`, while no-clobber does not. This follows
+Microsoft's documented bidirectional CreateFile sharing contract, relative
+rename target access, and FileRenameInformationEx flags:
+
+- <https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew>
+- <https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fsa/87f86c9b-6c2a-4803-84b7-131a74a434fa>
+- <https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/4217551b-d2c0-42cb-9dc1-69a716cf6d0c>
+
+Both collision policies copy from the held candidate descriptor into the same
+handle-bound `.rembggui-publish` namespace. Every cross-directory final rename
+then strictly syncs the consumed source directory and output parent before
+success; rollback does the same after each restore rename. A target sync error
+after REPLACE enters the existing descriptor-bound rollback and restores the
+known-good old bytes. `UnsafeCacheError`, `BoundDirectoryCloseError`, and
+workspace-domain `AppError`s are translated to `INVALID_OUTPUT` / `output` at
+the public publisher boundary.
+
+`PublicationDirectory.close(primary)` and `RecoveryDirectory.close(primary)`
+now carry the active primary through `ExitStack`, so a registry-full deferred
+owner attaches to the original error. Boundary translation explicitly transfers
+such owners. A final ownership audit also covered partial Windows parent binding:
+if a later component open fails and ancestor `CloseHandle` calls fail, the exact
+failed handles are retained as one retry owner on the opening error rather than
+being lost during stack construction. With no primary, a retention-bearing cleanup failure is a
+structured output failure rather than a note-only success; all other resources
+are still given a close attempt. Finally, `candidate_path` requires the job's
+explicit private work directory. The candidate descriptor closes before the
+workspace removes that job tree, and publication treats the candidate pathname
+as caller-owned diagnostic state rather than attempting an unsafe conditional
+unlink.
 
 Every operational candidate, destination, stage, recovery, and rollback access
 inside the transaction is handle-relative. Lexical paths remain only for API
@@ -264,17 +326,18 @@ publisher boundary to `INVALID_OUTPUT` / `output` with `retry-output`.
 - `JobContext.commit_if_not_cancelled()` serializes cancellation against the
   one final publish linearization. Artifact identity and cleanup complete before
   that commit, and there is no cancellation checkpoint afterward. Cleanup errors
-  are diagnostic notes and never replace the primary error or cancellation.
+  never replace a primary error or cancellation; a retry-owner-bearing failure
+  after an otherwise successful publish is surfaced as a structured output error.
 
 ## Verification
 
-- `.venv/bin/python -m pytest -q` — **950 passed in 48.31s** outside the restricted
+- `.venv/bin/pytest -q` — **967 passed in 49.70s** outside the restricted
   shared-memory sandbox.
-- Focused WebP, render, workspace, and native Windows cache-filesystem contract
-  gate — **263 passed in 35.41s**, including parent-namespace swaps and the
-  bidirectional Windows-sharing fakes.
+- Focused WebP, render, Rebuild, workspace, and native Windows cache-filesystem
+  contract gate — **288 passed in 37.06s**, including parent-namespace swaps, durable sync
+  ordering, retry-owner retention, and bidirectional Windows-sharing fakes.
 - `ruff check .` — passed.
-- `ruff format --check` over all 6 changed Python files — passed.
+- `ruff format --check` over all 7 changed Python files — passed.
 - `mypy src` — passed for 29 source files.
 - `git diff --check` — passed.
 
@@ -285,14 +348,16 @@ models or invoke live ONNX/rembg inference. The exact documented rembg kwargs ar
 unit-tested at the child boundary, and the real local lossless WebP path is
 integration-tested; a manual release qualification with already-cached model
 weights remains appropriate before shipping the GUI integration.
-On failed/ambiguous cleanup, a hidden candidate or private temporary may remain
-with its diagnostic rather than risk deleting bytes installed by another
-actor. Publication/recovery slots are bounded per destination and reused;
-unverified encoder candidates are bounded per failed job and can accumulate
-until an explicit maintenance pass. This is the deliberate portable safety
-tradeoff because POSIX has no atomic conditional unlink by held inode identity.
+On failed/ambiguous cleanup, a fixed private publication or recovery entry may
+remain with its diagnostic rather than risk deleting bytes installed by another
+actor. Publication/recovery slots are bounded per destination and reused.
+Encoder candidates instead live in the already-bounded job scratch tree and are
+removed by its existing handle-safe cleanup after their held descriptor closes.
+This is the deliberate portable safety tradeoff because POSIX has no atomic
+conditional unlink by held inode identity.
 
-The Windows `CreateFileW` sharing branch and `MoveFileExW` no-replace flags are
-type-checked and covered through injected platform contracts, but this
-race-hardening round executed real filesystem mutations on macOS rather than a
-Windows or Linux host.
+The Windows `CreateFileW` sharing branch and class-65 native rename structure,
+RootDirectory, and flags are type-checked and covered through injected platform
+contracts, but this race-hardening round executed real filesystem mutations on
+macOS rather than a Windows or Linux host. A release run on both native platforms
+remains appropriate for filesystem-specific durability behavior.

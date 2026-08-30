@@ -716,6 +716,7 @@ def test_windows_native_publication_file_ops_share_read_write_and_delete() -> No
     api = object.__new__(TestApi)
 
     assert api.open_new_publication_read_write_at(123, "pending") == 322
+    assert api.open_publication_read_write_at(123, "pending") == 322
     assert api.publication_lstat_at(123, "pending") == regular
     assert api.open_publication_read_at(123, "pending") == 323
 
@@ -727,15 +728,84 @@ def test_windows_native_publication_file_ops_share_read_write_and_delete() -> No
             publication_share,
             2,
         ),
+        (
+            "pending",
+            _GENERIC_READ | _GENERIC_WRITE,
+            publication_share,
+            1,
+        ),
         ("pending", 0x00100080, publication_share, 1),
         ("pending", _GENERIC_READ, publication_share, 1),
     ]
     assert closed == [321]
 
 
+def test_windows_native_publication_parent_open_is_scoped_and_bidirectional() -> None:
+    opened: list[tuple[int, str, int, int, int]] = []
+
+    class TestApi(cache_fs._CtypesWindowsDirectoryApi):
+        def _open_relative(
+            self,
+            parent_handle: int,
+            name: str,
+            *,
+            desired_access: int,
+            share_mode: int,
+            disposition: int,
+            options: int,
+        ) -> int:
+            opened.append(
+                (
+                    parent_handle,
+                    name,
+                    desired_access,
+                    share_mode,
+                    disposition,
+                )
+            )
+            assert options & 0x00000001
+            return 321
+
+    api = object.__new__(TestApi)
+    publication_share = _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE
+
+    assert (
+        api.open_publication_child_directory(
+            123,
+            "exports",
+            create=False,
+            desired_access=cache_fs._WINDOWS_PUBLICATION_DIRECTORY_ACCESS,
+            share_mode=publication_share,
+            flags=cache_fs._WINDOWS_DIRECTORY_FLAGS,
+        )
+        == 321
+    )
+    assert opened == [
+        (
+            123,
+            "exports",
+            cache_fs._WINDOWS_PUBLICATION_DIRECTORY_ACCESS,
+            publication_share,
+            1,
+        )
+    ]
+    assert not cache_fs._WINDOWS_PUBLICATION_DIRECTORY_ACCESS & _GENERIC_READ
+    assert not cache_fs._WINDOWS_PUBLICATION_DIRECTORY_ACCESS & _GENERIC_WRITE
+
+    with pytest.raises(ValueError, match="publication directory"):
+        api.open_publication_child_directory(
+            123,
+            "exports",
+            create=False,
+            desired_access=cache_fs._WINDOWS_PUBLICATION_DIRECTORY_ACCESS,
+            share_mode=_FILE_SHARE_READ,
+            flags=cache_fs._WINDOWS_DIRECTORY_FLAGS,
+        )
+
+
 def test_windows_native_publication_replace_uses_bidirectional_share() -> None:
     opened: list[tuple[int, str, int, int]] = []
-    destination_roots: list[int] = []
+    renames: list[tuple[int, int, int]] = []
     closed: list[int] = []
 
     class TestApi(cache_fs._CtypesWindowsDirectoryApi):
@@ -760,17 +830,17 @@ def test_windows_native_publication_replace_uses_bidirectional_share() -> None:
         def close_handle(self, handle: int) -> None:
             closed.append(handle)
 
-    class FileRenameInformation(ctypes.Structure):
+    class FileRenameInformationEx(ctypes.Structure):
         _fields_ = (
-            ("ReplaceIfExists", ctypes.c_ubyte),
+            ("Flags", ctypes.c_uint32),
             ("RootDirectory", ctypes.c_void_p),
             ("FileNameLength", ctypes.c_uint32),
             ("FileName", ctypes.c_uint16 * 1),
         )
 
     def nt_set_information_file(*args: object) -> int:
-        raw = ctypes.cast(args[2], ctypes.POINTER(FileRenameInformation)).contents
-        destination_roots.append(int(raw.RootDirectory))
+        raw = ctypes.cast(args[2], ctypes.POINTER(FileRenameInformationEx)).contents
+        renames.append((int(args[4]), int(raw.Flags), int(raw.RootDirectory)))
         return 0
 
     api = object.__new__(TestApi)
@@ -786,7 +856,7 @@ def test_windows_native_publication_replace_uses_bidirectional_share() -> None:
             _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
         )
     ]
-    assert destination_roots == [123]
+    assert renames == [(65, 0x00000001 | 0x00000002, 123)]
     assert closed == [321]
 
 
@@ -819,29 +889,31 @@ def test_windows_native_publication_rename_binds_both_directory_handles(
         def close_handle(self, handle: int) -> None:
             closed.append(handle)
 
-    class FileRenameInformation(ctypes.Structure):
+    class FileRenameInformationEx(ctypes.Structure):
         _fields_ = (
-            ("ReplaceIfExists", ctypes.c_ubyte),
+            ("Flags", ctypes.c_uint32),
             ("RootDirectory", ctypes.c_void_p),
             ("FileNameLength", ctypes.c_uint32),
             ("FileName", ctypes.c_uint16 * 1),
         )
 
     def nt_set_information_file(*args: object) -> int:
-        raw = ctypes.cast(args[2], ctypes.POINTER(FileRenameInformation)).contents
+        assert int(args[4]) == 65
+        raw = ctypes.cast(args[2], ctypes.POINTER(FileRenameInformationEx)).contents
         buffer_address = ctypes.addressof(args[2])
         name_bytes = ctypes.string_at(
-            buffer_address + FileRenameInformation.FileName.offset,
+            buffer_address + FileRenameInformationEx.FileName.offset,
             raw.FileNameLength,
         )
         renamed.append(
             (
                 int(args[0]),
-                bool(raw.ReplaceIfExists),
+                bool(raw.Flags & 0x00000001),
                 int(raw.RootDirectory),
                 name_bytes.decode("utf-16-le"),
             )
         )
+        assert int(raw.Flags) == 0x00000002 | (0x00000001 if replace_existing else 0)
         return 0
 
     api = object.__new__(TestApi)

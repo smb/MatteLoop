@@ -258,12 +258,11 @@ def test_rebuild_encode_failure_preserves_edited_cuts_and_old_output(
     assert render_request.output.path.read_bytes() == old_output
     with Image.open(edited_path) as persisted:
         assert persisted.getpixel((0, 0)) == (99, 88, 77, 255)
-    retained_candidates = tuple(tmp_path.glob(".output.webp.*.candidate"))
-    assert len(retained_candidates) == 1
-    assert retained_candidates[0].read_bytes() == b"partial"
-    assert any(
-        "foreign or unverified output-candidate retained" in note
-        for note in exc.value.__notes__
+    assert not tuple(tmp_path.glob(".output.webp.*.candidate"))
+    assert not (tmp_path / ".rembggui-work" / "scratch" / "rebuild-failure").exists()
+    assert not any(
+        "output-candidate retained" in note
+        for note in getattr(exc.value, "__notes__", ())
     )
 
 

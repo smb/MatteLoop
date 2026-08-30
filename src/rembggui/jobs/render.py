@@ -25,7 +25,6 @@ import shutil
 import stat
 import tempfile
 import time
-import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -71,6 +70,7 @@ from rembggui.core.webp import (
     validate_webp,
 )
 from rembggui.jobs.context import JobContext, JobTerminalState
+from rembggui.jobs.models.cache_fs import BoundDirectoryCloseError, UnsafeCacheError
 from rembggui.jobs.protocol import PROTOCOL_VERSION, SegmentOptions, SegmentRequest
 from rembggui.jobs.source import DecodedFrame, SourceInfo, decode_frame, probe_source
 from rembggui.jobs.workspace import (
@@ -87,6 +87,7 @@ from rembggui.jobs.workspace import (
     promote_for_render,
     snapshot_for_rebuild,
     stage_cut,
+    transfer_deferred_bound_directory_closes,
     validate_cut_set,
 )
 
@@ -182,7 +183,9 @@ class Clock(Protocol):
 
 
 class OutputPublisher(Protocol):
-    def candidate_path(self, destination: Path, job_id: str) -> Path: ...
+    def candidate_path(
+        self, destination: Path, job_id: str, work_dir: Path
+    ) -> Path: ...
 
     def publish(
         self,
@@ -590,16 +593,23 @@ class SystemClock:
 
 
 class AtomicOutputPublisher:
-    """Publish validated sibling candidates with one filesystem linearization."""
+    """Publish validated private candidates with one filesystem linearization."""
 
-    def candidate_path(self, destination: Path, job_id: str) -> Path:
+    def candidate_path(self, destination: Path, job_id: str, work_dir: Path) -> Path:
         if (
             not isinstance(destination, Path)
             or not isinstance(job_id, str)
             or not job_id
+            or not isinstance(work_dir, Path)
         ):
-            raise TypeError("destination and job_id are required")
-        return destination.parent / f".{destination.name}.{uuid.uuid4().hex}.candidate"
+            raise TypeError("destination, job_id, and work_dir are required")
+        if (
+            job_id in {".", ".."}
+            or Path(job_id).name != job_id
+            or work_dir.name != job_id
+        ):
+            raise ValueError("candidate work directory must be job-owned")
+        return work_dir / "output.candidate.webp"
 
     def publish(
         self,
@@ -612,23 +622,27 @@ class AtomicOutputPublisher:
         if (
             not isinstance(candidate, ValidatedCandidate)
             or not isinstance(destination, Path)
-            or candidate.path.parent != destination.parent
             or candidate.path == destination
             or not isinstance(policy, CollisionPolicy)
             or (cleanup_notes is not None and not isinstance(cleanup_notes, list))
         ):
-            raise _output_error("candidate must be a sibling and policy must be valid")
+            raise _output_error(
+                "candidate, distinct destination, and collision policy must be valid"
+            )
         previous: _HeldPreviousOutput | None = None
         recovery: _HeldRecoveryFile | None = None
         staged: _HeldPublicationFile | None = None
         publication: PublicationDirectory | None = None
         primary: BaseException | None = None
+        cleanup_errors: list[BaseException] = []
         try:
             publication = PublicationDirectory.open(destination.parent)
-            candidate_name = publication.name_for(candidate.path)
             destination_name = publication.name_for(destination)
             publication.assert_still_bound()
-            _require_candidate_current(candidate, publication, candidate_name)
+            if not _descriptor_matches(
+                candidate._descriptor, candidate.identity, candidate.sha256
+            ):
+                raise _output_error("validated output candidate changed")
             if policy is CollisionPolicy.REPLACE:
                 previous = _snapshot_existing_output(publication, destination_name)
                 if previous is not None:
@@ -643,15 +657,31 @@ class AtomicOutputPublisher:
                         destination_name,
                         previous,
                     )
-                _require_candidate_current(candidate, publication, candidate_name)
+                if not _descriptor_matches(
+                    candidate._descriptor, candidate.identity, candidate.sha256
+                ):
+                    raise _output_error("validated output candidate changed")
                 publication.assert_still_bound()
-                publication.replace(candidate_name, destination_name)
+                staged = _prepare_publication_stage(
+                    candidate,
+                    publication,
+                    destination,
+                )
                 try:
-                    _require_published_candidate(
-                        candidate,
+                    publication.replace_from(
+                        staged.directory, staged.name, destination_name
+                    )
+                    staged.directory.fsync()
+                    publication.fsync()
+                    if not _published_file_matches(
                         publication,
                         destination_name,
-                    )
+                        staged.identity,
+                        staged.sha256,
+                    ):
+                        raise _output_error(
+                            "published output is not the validated candidate"
+                        )
                     publication.assert_still_bound()
                 except BaseException as error:
                     _rollback_publication(
@@ -677,6 +707,8 @@ class AtomicOutputPublisher:
                         publication,
                         destination_name,
                     )
+                    staged.directory.fsync()
+                    publication.fsync()
                 except FileExistsError as error:
                     action = (
                         "choose-another-name"
@@ -706,12 +738,6 @@ class AtomicOutputPublisher:
                     # writer. Never unlink it by pathname.
                     raise
                 publication.assert_still_bound()
-                _cleanup_candidate(
-                    candidate.path,
-                    None,
-                    cleanup_notes if cleanup_notes is not None else [],
-                    expected_identity=candidate.identity,
-                )
         except AppError as error:
             if error.code is ErrorCode.CUT_WORKSPACE_UNSAFE:
                 wrapped = _output_error(
@@ -719,12 +745,23 @@ class AtomicOutputPublisher:
                 )
                 for note in getattr(error, "__notes__", ()):
                     wrapped.add_note(note)
+                transfer_deferred_bound_directory_closes(error, wrapped)
                 primary = wrapped
                 raise wrapped from error
             primary = error
             raise
+        except (UnsafeCacheError, BoundDirectoryCloseError) as error:
+            wrapped = _output_error(f"unsafe output publication operation: {error}")
+            transfer_deferred_bound_directory_closes(error, wrapped)
+            for note in getattr(error, "__notes__", ()):
+                wrapped.add_note(note)
+            primary = wrapped
+            raise wrapped from error
         except OSError as error:
             wrapped = _map_output_os_error(error, "atomic output publication failed")
+            transfer_deferred_bound_directory_closes(error, wrapped)
+            for note in getattr(error, "__notes__", ()):
+                wrapped.add_note(note)
             primary = wrapped
             raise wrapped from error
         except BaseException as error:
@@ -732,13 +769,23 @@ class AtomicOutputPublisher:
             raise
         finally:
             if staged is not None:
-                _close_staged_file(staged, cleanup_notes, primary)
+                _close_staged_file(staged, cleanup_notes, primary, cleanup_errors)
             if recovery is not None:
-                _close_recovery_file(recovery, cleanup_notes, primary)
+                _close_recovery_file(recovery, cleanup_notes, primary, cleanup_errors)
             if previous is not None:
                 _close_previous_output(previous, cleanup_notes, primary)
             if publication is not None:
-                _close_publication_directory(publication, cleanup_notes, primary)
+                _close_publication_directory(
+                    publication, cleanup_notes, primary, cleanup_errors
+                )
+            if primary is None and cleanup_errors:
+                wrapped = _output_error(
+                    "output publication completed but bound resources could not close"
+                )
+                for cleanup_error in cleanup_errors:
+                    transfer_deferred_bound_directory_closes(cleanup_error, wrapped)
+                    wrapped.add_note(f"publication cleanup failure: {cleanup_error}")
+                raise wrapped from cleanup_errors[0]
         return destination
 
 
@@ -1251,7 +1298,7 @@ class RenderService:
                 del framed
             context.checkpoint("framing")
         candidate = self._output_publisher.candidate_path(
-            request.output.path, context.job_id
+            request.output.path, context.job_id, scratch
         )
         artifact_fingerprint = render_fingerprint(request, cut_key=manifest.cache_key)
         summary: EncodeSummary | None = None
@@ -1284,6 +1331,13 @@ class RenderService:
                 )
             )
             published = True
+        except BaseException as error:
+            publish_error = error
+            raise
+        finally:
+            if validated is not None:
+                _close_validated_candidate(validated, publish_error, notes)
+        if published:
             _cleanup_scratch_owners(
                 self._workspace,
                 scratch_owners,
@@ -1291,21 +1345,6 @@ class RenderService:
                 None,
                 notes,
             )
-        except BaseException as error:
-            publish_error = error
-            raise
-        finally:
-            if validated is not None:
-                _close_validated_candidate(validated, publish_error, notes)
-            if not published:
-                _cleanup_candidate(
-                    candidate,
-                    publish_error,
-                    notes,
-                    expected_identity=(
-                        validated.identity if validated is not None else None
-                    ),
-                )
         assert summary is not None
         return RenderArtifact(
             output_path,
@@ -1775,21 +1814,6 @@ def _descriptor_bound_entry_matches(
     )
 
 
-def _require_candidate_current(
-    candidate: ValidatedCandidate,
-    publication: PublicationDirectory,
-    candidate_name: str,
-) -> None:
-    if not _descriptor_bound_entry_matches(
-        publication,
-        candidate_name,
-        candidate._descriptor,
-        candidate.identity,
-        candidate.sha256,
-    ):
-        raise _output_error("validated output candidate changed before publication")
-
-
 def _validate_held_candidate_webp(
     descriptor: int,
     summary: EncodeSummary,
@@ -1809,45 +1833,6 @@ def _validate_held_candidate_webp(
     finally:
         if duplicate >= 0:
             os.close(duplicate)
-
-
-def _require_published_candidate(
-    candidate: ValidatedCandidate,
-    publication: PublicationDirectory,
-    destination_name: str,
-) -> None:
-    if not _descriptor_matches(
-        candidate._descriptor,
-        candidate.identity,
-        candidate.sha256,
-    ):
-        raise _output_error("validated candidate bytes changed during publication")
-    published_descriptor = publication.open_read(destination_name)
-    primary: BaseException | None = None
-    try:
-        if not _descriptor_bound_entry_matches(
-            publication,
-            destination_name,
-            published_descriptor,
-            candidate.identity,
-            candidate.sha256,
-        ):
-            raise _output_error("published output is not the validated candidate")
-    except BaseException as error:
-        primary = error
-        raise
-    finally:
-        try:
-            os.close(published_descriptor)
-        except OSError as error:
-            if primary is not None:
-                primary.add_note(
-                    f"additional published-output cleanup failure: {error}"
-                )
-            else:
-                raise _map_output_os_error(
-                    error, "cannot close published-output verification handle"
-                ) from error
 
 
 def _copy_descriptor(source: int, destination: int) -> None:
@@ -1928,7 +1913,7 @@ def _prepare_publication_stage(
                     f"{close_error}"
                 )
         try:
-            publication_directory.close()
+            publication_directory.close(error)
         except BaseException as close_error:
             error.add_note(
                 f"additional publication-directory cleanup failure: {close_error}"
@@ -1992,7 +1977,7 @@ def _prepare_durable_recovery(
     identity: CandidateFileIdentity | None = None
     try:
         try:
-            existing_descriptor = recovery_directory.open_read(recovery_name)
+            existing_descriptor = recovery_directory.open_read_write(recovery_name)
         except FileNotFoundError:
             pass
         else:
@@ -2033,7 +2018,7 @@ def _prepare_durable_recovery(
         except OSError:
             linked = False
         if linked:
-            descriptor = recovery_directory.open_read(pending_name)
+            descriptor = recovery_directory.open_read_write(pending_name)
             identity = _candidate_identity(os.fstat(descriptor))
             if not _descriptor_bound_entry_matches(
                 recovery_directory,
@@ -2102,7 +2087,7 @@ def _prepare_durable_recovery(
                     f"additional recovery-handle cleanup failure: {close_error}"
                 )
         try:
-            recovery_directory.close()
+            recovery_directory.close(error)
         except BaseException as close_error:
             error.add_note(
                 f"additional recovery-directory cleanup failure: {close_error}"
@@ -2121,7 +2106,9 @@ def _prepare_recovery_shadow(
         recovery.identity,
         recovery.sha256,
     ):
-        existing_shadow_descriptor = recovery_directory.open_read(recovery.shadow_name)
+        existing_shadow_descriptor = recovery_directory.open_read_write(
+            recovery.shadow_name
+        )
         existing_primary: BaseException | None = None
         try:
             os.fsync(existing_shadow_descriptor)
@@ -2150,7 +2137,7 @@ def _prepare_recovery_shadow(
         except OSError:
             linked = False
         if linked:
-            descriptor = recovery_directory.open_read(pending_name)
+            descriptor = recovery_directory.open_read_write(pending_name)
             identity = _candidate_identity(os.fstat(descriptor))
             if not _descriptor_bound_entry_matches(
                 recovery_directory,
@@ -2350,6 +2337,8 @@ def _rollback_publication(
                 staged.name,
                 destination_name,
             )
+            staged.directory.fsync()
+            publication.fsync()
             if _published_file_matches(
                 publication,
                 destination_name,
@@ -2363,7 +2352,7 @@ def _rollback_publication(
             failures.append(str(error))
         finally:
             if staged is not None:
-                _close_staged_file(staged, failures, None)
+                _close_staged_file(staged, failures, primary)
         if restored:
             for failure in failures:
                 primary.add_note(f"rollback diagnostic: {failure}")
@@ -2470,6 +2459,7 @@ def _close_staged_file(
     staged: _HeldPublicationFile,
     cleanup_notes: list[str] | None,
     primary: BaseException | None,
+    cleanup_errors: list[BaseException] | None = None,
 ) -> None:
     failures: list[str] = []
     try:
@@ -2488,8 +2478,10 @@ def _close_staged_file(
         failures.append(f"private staged-file inspection failed: {error}")
     if staged.owns_directory:
         try:
-            staged.directory.close()
+            staged.directory.close(primary)
         except BaseException as error:
+            if cleanup_errors is not None:
+                cleanup_errors.append(error)
             failures.append(
                 f"additional publication-directory cleanup failure: {error}"
             )
@@ -2504,6 +2496,7 @@ def _close_recovery_file(
     recovery: _HeldRecoveryFile,
     cleanup_notes: list[str] | None,
     primary: BaseException | None,
+    cleanup_errors: list[BaseException] | None = None,
 ) -> None:
     failures: list[str] = []
     try:
@@ -2511,8 +2504,10 @@ def _close_recovery_file(
     except OSError as error:
         failures.append(f"additional recovery-output handle cleanup failure: {error}")
     try:
-        recovery.directory.close()
+        recovery.directory.close(primary)
     except BaseException as error:
+        if cleanup_errors is not None:
+            cleanup_errors.append(error)
         failures.append(f"additional recovery-directory cleanup failure: {error}")
     for detail in failures:
         if primary is not None:
@@ -2521,32 +2516,17 @@ def _close_recovery_file(
             cleanup_notes.append(detail)
 
 
-def _cleanup_candidate(
-    candidate: Path,
-    primary: BaseException | None,
-    notes: list[str],
-    *,
-    expected_identity: CandidateFileIdentity | None = None,
-) -> None:
-    ownership = "verified" if expected_identity is not None else "foreign or unverified"
-    detail = (
-        f"{ownership} output-candidate retained if still present at {candidate}; "
-        "the path is diagnostic-only after the bound publication transaction"
-    )
-    if primary is not None:
-        primary.add_note(detail)
-    else:
-        notes.append(detail)
-
-
 def _close_publication_directory(
     publication: PublicationDirectory,
     cleanup_notes: list[str] | None,
     primary: BaseException | None,
+    cleanup_errors: list[BaseException] | None = None,
 ) -> None:
     try:
-        publication.close()
+        publication.close(primary)
     except BaseException as error:
+        if cleanup_errors is not None:
+            cleanup_errors.append(error)
         detail = f"additional publication-directory cleanup failure: {error}"
         if primary is not None:
             primary.add_note(detail)

@@ -5,6 +5,7 @@ import json
 import os
 import threading
 import time
+from contextlib import ExitStack
 from dataclasses import FrozenInstanceError
 from decimal import Decimal
 from fractions import Fraction
@@ -33,6 +34,7 @@ from rembggui.jobs.workspace import (
     CutManifest,
     CutUnionMetadata,
     CutWorkspace,
+    PublicationDirectory,
     RecoveryDirectory,
     cleanup_abandoned_scratch,
     cleanup_scratch,
@@ -198,6 +200,36 @@ class _ExclusiveWindowsCutsApi:
             flags=0,
         )
 
+    def open_anchor(
+        self,
+        path: Path,
+        *,
+        desired_access: int,
+        share_mode: int,
+        flags: int,
+    ) -> int:
+        return self.open_directory(
+            path,
+            desired_access=desired_access,
+            share_mode=share_mode,
+            flags=flags,
+        )
+
+    def open_publication_anchor(
+        self,
+        path: Path,
+        *,
+        desired_access: int,
+        share_mode: int,
+        flags: int,
+    ) -> int:
+        return self.open_anchor(
+            path,
+            desired_access=desired_access,
+            share_mode=share_mode,
+            flags=flags,
+        )
+
     @staticmethod
     def _share_allows(share_mode: int, desired_access: int) -> bool:
         return bool(
@@ -256,6 +288,25 @@ class _ExclusiveWindowsCutsApi:
             flags=flags,
         )
 
+    def open_publication_child_directory(
+        self,
+        parent: int,
+        name: str,
+        *,
+        create: bool,
+        desired_access: int,
+        share_mode: int,
+        flags: int,
+    ) -> int:
+        return self.open_child_directory(
+            parent,
+            name,
+            create=create,
+            desired_access=desired_access,
+            share_mode=share_mode,
+            flags=flags,
+        )
+
     def file_attributes(self, handle: int) -> int:
         from rembggui.jobs.models import cache_fs
 
@@ -280,6 +331,9 @@ class _ExclusiveWindowsCutsApi:
 
     def open_publication_read_at(self, handle: int, name: str) -> int:
         return self.open_read_at(handle, name)
+
+    def open_publication_read_write_at(self, handle: int, name: str) -> int:
+        return os.open(self.handle_paths[handle] / name, os.O_RDWR)
 
     def open_new_read_write_at(self, handle: int, name: str) -> int:
         return os.open(
@@ -505,6 +559,15 @@ class _PublicationSharingWindowsApi(_ExclusiveWindowsCutsApi):
             flags=os.O_RDONLY,
         )
 
+    def open_publication_read_write_at(self, handle: int, name: str) -> int:
+        return self._open_file(
+            handle,
+            name,
+            access=self._GENERIC_READ | self._GENERIC_WRITE,
+            share=self._SHARE_READ | self._SHARE_WRITE | self._SHARE_DELETE,
+            flags=os.O_RDWR,
+        )
+
     def replace_at(self, handle: int, source: str, destination: str) -> None:
         path = self.handle_paths[handle] / source
         self._require_compatible(path, self._DELETE, self._SHARE_READ)
@@ -572,6 +635,30 @@ def test_windows_recovery_replace_is_compatible_with_held_writable_descriptor(
     finally:
         if reopened is not None:
             sharing_api.release_file(reopened)
+        sharing_api.release_file(descriptor)
+        recovery.close()
+
+
+def test_windows_existing_recovery_remains_shareable_while_read_write_fd_is_held(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recovery_path = tmp_path / ".rembggui-recovery"
+    recovery_path.mkdir(mode=0o700)
+    (recovery_path / "output.recovery").write_bytes(b"old-output")
+    sharing_api = _PublicationSharingWindowsApi(tmp_path)
+    _install_exclusive_windows_cuts_api(
+        monkeypatch,
+        tmp_path,
+        api=sharing_api,
+    )
+    recovery = RecoveryDirectory.open(tmp_path, recovery_path.name)
+    descriptor = recovery.open_read_write("output.recovery")
+    try:
+        assert recovery.lstat("output.recovery").st_size == len(b"old-output")
+        recovery.replace("output.recovery", "output.recovery-shadow")
+        assert os.fstat(descriptor).st_size == len(b"old-output")
+    finally:
         sharing_api.release_file(descriptor)
         recovery.close()
 
@@ -1103,6 +1190,201 @@ def test_windows_component_binding_rejects_reparse_and_closes_all_handles(
 
     assert exc.value.code is ErrorCode.CUT_WORKSPACE_UNSAFE
     assert api.closed == [3, 2, 1]
+
+
+def test_windows_publication_parent_has_scoped_access_and_bidirectional_share(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rembggui.jobs.models import cache_fs
+
+    class FakeApi:
+        def __init__(self) -> None:
+            self.opens: list[tuple[str, int, int]] = []
+            self.names: dict[int, str] = {1: "/"}
+
+        def open_anchor(
+            self,
+            _path: Path,
+            *,
+            desired_access: int,
+            share_mode: int,
+            flags: int,
+        ) -> int:
+            assert flags == cache_fs._WINDOWS_DIRECTORY_FLAGS
+            self.opens.append(("anchor", desired_access, share_mode))
+            return 1
+
+        def open_child_directory(
+            self,
+            parent: int,
+            name: str,
+            **kwargs: int | bool,
+        ) -> int:
+            del parent
+            handle = len(self.names) + 1
+            self.names[handle] = name
+            self.opens.append(
+                (name, int(kwargs["desired_access"]), int(kwargs["share_mode"]))
+            )
+            return handle
+
+        def open_publication_child_directory(
+            self,
+            parent: int,
+            name: str,
+            **kwargs: int | bool,
+        ) -> int:
+            return self.open_child_directory(parent, name, **kwargs)
+
+        def file_attributes(self, _handle: int) -> int:
+            return cache_fs._FILE_ATTRIBUTE_DIRECTORY
+
+        def close_handle(self, _handle: int) -> None:
+            pass
+
+    api = FakeApi()
+    monkeypatch.setattr(cache_fs, "_CtypesWindowsDirectoryApi", lambda: api)
+
+    bound = workspace_module._BoundDirectory._open_windows_publication(
+        Path("/trusted/output")
+    )
+    try:
+        assert api.opens[:-1] == [
+            (
+                "anchor",
+                cache_fs._WINDOWS_DIRECTORY_ACCESS,
+                cache_fs._WINDOWS_DIRECTORY_SHARE,
+            ),
+            (
+                "trusted",
+                cache_fs._WINDOWS_DIRECTORY_ACCESS,
+                cache_fs._WINDOWS_DIRECTORY_SHARE,
+            ),
+        ]
+        assert api.opens[-1] == (
+            "output",
+            cache_fs._WINDOWS_PUBLICATION_DIRECTORY_ACCESS,
+            cache_fs._WINDOWS_PUBLICATION_SHARE,
+        )
+    finally:
+        bound.close()
+
+
+def test_windows_publication_parent_sharing_is_bidirectionally_compatible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from rembggui.jobs.models import cache_fs
+
+    api = _ExclusiveWindowsCutsApi(tmp_path)
+    publication_share = cache_fs._WINDOWS_PUBLICATION_SHARE
+    existing = api.open_directory(
+        tmp_path,
+        desired_access=0x80000000 | 0x40000000 | 0x00010000,
+        share_mode=publication_share,
+        flags=cache_fs._WINDOWS_DIRECTORY_FLAGS,
+    )
+    monkeypatch.setattr(cache_fs, "_CtypesWindowsDirectoryApi", lambda: api)
+
+    bound = workspace_module._BoundDirectory._open_windows_publication(tmp_path)
+    try:
+        assert not api.sharing_violations
+        final_open = api.handle_opens[bound._windows_handles[-1]]
+        assert final_open[1:] == (
+            cache_fs._WINDOWS_PUBLICATION_DIRECTORY_ACCESS,
+            publication_share,
+        )
+    finally:
+        bound.close()
+        api.close_handle(existing)
+
+
+def test_publication_close_attaches_retry_owner_when_registry_is_full(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FailingCloseApi:
+        fail = True
+
+        def close_handle(self, _handle: int) -> None:
+            if self.fail:
+                raise OSError("persistent synthetic CloseHandle failure")
+
+    api = FailingCloseApi()
+    bound = workspace_module._BoundDirectory(
+        tmp_path,
+        None,
+        windows_handles=(41,),
+        windows_api=api,
+    )
+    stack = ExitStack()
+    stack.enter_context(bound)
+    publication = PublicationDirectory(bound, stack)
+    primary = AppError(
+        ErrorCode.INVALID_OUTPUT,
+        "output",
+        "error.output.failed",
+        "synthetic primary",
+        "retry-output",
+    )
+    monkeypatch.setattr(workspace_module, "MAX_DEFERRED_BOUND_DIRECTORY_CLOSES", 0)
+
+    publication.close(primary)
+    del publication
+    gc.collect()
+
+    owners = getattr(primary, "_rembggui_bound_directory_close_owners")
+    assert owners == (bound,)
+    assert bound.owns_resources()
+    api.fail = False
+    assert workspace_module._drain_attached_bound_directory_closes(primary) == 1
+    assert not bound.owns_resources()
+
+
+def test_failed_windows_publication_open_retains_unclosed_ancestor_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rembggui.jobs.models import cache_fs
+
+    class FailingApi:
+        fail_close = True
+
+        def open_anchor(self, _path: Path, **_kwargs: int) -> int:
+            return 41
+
+        def open_child_directory(
+            self, _parent: int, name: str, **_kwargs: int | bool
+        ) -> int:
+            if name == "trusted":
+                return 42
+            raise AssertionError(name)
+
+        def open_publication_child_directory(
+            self, _parent: int, _name: str, **_kwargs: int | bool
+        ) -> int:
+            raise OSError("synthetic publication-parent open failure")
+
+        def file_attributes(self, _handle: int) -> int:
+            return cache_fs._FILE_ATTRIBUTE_DIRECTORY
+
+        def close_handle(self, _handle: int) -> None:
+            if self.fail_close:
+                raise OSError("persistent synthetic CloseHandle failure")
+
+    api = FailingApi()
+    monkeypatch.setattr(cache_fs, "_CtypesWindowsDirectoryApi", lambda: api)
+    monkeypatch.setattr(workspace_module, "MAX_DEFERRED_BOUND_DIRECTORY_CLOSES", 0)
+
+    with pytest.raises(OSError, match="publication-parent open failure") as exc:
+        workspace_module._BoundDirectory._open_windows_publication(
+            Path("/trusted/output")
+        )
+
+    gc.collect()
+    owners = getattr(exc.value, "_rembggui_bound_directory_close_owners")
+    assert len(owners) == 1
+    assert owners[0].owns_resources()
+    api.fail_close = False
+    assert workspace_module._drain_attached_bound_directory_closes(exc.value) == 1
+    assert not owners[0].owns_resources()
 
 
 def test_windows_bound_mkdir_never_uses_redirected_lexical_path(

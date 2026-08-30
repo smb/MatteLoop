@@ -22,6 +22,18 @@ _WINDOWS_DIRECTORY_ACCESS = 0x80000000
 _WINDOWS_WRITABLE_DIRECTORY_ACCESS = 0xC0000000
 _WINDOWS_DIRECTORY_SHARE = 0x00000001
 _WINDOWS_PUBLICATION_SHARE = 0x00000001 | 0x00000002 | 0x00000004
+# A publication parent is deliberately distinct from the restrictive model-cache
+# namespace.  It must create/remove children, serve as a relative rename target,
+# and remain compatible with the open publication file handles.
+_WINDOWS_PUBLICATION_DIRECTORY_ACCESS = (
+    0x00000001  # FILE_LIST_DIRECTORY
+    | 0x00000002  # FILE_ADD_FILE
+    | 0x00000004  # FILE_ADD_SUBDIRECTORY
+    | 0x00000020  # FILE_TRAVERSE
+    | 0x00000040  # FILE_DELETE_CHILD
+    | 0x00000080  # FILE_READ_ATTRIBUTES
+    | 0x00100000  # SYNCHRONIZE
+)
 _WINDOWS_DIRECTORY_FLAGS = 0x02000000 | 0x00200000
 
 
@@ -46,6 +58,26 @@ class _WindowsDirectoryApi(Protocol):
         flags: int,
     ) -> int: ...
 
+    def open_publication_anchor(
+        self,
+        path: Path,
+        *,
+        desired_access: int,
+        share_mode: int,
+        flags: int,
+    ) -> int: ...
+
+    def open_publication_child_directory(
+        self,
+        parent_handle: int,
+        name: str,
+        *,
+        create: bool,
+        desired_access: int,
+        share_mode: int,
+        flags: int,
+    ) -> int: ...
+
     def file_attributes(self, handle: int) -> int: ...
 
     def close_handle(self, handle: int) -> None: ...
@@ -59,6 +91,10 @@ class _WindowsDirectoryApi(Protocol):
     def open_read_at(self, directory_handle: int, filename: str) -> int: ...
 
     def open_publication_read_at(self, directory_handle: int, filename: str) -> int: ...
+
+    def open_publication_read_write_at(
+        self, directory_handle: int, filename: str
+    ) -> int: ...
 
     def open_new_at(self, directory_handle: int, filename: str) -> int: ...
 
@@ -684,6 +720,60 @@ class _CtypesWindowsDirectoryApi:
             options=0x00000001 | 0x00000020 | 0x00200000,
         )
 
+    def open_publication_anchor(
+        self,
+        path: Path,
+        *,
+        desired_access: int,
+        share_mode: int,
+        flags: int,
+    ) -> int:
+        import ctypes
+
+        self._require_publication_directory_open(desired_access, share_mode, flags)
+        handle = self._create_file(
+            str(path),
+            desired_access,
+            share_mode,
+            None,
+            3,
+            flags,
+            None,
+        )
+        if handle == self._invalid:
+            last_error = getattr(ctypes, "get_last_error")()
+            if last_error in {2, 3}:
+                raise FileNotFoundError(
+                    last_error, "output directory does not exist", str(path)
+                )
+            if last_error == 5:
+                raise PermissionError(
+                    last_error, "could not bind output directory", str(path)
+                )
+            raise OSError(last_error, "could not bind output directory")
+        return int(handle)
+
+    def open_publication_child_directory(
+        self,
+        parent_handle: int,
+        name: str,
+        *,
+        create: bool,
+        desired_access: int,
+        share_mode: int,
+        flags: int,
+    ) -> int:
+        _validate_windows_component(name)
+        self._require_publication_directory_open(desired_access, share_mode, flags)
+        return self._open_relative(
+            parent_handle,
+            name,
+            desired_access=desired_access,
+            share_mode=share_mode,
+            disposition=3 if create else 1,
+            options=0x00000001 | 0x00000020 | 0x00200000,
+        )
+
     def lstat_at(self, directory_handle: int, filename: str) -> os.stat_result:
         return self._lstat_at(
             directory_handle,
@@ -734,6 +824,25 @@ class _CtypesWindowsDirectoryApi:
             filename,
             share_mode=_WINDOWS_PUBLICATION_SHARE,
         )
+
+    def open_publication_read_write_at(
+        self, directory_handle: int, filename: str
+    ) -> int:
+        _validate_windows_component(filename)
+        handle = self._open_relative(
+            directory_handle,
+            filename,
+            desired_access=0x80000000 | 0x40000000,
+            share_mode=_WINDOWS_PUBLICATION_SHARE,
+            disposition=1,
+            options=0x00000020 | 0x00000040 | 0x00200000,
+        )
+        try:
+            self._require_regular_file_handle(handle)
+            return self._handle_to_fd(handle, os.O_RDWR)
+        except BaseException:
+            self.close_handle(handle)
+            raise
 
     def _open_read_at(
         self,
@@ -1058,14 +1167,6 @@ class _CtypesWindowsDirectoryApi:
                 ("Information", ctypes.c_size_t),
             )
 
-        class FileRenameInformation(ctypes.Structure):
-            _fields_ = (
-                ("ReplaceIfExists", ctypes.c_ubyte),
-                ("RootDirectory", ctypes.c_void_p),
-                ("FileNameLength", ctypes.c_uint32),
-                ("FileName", ctypes.c_uint16 * 1),
-            )
-
         try:
             if require_directory:
                 attributes = self.file_attributes(source_handle)
@@ -1078,17 +1179,50 @@ class _CtypesWindowsDirectoryApi:
             else:
                 self._require_regular_file_handle(source_handle)
             encoded = destination.encode("utf-16-le")
-            filename_offset = FileRenameInformation.FileName.offset
-            buffer = ctypes.create_string_buffer(
-                ctypes.sizeof(FileRenameInformation) + len(encoded)
-            )
-            info = ctypes.cast(buffer, ctypes.POINTER(FileRenameInformation)).contents
-            info.ReplaceIfExists = replace
-            # Publication callers always supply an explicitly bound destination
-            # directory handle. Legacy cache renames use NULL only for their
-            # established same-directory contract.
-            info.RootDirectory = destination_directory_handle
-            info.FileNameLength = len(encoded)
+            if destination_directory_handle is None:
+
+                class FileRenameInformation(ctypes.Structure):
+                    _fields_ = (
+                        ("ReplaceIfExists", ctypes.c_ubyte),
+                        ("RootDirectory", ctypes.c_void_p),
+                        ("FileNameLength", ctypes.c_uint32),
+                        ("FileName", ctypes.c_uint16 * 1),
+                    )
+
+                filename_offset = FileRenameInformation.FileName.offset
+                buffer = ctypes.create_string_buffer(
+                    ctypes.sizeof(FileRenameInformation) + len(encoded)
+                )
+                legacy_info = ctypes.cast(
+                    buffer, ctypes.POINTER(FileRenameInformation)
+                ).contents
+                legacy_info.ReplaceIfExists = replace
+                legacy_info.RootDirectory = None
+                legacy_info.FileNameLength = len(encoded)
+                information_class = 10
+            else:
+
+                class FileRenameInformationEx(ctypes.Structure):
+                    _fields_ = (
+                        ("Flags", ctypes.c_uint32),
+                        ("RootDirectory", ctypes.c_void_p),
+                        ("FileNameLength", ctypes.c_uint32),
+                        ("FileName", ctypes.c_uint16 * 1),
+                    )
+
+                filename_offset = FileRenameInformationEx.FileName.offset
+                buffer = ctypes.create_string_buffer(
+                    ctypes.sizeof(FileRenameInformationEx) + len(encoded)
+                )
+                publication_info = ctypes.cast(
+                    buffer, ctypes.POINTER(FileRenameInformationEx)
+                ).contents
+                # FILE_RENAME_POSIX_SEMANTICS allows a rename while compatible
+                # publication handles remain open; replace is policy-specific.
+                publication_info.Flags = 0x00000002 | (0x00000001 if replace else 0)
+                publication_info.RootDirectory = destination_directory_handle
+                publication_info.FileNameLength = len(encoded)
+                information_class = 65
             ctypes.memmove(
                 ctypes.addressof(buffer) + filename_offset,
                 encoded,
@@ -1101,7 +1235,7 @@ class _CtypesWindowsDirectoryApi:
                     ctypes.byref(io_status),
                     buffer,
                     len(buffer),
-                    10,
+                    information_class,
                 )
             )
             if status < 0:
@@ -1330,6 +1464,17 @@ class _CtypesWindowsDirectoryApi:
             or flags != _WINDOWS_DIRECTORY_FLAGS
         ):
             raise ValueError("Windows cache directory open is not hardened")
+
+    @staticmethod
+    def _require_publication_directory_open(
+        desired_access: int, share_mode: int, flags: int
+    ) -> None:
+        if (
+            desired_access != _WINDOWS_PUBLICATION_DIRECTORY_ACCESS
+            or share_mode != _WINDOWS_PUBLICATION_SHARE
+            or flags != _WINDOWS_DIRECTORY_FLAGS
+        ):
+            raise ValueError("Windows publication directory open is not hardened")
 
     @staticmethod
     def _raise_last_error(message: str) -> None:

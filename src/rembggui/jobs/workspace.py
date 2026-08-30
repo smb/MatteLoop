@@ -1921,6 +1921,88 @@ class _BoundDirectory:
                     pass
             raise
 
+    @classmethod
+    def _open_windows_publication(cls, path: Path) -> Self:
+        """Bind only the final output parent with publication sharing/access."""
+        from rembggui.jobs.models.cache_fs import (
+            _FILE_ATTRIBUTE_DIRECTORY,
+            _FILE_ATTRIBUTE_REPARSE_POINT,
+            _WINDOWS_DIRECTORY_ACCESS,
+            _WINDOWS_DIRECTORY_FLAGS,
+            _WINDOWS_DIRECTORY_SHARE,
+            _WINDOWS_PUBLICATION_DIRECTORY_ACCESS,
+            _WINDOWS_PUBLICATION_SHARE,
+            _CtypesWindowsDirectoryApi,
+        )
+
+        api = _CtypesWindowsDirectoryApi()
+        handles: list[int] = []
+        try:
+            anchor = Path(path.anchor)
+            components = path.parts[1:]
+            if components:
+                handle = api.open_anchor(
+                    anchor,
+                    desired_access=_WINDOWS_DIRECTORY_ACCESS,
+                    share_mode=_WINDOWS_DIRECTORY_SHARE,
+                    flags=_WINDOWS_DIRECTORY_FLAGS,
+                )
+            else:
+                handle = api.open_publication_anchor(
+                    anchor,
+                    desired_access=_WINDOWS_PUBLICATION_DIRECTORY_ACCESS,
+                    share_mode=_WINDOWS_PUBLICATION_SHARE,
+                    flags=_WINDOWS_DIRECTORY_FLAGS,
+                )
+            handles.append(handle)
+            for index, component in enumerate(components):
+                _validate_component(component)
+                final = index == len(components) - 1
+                if final:
+                    handle = api.open_publication_child_directory(
+                        handles[-1],
+                        component,
+                        create=False,
+                        desired_access=_WINDOWS_PUBLICATION_DIRECTORY_ACCESS,
+                        share_mode=_WINDOWS_PUBLICATION_SHARE,
+                        flags=_WINDOWS_DIRECTORY_FLAGS,
+                    )
+                else:
+                    handle = api.open_child_directory(
+                        handles[-1],
+                        component,
+                        create=False,
+                        desired_access=_WINDOWS_DIRECTORY_ACCESS,
+                        share_mode=_WINDOWS_DIRECTORY_SHARE,
+                        flags=_WINDOWS_DIRECTORY_FLAGS,
+                    )
+                handles.append(handle)
+                attributes = api.file_attributes(handle)
+                if not attributes & _FILE_ATTRIBUTE_DIRECTORY or attributes & (
+                    _FILE_ATTRIBUTE_REPARSE_POINT
+                ):
+                    raise _unsafe_error(f"output component {component!r} is redirected")
+            return cls(path, None, windows_handles=tuple(handles), windows_api=api)
+        except BaseException as error:
+            failed_handles: list[int] = []
+            for handle in reversed(handles):
+                try:
+                    api.close_handle(handle)
+                except OSError as close_error:
+                    failed_handles.append(handle)
+                    error.add_note(
+                        f"additional publication-binding cleanup failure: {close_error}"
+                    )
+            if failed_handles:
+                owner = cls(
+                    path,
+                    None,
+                    windows_handles=tuple(reversed(failed_handles)),
+                    windows_api=api,
+                )
+                _retain_deferred_bound_directory_close(owner, error)
+            raise
+
     def __enter__(self) -> Self:
         return self
 
@@ -2094,6 +2176,50 @@ class _BoundDirectory:
                 raise
         return _BoundDirectory.open(self.path / name)
 
+    def open_publication_child(self, name: str) -> _BoundDirectory:
+        _validate_component(name)
+        if self.descriptor is not None:
+            return self.open_child(name)
+        if self._windows_handles:
+            from rembggui.jobs.models.cache_fs import (
+                _FILE_ATTRIBUTE_DIRECTORY,
+                _FILE_ATTRIBUTE_REPARSE_POINT,
+                _WINDOWS_DIRECTORY_FLAGS,
+                _WINDOWS_PUBLICATION_DIRECTORY_ACCESS,
+                _WINDOWS_PUBLICATION_SHARE,
+            )
+
+            handle = self._windows_api.open_publication_child_directory(
+                self._windows_handles[-1],
+                name,
+                create=False,
+                desired_access=_WINDOWS_PUBLICATION_DIRECTORY_ACCESS,
+                share_mode=_WINDOWS_PUBLICATION_SHARE,
+                flags=_WINDOWS_DIRECTORY_FLAGS,
+            )
+            try:
+                attributes = self._windows_api.file_attributes(handle)
+                if not attributes & _FILE_ATTRIBUTE_DIRECTORY or attributes & (
+                    _FILE_ATTRIBUTE_REPARSE_POINT
+                ):
+                    raise _unsafe_error(f"output entry {name!r} is redirected")
+                return _BoundDirectory(
+                    self.path / name,
+                    None,
+                    windows_handles=(handle,),
+                    windows_api=self._windows_api,
+                )
+            except BaseException as error:
+                try:
+                    self._windows_api.close_handle(handle)
+                except BaseException as cleanup_error:
+                    self._windows_cleanup_handles += (handle,)
+                    error.add_note(
+                        f"additional child-handle cleanup failure: {cleanup_error}"
+                    )
+                raise
+        return _BoundDirectory.open(self.path / name)
+
     def open_read(self, name: str) -> int:
         _validate_component(name)
         flags = os.O_RDONLY
@@ -2136,6 +2262,27 @@ class _BoundDirectory:
                 raise _unsafe_error(
                     f"workspace entry {name!r} is redirected"
                 ) from error
+            raise
+
+    def open_publication_read_write(self, name: str) -> int:
+        _validate_component(name)
+        flags = os.O_RDWR
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            if self.descriptor is not None:
+                return os.open(name, flags, dir_fd=self.descriptor)
+            if self._windows_handles:
+                return cast(
+                    int,
+                    self._windows_api.open_publication_read_write_at(
+                        self._windows_handles[-1], name
+                    ),
+                )
+            return os.open(self.path / name, flags)
+        except OSError as error:
+            if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+                raise _unsafe_error(f"output entry {name!r} is redirected") from error
             raise
 
     def open_read_write(self, name: str) -> int:
@@ -2305,19 +2452,27 @@ class PublicationDirectory:
     def open(cls, path: Path) -> PublicationDirectory:
         stack = ExitStack()
         try:
-            directory = stack.enter_context(_BoundDirectory.open(path))
+            absolute = Path(os.path.abspath(path))
+            directory = stack.enter_context(
+                _BoundDirectory._open_windows_publication(absolute)
+                if os.name == "nt"
+                else _BoundDirectory.open(absolute)
+            )
             return cls(directory, stack)
         except BaseException as error:
             try:
-                stack.close()
+                stack.__exit__(type(error), error, error.__traceback__)
             except BaseException as cleanup_error:
                 error.add_note(
                     f"additional publication-parent cleanup failure: {cleanup_error}"
                 )
             raise
 
-    def close(self) -> None:
-        self._stack.close()
+    def close(self, primary: BaseException | None = None) -> None:
+        if primary is None:
+            self._stack.close()
+            return
+        self._stack.__exit__(type(primary), primary, primary.__traceback__)
 
     def assert_still_bound(self) -> None:
         self._directory.assert_still_named()
@@ -2416,7 +2571,7 @@ class RecoveryDirectory:
             result = cls.open_from(parent, name, "recovery")
         except BaseException as error:
             try:
-                parent.close()
+                parent.close(error)
             except BaseException as cleanup_error:
                 error.add_note(
                     f"additional recovery-parent cleanup failure: {cleanup_error}"
@@ -2449,7 +2604,9 @@ class RecoveryDirectory:
                 raise _unsafe_error(
                     f"output {purpose} namespace must have mode 0700 or stricter"
                 )
-            directory = stack.enter_context(parent._directory.open_child(name))
+            directory = stack.enter_context(
+                parent._directory.open_publication_child(name)
+            )
             result = cls(
                 parent.path / name,
                 name,
@@ -2462,33 +2619,40 @@ class RecoveryDirectory:
             return result
         except BaseException as error:
             try:
-                stack.close()
+                stack.__exit__(type(error), error, error.__traceback__)
             except BaseException as cleanup_error:
                 error.add_note(
                     f"additional private-directory cleanup failure: {cleanup_error}"
                 )
             raise
 
-    def close(self) -> None:
-        primary: BaseException | None = None
+    def close(self, primary: BaseException | None = None) -> None:
+        close_primary = primary
         try:
-            self._stack.close()
+            if close_primary is None:
+                self._stack.close()
+            else:
+                self._stack.__exit__(
+                    type(close_primary),
+                    close_primary,
+                    close_primary.__traceback__,
+                )
         except BaseException as error:
-            primary = error
+            close_primary = error
         owned_parent = self._owned_parent
         self._owned_parent = None
         if owned_parent is not None:
             try:
-                owned_parent.close()
+                owned_parent.close(close_primary)
             except BaseException as error:
-                if primary is not None:
-                    primary.add_note(
+                if close_primary is not None:
+                    close_primary.add_note(
                         f"additional recovery-parent cleanup failure: {error}"
                     )
                 else:
-                    raise
-        if primary is not None:
-            raise primary
+                    close_primary = error
+        if primary is None and close_primary is not None:
+            raise close_primary
 
     def assert_still_bound(self) -> None:
         self._parent.assert_still_bound()
@@ -2503,6 +2667,9 @@ class RecoveryDirectory:
 
     def open_read(self, name: str) -> int:
         return self._directory.open_publication_read(name)
+
+    def open_read_write(self, name: str) -> int:
+        return self._directory.open_publication_read_write(name)
 
     def open_fixed_pending(self, name: str) -> int:
         """Create or handle-relatively replace one bounded pending file."""
@@ -3788,6 +3955,22 @@ def _drain_attached_bound_directory_closes(primary: BaseException) -> int:
             failure.add_note(f"additional attached close failure: {close_failure}")
         raise failure
     return closed
+
+
+def transfer_deferred_bound_directory_closes(
+    source: BaseException, target: BaseException
+) -> None:
+    """Transfer retry owners when an internal boundary error is translated."""
+    with _deferred_bound_directory_closes_guard:
+        owners = tuple(getattr(source, _ATTACHED_BOUND_DIRECTORY_CLOSES, ()))
+        if not owners:
+            return
+        existing = list(getattr(target, _ATTACHED_BOUND_DIRECTORY_CLOSES, ()))
+        for owner in owners:
+            if owner not in existing:
+                existing.append(owner)
+        setattr(target, _ATTACHED_BOUND_DIRECTORY_CLOSES, tuple(existing))
+        setattr(source, _ATTACHED_BOUND_DIRECTORY_CLOSES, ())
 
 
 def _raise_if_cancelled(cancelled: CancellationCheck) -> None:
