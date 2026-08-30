@@ -1271,10 +1271,20 @@ def test_render_auto_fit_validates_emitted_static_run_count(
             collision_policy=CollisionPolicy.REPLACE,
         ),
     )
+    events: list[ProgressEvent] = []
     artifact = render_service(
         source=StaticSource(),
         encoder=PillowWebPEncoder(),
-    ).render(render_request, job(tmp_path, "static-auto-fit", JobKind.RENDER))
+    ).render(
+        render_request,
+        JobContext(
+            "static-auto-fit",
+            JobKind.RENDER,
+            tmp_path / "job-work",
+            events.append,
+            CancellationState(),
+        ),
+    )
 
     info = validate_webp(
         artifact.output_path, expected_frames=1, expected_duration_ms=1000
@@ -1282,6 +1292,15 @@ def test_render_auto_fit_validates_emitted_static_run_count(
 
     assert info.frames == 1
     assert info.duration_ms == 1000
+    auto_fit_events = [event for event in events if event.stage.startswith("Auto-fit")]
+    assert "Auto-fit, attempt 1 of at most 12" in {
+        event.stage for event in auto_fit_events
+    }
+    assert all(
+        event.overall_completed is None and event.overall_total is None
+        for event in auto_fit_events
+    )
+    assert all(event.overall_indeterminate for event in auto_fit_events)
 
 
 @pytest.mark.parametrize(

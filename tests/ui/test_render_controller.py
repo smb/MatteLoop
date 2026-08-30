@@ -14,6 +14,7 @@ from rembggui.core.specs import CropSpec
 from rembggui.core.state import (
     AppState,
     ArtifactState,
+    JobKind,
     JobStageChanged,
     PreviewRequested,
     PreviewResult,
@@ -27,6 +28,7 @@ from rembggui.core.state import (
 )
 from rembggui.core.timeline import EndChanged, StartChanged
 from rembggui.core.webp import validate_webp
+from rembggui.jobs.context import CancellationState, JobContext, ProgressEvent
 from rembggui.jobs.render import ImmutableRgba, PreparedSegmentation, RenderArtifact
 from rembggui.jobs.workspace import CutWorkspace, WorkspaceLifecycle
 from rembggui.ui.controller import SourceController
@@ -36,7 +38,7 @@ from rembggui.ui.ports import (
     RenderVideoRequested,
 )
 from rembggui.ui.preview_controller import PreviewRuntime
-from rembggui.ui.render_pipeline import render_prepared
+from rembggui.ui.render_pipeline import _StageReporter, render_prepared
 from rembggui.ui.store import ReducerStore
 from tests.fixtures.media_factory import make_video
 
@@ -54,6 +56,61 @@ class FakeSegmenter:
     def segment(self, frame, request):
         del request
         return frame
+
+
+def test_stage_change_preserves_current_frame_and_overall_counts(tmp_path) -> None:
+    events: list[ProgressEvent] = []
+    context = JobContext(
+        "stage-context",
+        JobKind.RENDER,
+        tmp_path,
+        events.append,
+        CancellationState(),
+    )
+    context.set_frame_context(12, 39, overall=(11, 78))
+
+    _StageReporter(context).report("Segmentation")
+
+    assert events[-1] == ProgressEvent(
+        "stage-context",
+        "Segmentation",
+        12,
+        39,
+        "Frame 12 of 39",
+        11,
+        78,
+    )
+
+
+def test_stage_change_preserves_the_last_published_frame_event(tmp_path) -> None:
+    events: list[ProgressEvent] = []
+    context = JobContext(
+        "published-frame",
+        JobKind.RENDER,
+        tmp_path,
+        events.append,
+        CancellationState(),
+    )
+    context.progress(
+        "render-cut",
+        12,
+        total=39,
+        detail="Cut frame 12 of 39",
+        overall_completed=12,
+        overall_total=78,
+    )
+
+    _StageReporter(context).report("Segmentation")
+
+    assert events[-1] == ProgressEvent(
+        "published-frame",
+        "Segmentation",
+        12,
+        39,
+        "Cut frame 12 of 39",
+        12,
+        78,
+    )
 
 
 class FakeRenderRuntime(PreviewRuntime):

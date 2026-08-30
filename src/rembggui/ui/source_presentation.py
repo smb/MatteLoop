@@ -81,6 +81,9 @@ class JobProgressPresenter:
                 self._rate = rate
             self._overall_completed = overall_completed
             self._overall_total = overall_total
+        else:
+            self._overall_completed = None
+            self._overall_total = None
         return self.current(timestamp)
 
     def current(self, timestamp: float) -> JobProgressMetrics:

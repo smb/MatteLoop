@@ -328,6 +328,9 @@ def test_model_download_dialog_shows_human_byte_totals(qtbot) -> None:
 def test_job_dialog_keeps_stage_detail_and_overall_progress_separate(qtbot) -> None:
     dialog = PreviewJobDialog()
     qtbot.addWidget(dialog)
+    dialog.set_job_details("birefnet-portrait", "clip.webp")
+    dialog.set_execution_provider("CPUExecutionProvider")
+    dialog.set_provider_notice("Using the CPU fallback")
 
     dialog.set_progress(
         ProgressEvent(
@@ -343,6 +346,11 @@ def test_job_dialog_keeps_stage_detail_and_overall_progress_separate(qtbot) -> N
 
     assert dialog.stage_label.text() == "Encode"
     assert dialog.detail_label.text() == "Encode frame 12 of 39"
+    assert dialog.model_provider_label.text() == "BiRefNet Portrait · CPU"
+    assert dialog.output_label.text() == "Output: clip.webp"
+    assert dialog.provider_notice_label.text() == "Using the CPU fallback"
+    assert dialog.stage_progress_label.text() == "Stage progress"
+    assert dialog.overall_progress_label.text() == "Overall progress"
     assert (dialog.progress_bar.minimum(), dialog.progress_bar.maximum()) == (0, 39)
     assert dialog.progress_bar.value() == 12
     assert (
@@ -352,3 +360,26 @@ def test_job_dialog_keeps_stage_detail_and_overall_progress_separate(qtbot) -> N
     assert dialog.overall_progress_bar.value() == 51
     assert dialog.rate_label.text() == ""
     assert dialog.estimate_label.text() == ""
+
+
+def test_job_dialog_marks_unknown_overall_progress_as_indeterminate(qtbot) -> None:
+    dialog = PreviewJobDialog()
+    qtbot.addWidget(dialog)
+
+    dialog.set_progress(
+        ProgressEvent(
+            "job",
+            "Auto-fit, attempt 3 of at most 12",
+            12,
+            39,
+            "Frame 12 of 39",
+        )
+    )
+
+    assert dialog.stage_label.text() == "Auto-fit, attempt 3 of at most 12"
+    assert dialog.detail_label.text() == "Frame 12 of 39"
+    assert dialog.overall_progress_label.text() == "Overall progress (indeterminate)"
+    assert (
+        dialog.overall_progress_bar.minimum(),
+        dialog.overall_progress_bar.maximum(),
+    ) == (0, 0)

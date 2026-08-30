@@ -38,7 +38,41 @@ class _StageReporter:
         self._context = context
 
     def report(self, stage: str) -> None:
-        self._context.progress(stage, 0)
+        frame = self._context.frame_context
+        if frame is None:
+            previous = self._context.last_progress
+            if previous is not None and previous.total is not None:
+                self._context.progress(
+                    stage,
+                    previous.completed,
+                    total=previous.total,
+                    detail=previous.detail
+                    or f"Frame {previous.completed} of {previous.total}",
+                    overall_completed=previous.overall_completed,
+                    overall_total=previous.overall_total,
+                    overall_indeterminate=previous.overall_indeterminate,
+                )
+                return
+            self._context.progress(stage, 0)
+            return
+        completed, total, overall = frame
+        if overall is None:
+            self._context.progress(
+                stage,
+                completed,
+                total=total,
+                detail=f"Frame {completed} of {total}",
+                overall_indeterminate=True,
+            )
+            return
+        self._context.progress(
+            stage,
+            completed,
+            total=total,
+            detail=f"Frame {completed} of {total}",
+            overall_completed=overall[0],
+            overall_total=overall[1],
+        )
 
 
 class _SourceStagePort:
@@ -114,7 +148,7 @@ class _EncoderStagePort:
         context: JobContext,
         ownership: RgbaOwnershipTracker,
     ) -> ValidatedCandidate:
-        self._reporter.report("Encode")
+        self._reporter.report("Auto-fit" if max_bytes is not None else "Encode")
         candidate = self._delegate.encode(
             frame_paths,
             delays_ms,

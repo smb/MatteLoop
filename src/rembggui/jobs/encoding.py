@@ -20,6 +20,7 @@ def auto_fit_webp(
     context: JobContext,
     ownership: RgbaOwnershipTracker,
     frame_progress: Callable[[int, int], None],
+    attempt_progress: Callable[[int, int], None] | None = None,
 ) -> EncodeSummary:
     """Fit, validate, and summarize one bounded-size WebP output."""
     fit_summaries: list[EncodeSummary] = []
@@ -34,6 +35,7 @@ def auto_fit_webp(
             rgba_ownership_tracker=ownership,
             summary_out=fit_summaries,
             progress=frame_progress,
+            attempt_progress=attempt_progress,
         )
     except AppError as error:
         if error.code is ErrorCode.JOB_CANCELLED:
@@ -62,3 +64,30 @@ def auto_fit_webp(
         info.duration_ms,
         info.file_size,
     )
+
+
+def auto_fit_progress(
+    context: JobContext, frame_total: int
+) -> tuple[Callable[[int, int], None], Callable[[int, int], None]]:
+    """Build frame and attempt callbacks for an indeterminate auto-fit job."""
+    stage = "Auto-fit"
+
+    def report_attempt(attempt: int, maximum: int) -> None:
+        nonlocal stage
+        stage = f"Auto-fit, attempt {attempt} of at most {maximum}"
+        context.frame_progress(
+            stage,
+            0,
+            frame_total,
+            overall_indeterminate=True,
+        )
+
+    def report_frame(completed: int, total: int) -> None:
+        context.frame_progress(
+            stage,
+            completed,
+            total,
+            overall_indeterminate=True,
+        )
+
+    return report_frame, report_attempt

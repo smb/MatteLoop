@@ -55,6 +55,7 @@ class RenderWorker(QObject):
     @Slot()
     def run(self) -> None:
         try:
+            provider_emitted = self._prepare_for_render()
             if self._rebuild_workspace is None:
                 artifact = self._runtime.render(self._request, self._context)
             else:
@@ -64,17 +65,8 @@ class RenderWorker(QObject):
                 artifact = rebuild(
                     self._request, self._rebuild_workspace, self._context
                 )
-            provider = getattr(
-                self._runtime,
-                "active_provider",
-                self._request.segmentation.execution_provider,
-            )
-            if not isinstance(provider, str):
-                provider = self._request.segmentation.execution_provider
-            self.provider_ready.emit(provider)
-            notice = getattr(self._runtime, "fallback_notice", None)
-            if isinstance(notice, str) and notice:
-                self.provider_notice.emit(notice)
+            if not provider_emitted:
+                self._emit_provider_details()
             if self._context.terminal_state is JobTerminalState.RUNNING:
                 self._context.commit_if_not_cancelled(lambda: None)
             elif self._context.terminal_state is JobTerminalState.CANCEL_PENDING:
@@ -94,6 +86,33 @@ class RenderWorker(QObject):
             if self._context.terminal_state is JobTerminalState.RUNNING:
                 self._context.fail()
             self.finished.emit(self._job_id)
+
+    def _prepare_for_render(self) -> bool:
+        if self._rebuild_workspace is not None:
+            return False
+        prepare = getattr(self._runtime, "prepare", None)
+        if not callable(prepare):
+            return False
+        prepare(
+            self._request.segmentation.model_id,
+            {"execution_provider": self._request.segmentation.execution_provider},
+            self._context,
+        )
+        self._emit_provider_details()
+        return True
+
+    def _emit_provider_details(self) -> None:
+        provider = getattr(
+            self._runtime,
+            "active_provider",
+            self._request.segmentation.execution_provider,
+        )
+        if not isinstance(provider, str):
+            provider = self._request.segmentation.execution_provider
+        self.provider_ready.emit(provider)
+        notice = getattr(self._runtime, "fallback_notice", None)
+        if isinstance(notice, str) and notice:
+            self.provider_notice.emit(notice)
 
     def _notify_failure_or_cancel(self, error: BaseException) -> None:
         if self._context.cancellation.requested:

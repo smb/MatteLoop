@@ -621,11 +621,15 @@ class RenderController(QObject):
         self._active_job_id = job_id
         self._active_workspace = rebuild_workspace
         self._open_dialog(
-            job_id, JobKind.REBUILD if rebuild_workspace else JobKind.RENDER
+            job_id,
+            JobKind.REBUILD if rebuild_workspace else JobKind.RENDER,
+            request,
         )
         self._threads[job_id][0].start()
 
-    def _open_dialog(self, job_id: str, kind: JobKind) -> None:
+    def _open_dialog(
+        self, job_id: str, kind: JobKind, request: RenderRequest
+    ) -> None:
         if self._dialog is None:
             self._dialog = PreviewJobDialog(self._dialog_parent)
         if not self._dialog_cancel_connected:
@@ -638,6 +642,9 @@ class RenderController(QObject):
         )
         self._dialog.stage_label.setText(
             "Validation" if kind is JobKind.REBUILD else "Decode"
+        )
+        self._dialog.set_job_details(
+            request.segmentation.model_id, request.output.filename
         )
         self._dialog.setProperty("jobId", job_id)
         self._dialog.open()
@@ -698,6 +705,8 @@ class RenderController(QObject):
             or self._store.state.job.job_id != self._active_job_id
         ):
             return
+        if self._dialog is not None:
+            self._dialog.set_execution_provider(provider)
         self.provider_ready.emit(provider)
 
     @Slot(str)
@@ -756,6 +765,7 @@ def _normalise_progress(event: ProgressEvent) -> ProgressEvent:
         event.detail,
         event.overall_completed,
         event.overall_total,
+        event.overall_indeterminate,
     )
 
 

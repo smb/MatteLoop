@@ -307,6 +307,7 @@ def fit_webp_to_size(
     rgba_ownership_tracker: RgbaOwnershipTracker | None = None,
     summary_out: list[EncodeSummary] | None = None,
     progress: Callable[[int, int], None] | None = None,
+    attempt_progress: Callable[[int, int], None] | None = None,
 ) -> Path:
     """Fit a validated WebP to a byte target using at most twelve encodes."""
 
@@ -354,6 +355,8 @@ def fit_webp_to_size(
         active_scaled_dir: Path | None = None
         for attempt in range(_MAX_FIT_ENCODINGS):
             _raise_if_fit_cancelled(is_cancelled)
+            if attempt_progress is not None:
+                attempt_progress(attempt + 1, _MAX_FIT_ENCODINGS)
             candidate = scratch / f"candidate-{attempt:02d}.webp"
             summary = _encode_candidate(
                 current_paths,
@@ -669,7 +672,7 @@ def _encode_animation(
         stream.options = {
             "lossless": "1",
             "quality": "100",
-            "compression_level": "6",
+            "compression_level": "4",
         }
         _encode_animation_frames(
             base_frames,

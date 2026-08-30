@@ -26,7 +26,7 @@ def test_frame_rate_and_estimate_wait_for_a_meaningful_trailing_window() -> None
     assert metrics.estimate == "0:01 remaining"
 
 
-def test_uncounted_stage_keeps_the_last_truthful_counted_metrics() -> None:
+def test_indeterminate_stage_drops_stale_estimate_but_keeps_real_rate() -> None:
     presenter = JobProgressPresenter()
     presenter.reset(0.0)
     presenter.update(0, 40, 0.0)
@@ -35,7 +35,7 @@ def test_uncounted_stage_keeps_the_last_truthful_counted_metrics() -> None:
     metrics = presenter.update(None, None, 3.0)
 
     assert metrics.rate == "10.0 fps"
-    assert metrics.estimate == "0:02 remaining"
+    assert metrics.estimate == ""
 
 
 def test_frame_rate_formatter_accepts_slow_work() -> None:

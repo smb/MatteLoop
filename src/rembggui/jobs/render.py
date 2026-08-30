@@ -70,7 +70,7 @@ from rembggui.core.webp import (
     validate_webp,
 )
 from rembggui.jobs.context import JobContext, JobTerminalState
-from rembggui.jobs.encoding import auto_fit_webp
+from rembggui.jobs.encoding import auto_fit_progress, auto_fit_webp
 from rembggui.jobs.models.cache_fs import BoundDirectoryCloseError, UnsafeCacheError
 from rembggui.jobs.protocol import PROTOCOL_VERSION, SegmentOptions, SegmentRequest
 from rembggui.jobs.source import DecodedFrame, SourceInfo, decode_frame, probe_source
@@ -588,11 +588,11 @@ class PillowWebPEncoder:
         context.checkpoint("encode")
         stage = "Auto-fit" if max_bytes is not None else "Encode"
         overall = None if max_bytes is not None else context.overall_progress
-        frame_progress = cast(
-            Callable[[int, int], None],
-            partial(context.frame_progress, stage, overall=overall),
-        )
         if max_bytes is None:
+            frame_progress = cast(
+                Callable[[int, int], None],
+                partial(context.frame_progress, stage, overall=overall),
+            )
             summary = encode_lossless_webp(
                 frame_paths,
                 delays_ms,
@@ -601,6 +601,9 @@ class PillowWebPEncoder:
                 progress=frame_progress,
             )
         else:
+            frame_progress, attempt_progress = auto_fit_progress(
+                context, len(frame_paths)
+            )
             summary = auto_fit_webp(
                 frame_paths,
                 delays_ms,
@@ -610,6 +613,7 @@ class PillowWebPEncoder:
                 context,
                 ownership,
                 frame_progress,
+                attempt_progress,
             )
         return ValidatedCandidate.validate(
             destination,
@@ -1059,6 +1063,11 @@ class RenderService:
             actual_pts: list[Fraction] = []
             union: PixelBounds | None = None
             for index, timestamp in enumerate(timestamps):
+                context.set_frame_context(
+                    index + 1,
+                    len(timestamps),
+                    overall=(index, len(timestamps) * 2),
+                )
                 cut, actual = _produce_cut_frame(
                     self._source,
                     self._segmentation,
@@ -1349,6 +1358,11 @@ class RenderService:
             ) from error
         framed_paths: list[Path] = []
         for index in range(manifest.frame_count):
+            context.set_frame_context(
+                index + 1,
+                manifest.frame_count,
+                overall=context.overall_progress,
+            )
             context.checkpoint("framing")
             cut = self._workspace.read_cut(private, index, tracker)
             try:
@@ -1380,13 +1394,15 @@ class RenderService:
             frame_count = manifest.frame_count
             overall = context.overall_progress or (0, frame_count)
             stage = "Auto-fit" if request.output.max_bytes is not None else "Encode"
+            overall_for_encode = (
+                None if request.output.max_bytes is not None else overall
+            )
             context.frame_progress(
                 stage,
                 0,
                 frame_count,
-                overall=(
-                    None if request.output.max_bytes is not None else overall
-                ),
+                overall=overall_for_encode,
+                overall_indeterminate=request.output.max_bytes is not None,
             )
             validated = self._encoder.encode(
                 tuple(framed_paths),
@@ -1400,7 +1416,13 @@ class RenderService:
             summary = validated.summary
             if validated.path != candidate or summary.destination != candidate:
                 raise _output_error("encoder did not return its private candidate")
-            context.frame_progress(stage, frame_count, frame_count, overall=overall)
+            context.frame_progress(
+                stage,
+                frame_count,
+                frame_count,
+                overall=overall_for_encode,
+                overall_indeterminate=request.output.max_bytes is not None,
+            )
             context.progress("Validation", 0, detail="Validating encoded output")
             context.checkpoint("encode")
             gc.collect()

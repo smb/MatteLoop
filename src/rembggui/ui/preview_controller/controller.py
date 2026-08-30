@@ -204,16 +204,17 @@ class PreviewController(QObject):
         self._contexts[job_id] = context
         self._threads[job_id] = (thread, worker)
         self._active_job_id = job_id
-        self._open_dialog(job_id)
+        self._open_dialog(job_id, inputs)
         thread.start()
 
-    def _open_dialog(self, job_id: str) -> None:
+    def _open_dialog(self, job_id: str, inputs: _PreviewInputs) -> None:
         if self._dialog is None:
             self._dialog = PreviewJobDialog(self._dialog_parent)
         if not self._dialog_cancel_connected:
             self._dialog.cancel_requested.connect(self._cancel_active)
             self._dialog_cancel_connected = True
         self._dialog.reset("Preparing model")
+        self._dialog.set_job_details(inputs.parameters.model_id)
         self._dialog.setProperty("jobId", job_id)
         self._dialog.open()
 
@@ -267,6 +268,8 @@ class PreviewController(QObject):
             or self._store.state.job.job_id != self._active_job_id
         ):
             return
+        if self._dialog is not None:
+            self._dialog.set_execution_provider(provider)
         self.provider_ready.emit(provider)
 
     @Slot(str)

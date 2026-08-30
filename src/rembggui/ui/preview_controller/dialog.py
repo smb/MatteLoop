@@ -39,6 +39,15 @@ class PreviewJobDialog(QDialog):
         self.stage_label.setObjectName("job_stage")
         self.detail_label = QLabel()
         self.detail_label.setObjectName("job_detail")
+        self.model_provider_label = QLabel()
+        self.model_provider_label.setObjectName("job_model_provider")
+        self.model_provider_label.setAccessibleName("Active model and provider")
+        self.output_label = QLabel()
+        self.output_label.setObjectName("job_output")
+        self.output_label.setAccessibleName("Output target")
+        self.provider_notice_label = QLabel()
+        self.provider_notice_label.setObjectName("job_provider_notice")
+        self.provider_notice_label.setAccessibleName("Provider notice")
         self.elapsed_label = QLabel()
         self.elapsed_label.setObjectName("job_elapsed")
         self.rate_label = QLabel()
@@ -51,19 +60,13 @@ class PreviewJobDialog(QDialog):
         self.overall_progress_bar = QProgressBar()
         self.overall_progress_bar.setObjectName("job_overall_progress")
         self.overall_progress_bar.setAccessibleName("Overall progress")
+        self.stage_progress_label = QLabel()
+        self.stage_progress_label.setObjectName("job_stage_progress_label")
+        self.overall_progress_label = QLabel()
+        self.overall_progress_label.setObjectName("job_overall_progress_label")
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.setObjectName("job_cancel")
-        layout = QVBoxLayout(self)
-        layout.addWidget(self.stage_label)
-        layout.addWidget(self.detail_label)
-        layout.addWidget(self.progress_bar)
-        layout.addWidget(self.overall_progress_bar)
-        metrics = QHBoxLayout()
-        metrics.addWidget(self.elapsed_label)
-        metrics.addWidget(self.rate_label)
-        metrics.addWidget(self.estimate_label)
-        layout.addLayout(metrics)
-        layout.addWidget(self.cancel_button)
+        self._assemble_layout()
         self.cancel_button.clicked.connect(self._request_cancel)
         self.installEventFilter(self)
         self.cancel_button.installEventFilter(self)
@@ -73,13 +76,43 @@ class PreviewJobDialog(QDialog):
         self._elapsed_timer.timeout.connect(self._refresh_metrics)
         self.reset()
 
+    def _assemble_layout(self) -> None:
+        """Stack stage, detail, job identity, both bars and the metrics row."""
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.stage_label)
+        layout.addWidget(self.detail_label)
+        job_details = QHBoxLayout()
+        job_details.addWidget(self.model_provider_label)
+        job_details.addStretch(1)
+        job_details.addWidget(self.output_label)
+        layout.addLayout(job_details)
+        layout.addWidget(self.provider_notice_label)
+        layout.addWidget(self.stage_progress_label)
+        layout.addWidget(self.progress_bar)
+        layout.addWidget(self.overall_progress_label)
+        layout.addWidget(self.overall_progress_bar)
+        metrics = QHBoxLayout()
+        metrics.addWidget(self.elapsed_label)
+        metrics.addWidget(self.rate_label)
+        metrics.addWidget(self.estimate_label)
+        layout.addLayout(metrics)
+        layout.addWidget(self.cancel_button)
+
     def reset(self, title: str = "Previewing selected frame") -> None:
         self._terminal_close_requested = False
         self.setWindowTitle(title)
         self.stage_label.setText("Preparing model")
         self.detail_label.setText("")
+        self.model_provider_label.clear()
+        self.model_provider_label.hide()
+        self.output_label.clear()
+        self.output_label.hide()
+        self.provider_notice_label.clear()
+        self.provider_notice_label.hide()
+        self.stage_progress_label.setText("Stage progress (indeterminate)")
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setFormat("")
+        self.overall_progress_label.setText("Overall progress (indeterminate)")
         self.overall_progress_bar.setRange(0, 0)
         self.overall_progress_bar.setFormat("")
         self._apply_metrics(self._progress_presenter.reset(time.monotonic()))
@@ -87,15 +120,40 @@ class PreviewJobDialog(QDialog):
         self.cancel_button.setEnabled(True)
         self.cancel_button.setText("Cancel")
         self._cancel_emitted = False
-        self._provider_notice: str | None = None
+        self._model_name = ""
+        self._provider_name = ""
+
+    def set_job_details(
+        self, model_id: str, output_filename: str | None = None
+    ) -> None:
+        self._model_name = _MODEL_DISPLAY_NAMES.get(model_id, model_id)
+        self._refresh_model_provider()
+        if output_filename:
+            self.output_label.setText(f"Output: {output_filename}")
+            self.output_label.show()
+
+    def set_execution_provider(self, provider: str) -> None:
+        self._provider_name = _PROVIDER_DISPLAY_NAMES.get(provider, provider)
+        self._refresh_model_provider()
+
+    def _refresh_model_provider(self) -> None:
+        if not self._model_name:
+            self.model_provider_label.clear()
+            self.model_provider_label.hide()
+            return
+        text = self._model_name
+        if self._provider_name:
+            text += f" · {self._provider_name}"
+        self.model_provider_label.setText(text)
+        self.model_provider_label.show()
 
     def set_provider_notice(self, notice: str) -> None:
-        self._provider_notice = notice
-        self.detail_label.setText(notice)
+        self.provider_notice_label.setText(notice)
+        self.provider_notice_label.show()
 
     def set_progress(self, event: ProgressEvent) -> None:
         self.stage_label.setText(event.stage)
-        self.detail_label.setText(self._provider_notice or event.detail)
+        self.detail_label.setText(event.detail)
         self._apply_metrics(
             self._progress_presenter.update(
                 event.overall_completed,
@@ -104,9 +162,11 @@ class PreviewJobDialog(QDialog):
             )
         )
         if event.total is None:
+            self.stage_progress_label.setText("Stage progress (indeterminate)")
             self.progress_bar.setRange(0, 0)
             self.progress_bar.setFormat("")
         else:
+            self.stage_progress_label.setText("Stage progress")
             self.progress_bar.setRange(0, event.total)
             self.progress_bar.setValue(event.completed)
             if event.stage == "Downloading model":
@@ -118,9 +178,14 @@ class PreviewJobDialog(QDialog):
             else:
                 self.progress_bar.setFormat("%v / %m")
         if event.overall_completed is not None and event.overall_total is not None:
+            self.overall_progress_label.setText("Overall progress")
             self.overall_progress_bar.setRange(0, event.overall_total)
             self.overall_progress_bar.setValue(event.overall_completed)
             self.overall_progress_bar.setFormat("%v / %m frames")
+        else:
+            self.overall_progress_label.setText("Overall progress (indeterminate)")
+            self.overall_progress_bar.setRange(0, 0)
+            self.overall_progress_bar.setFormat("")
 
     def set_cancelling(self) -> None:
         self.stage_label.setText("Cancelling…")
@@ -168,3 +233,29 @@ class PreviewJobDialog(QDialog):
             return
         self._cancel_emitted = True
         self.cancel_requested.emit()
+
+
+_MODEL_DISPLAY_NAMES = {
+    "u2net": "U2Net",
+    "u2netp": "U2Netp",
+    "u2net_human_seg": "U2Net Human Seg",
+    "silueta": "Silueta",
+    "isnet-general-use": "ISNet General Use",
+    "isnet-anime": "ISNet Anime",
+    "birefnet-general": "BiRefNet General",
+    "birefnet-general-lite": "BiRefNet General Lite",
+    "birefnet-portrait": "BiRefNet Portrait",
+    "birefnet-dis": "BiRefNet DIS",
+    "birefnet-hrsod": "BiRefNet HRSOD",
+    "birefnet-cod": "BiRefNet COD",
+    "birefnet-massive": "BiRefNet Massive",
+}
+
+_PROVIDER_DISPLAY_NAMES = {
+    "CPUExecutionProvider": "CPU",
+    "CoreMLExecutionProvider": "Core ML",
+    "CUDAExecutionProvider": "CUDA",
+    "ROCMExecutionProvider": "ROCm",
+    "MIGraphXExecutionProvider": "MIGraphX",
+    "DmlExecutionProvider": "DirectML",
+}
