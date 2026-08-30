@@ -25,10 +25,11 @@ import shutil
 import stat
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 from fractions import Fraction
+from functools import partial
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -66,10 +67,10 @@ from rembggui.core.webp import (
     EncodeSummary,
     WebPInfo,
     encode_lossless_webp,
-    fit_webp_to_size,
     validate_webp,
 )
 from rembggui.jobs.context import JobContext, JobTerminalState
+from rembggui.jobs.encoding import auto_fit_webp
 from rembggui.jobs.models.cache_fs import BoundDirectoryCloseError, UnsafeCacheError
 from rembggui.jobs.protocol import PROTOCOL_VERSION, SegmentOptions, SegmentRequest
 from rembggui.jobs.source import DecodedFrame, SourceInfo, decode_frame, probe_source
@@ -541,46 +542,30 @@ class PillowWebPEncoder:
         ownership: RgbaOwnershipTracker,
     ) -> ValidatedCandidate:
         context.checkpoint("encode")
+        stage = "Auto-fit" if max_bytes is not None else "Encode"
+        overall = None if max_bytes is not None else context.overall_progress
+        frame_progress = cast(
+            Callable[[int, int], None],
+            partial(context.frame_progress, stage, overall=overall),
+        )
         if max_bytes is None:
             summary = encode_lossless_webp(
                 frame_paths,
                 delays_ms,
                 destination,
                 rgba_ownership_tracker=ownership,
+                progress=frame_progress,
             )
         else:
-            fit_summaries: list[EncodeSummary] = []
-            try:
-                fit_webp_to_size(
-                    frame_paths,
-                    delays_ms,
-                    max_bytes,
-                    work_dir,
-                    destination,
-                    is_cancelled=lambda: context.cancellation.requested,
-                    rgba_ownership_tracker=ownership,
-                    summary_out=fit_summaries,
-                )
-            except AppError as error:
-                if error.code is ErrorCode.JOB_CANCELLED:
-                    context.checkpoint("auto-fit")
-                raise
-            if len(fit_summaries) != 1:
-                raise _output_error("auto-fit did not return its final summary")
-            fitted_summary = fit_summaries[0]
-            info = validate_webp(
+            summary = auto_fit_webp(
+                frame_paths,
+                delays_ms,
                 destination,
-                fitted_summary.frames,
-                sum(delays_ms) if len(frame_paths) > 1 else 0,
-                rgba_ownership_tracker=ownership,
-            )
-            summary = EncodeSummary(
-                destination,
-                info.width,
-                info.height,
-                info.frames,
-                info.duration_ms,
-                info.file_size,
+                work_dir,
+                max_bytes,
+                context,
+                ownership,
+                frame_progress,
             )
         return ValidatedCandidate.validate(
             destination,
@@ -1014,12 +999,6 @@ class RenderService:
             actual_pts: list[Fraction] = []
             union: PixelBounds | None = None
             for index, timestamp in enumerate(timestamps):
-                context.progress(
-                    "render-cut",
-                    index,
-                    total=len(timestamps),
-                    detail=f"Cut frame {index + 1} of {len(timestamps)}",
-                )
                 cut, actual = _produce_cut_frame(
                     self._source,
                     self._segmentation,
@@ -1039,6 +1018,11 @@ class RenderService:
                     cut.close()
                     del cut
                 context.checkpoint("cut-stage")
+                context.progress(
+                    "render-cut", index + 1, total=len(timestamps),
+                    detail=f"Cut frame {index + 1} of {len(timestamps)}",
+                    overall_completed=index + 1, overall_total=len(timestamps) * 2,
+                )
             union_metadata = (
                 None
                 if union is None
@@ -1059,6 +1043,7 @@ class RenderService:
             )
             scratch = staged.scratch_root / context.job_id
             scratch_owners.append(staged.output_directory)
+            context.progress("Cut promotion", 0, detail="Promoting cut frames")
             durable, private, promoted_manifest = self._workspace.promote_render(
                 staged, manifest, scratch, context
             )
@@ -1115,6 +1100,7 @@ class RenderService:
                     "Rebuild requires rebuild=True and regenerate=False",
                 )
             self._segmentation.validate_for(request)
+            context.progress("Validation", 0, detail="Validating cut set")
             durable_manifest = self._workspace.detect_edits(cut_workspace)
             inputs = cut_cache_key_inputs(
                 request,
@@ -1169,6 +1155,7 @@ class RenderService:
             scratch = cut_workspace.scratch_root / context.job_id
             scratch_owners.append(cut_workspace.output_directory)
             private = self._workspace.snapshot_rebuild(cut_workspace, scratch, context)
+            context.progress("Validation", 0, detail="Validating cut snapshot")
             snapshot_manifest = self._workspace.validate(private)
             tracker = RgbaOwnershipTracker(
                 (snapshot_manifest.width, snapshot_manifest.height)
@@ -1317,7 +1304,10 @@ class RenderService:
             finally:
                 framed.close()
                 del framed
-            context.checkpoint("framing")
+            context.progress(
+                "Framing", index + 1, total=manifest.frame_count,
+                detail=f"Frame {index + 1} of {manifest.frame_count}",
+            )
         candidate = self._output_publisher.candidate_path(
             request.output.path, context.job_id, scratch
         )
@@ -1327,6 +1317,17 @@ class RenderService:
         published = False
         publish_error: BaseException | None = None
         try:
+            frame_count = manifest.frame_count
+            overall = context.overall_progress or (0, frame_count)
+            stage = "Auto-fit" if request.output.max_bytes is not None else "Encode"
+            context.frame_progress(
+                stage,
+                0,
+                frame_count,
+                overall=(
+                    None if request.output.max_bytes is not None else overall
+                ),
+            )
             validated = self._encoder.encode(
                 tuple(framed_paths),
                 delays,
@@ -1339,6 +1340,8 @@ class RenderService:
             summary = validated.summary
             if validated.path != candidate or summary.destination != candidate:
                 raise _output_error("encoder did not return its private candidate")
+            context.frame_progress(stage, frame_count, frame_count, overall=overall)
+            context.progress("Validation", 0, detail="Validating encoded output")
             context.checkpoint("encode")
             gc.collect()
             ownership_peak = tracker.peak

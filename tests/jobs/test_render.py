@@ -24,7 +24,12 @@ from rembggui.core.specs import (
 )
 from rembggui.core.state import JobKind
 from rembggui.core.webp import EncodeSummary, encode_lossless_webp, validate_webp
-from rembggui.jobs.context import JobTerminalState
+from rembggui.jobs.context import (
+    CancellationState,
+    JobContext,
+    JobTerminalState,
+    ProgressEvent,
+)
 from rembggui.jobs.models.cache_fs import BoundDirectoryCloseError, UnsafeCacheError
 from rembggui.jobs.render import (
     AtomicOutputPublisher,
@@ -1191,6 +1196,36 @@ def test_render_encodes_and_validates_a_real_lossless_webp(tmp_path) -> None:
     assert (info.width, info.height) == (128, 128)
     assert artifact.ownership_peak <= 3
     assert artifact.ownership_current == 0
+
+
+def test_render_reports_counted_stages_and_global_frame_units(tmp_path) -> None:
+    events: list[ProgressEvent] = []
+    context = JobContext(
+        "progress",
+        JobKind.RENDER,
+        tmp_path / "job-work",
+        events.append,
+        CancellationState(),
+    )
+
+    render_service().render(request(tmp_path), context)
+
+    cuts = [event for event in events if event.stage == "render-cut"]
+    encode = [event for event in events if event.stage == "Encode"]
+
+    assert [(event.completed, event.overall_completed) for event in cuts] == [
+        (1, 1),
+        (2, 2),
+    ]
+    assert all(event.total == 2 and event.overall_total == 4 for event in cuts)
+    assert (encode[0].completed, encode[0].total) == (0, 2)
+    assert (encode[0].overall_completed, encode[0].overall_total) == (2, 4)
+    assert (encode[-1].completed, encode[-1].overall_completed) == (2, 4)
+    assert {event.stage for event in events} >= {
+        "Cut promotion",
+        "Framing",
+        "Validation",
+    }
 
 
 def test_render_succeeds_when_a_static_passage_repeats_sampled_pixels(

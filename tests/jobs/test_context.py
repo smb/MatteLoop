@@ -40,6 +40,42 @@ def test_context_emits_validated_progress_and_completes_once(tmp_path: Path) -> 
     assert scheduler.active is None
 
 
+def test_context_emits_optional_overall_frame_counts(tmp_path: Path) -> None:
+    events: list[ProgressEvent] = []
+    context = JobContext(
+        "j1",
+        JobKind.RENDER,
+        tmp_path,
+        events.append,
+        CancellationState(),
+    )
+
+    event = context.progress(
+        "Encode",
+        12,
+        total=39,
+        overall_completed=51,
+        overall_total=78,
+    )
+
+    assert event == events[0]
+    assert (event.completed, event.total) == (12, 39)
+    assert (event.overall_completed, event.overall_total) == (51, 78)
+
+
+def test_context_rejects_partial_overall_frame_counts(tmp_path: Path) -> None:
+    context = JobContext(
+        "j1",
+        JobKind.RENDER,
+        tmp_path,
+        lambda _event: None,
+        CancellationState(),
+    )
+
+    with pytest.raises(ValueError):
+        context.progress("Encode", 1, overall_completed=1)
+
+
 @pytest.mark.parametrize(("completed", "total"), [(-1, None), (2, 1), (True, None)])
 def test_progress_rejects_invalid_counts(
     tmp_path: Path, completed: int, total: int | None

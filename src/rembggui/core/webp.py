@@ -127,8 +127,10 @@ def encode_lossless_webp(
     destination: Path,
     *,
     rgba_ownership_tracker: RgbaOwnershipTracker | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> EncodeSummary:
     """Encode PNG-backed RGBA frames and atomically replace *destination*."""
+
     if rgba_ownership_tracker is None:
         frames = _validate_frame_inputs(frame_paths, delays_ms)
     else:
@@ -156,11 +158,10 @@ def encode_lossless_webp(
                     temporary,
                     rgba_ownership_tracker,
                 )
+            if progress is not None:
+                progress(1, 1)
         else:
-            if rgba_ownership_tracker is None:
-                _encode_animation(emitted, temporary)
-            else:
-                _encode_animation(emitted, temporary, rgba_ownership_tracker)
+            _encode_animation(emitted, temporary, rgba_ownership_tracker, progress)
         _fsync_file(temporary)
         if rgba_ownership_tracker is None:
             info = validate_webp(
@@ -229,6 +230,7 @@ def validate_webp(
     parsing and Pillow decoding use a duplicate of that exact file descriptor,
     so neither phase reopens a mutable pathname.
     """
+
     if (
         not isinstance(expected_frames, int)
         or isinstance(expected_frames, bool)
@@ -303,8 +305,10 @@ def fit_webp_to_size(
     is_cancelled: Callable[[], bool] | None = None,
     rgba_ownership_tracker: RgbaOwnershipTracker | None = None,
     summary_out: list[EncodeSummary] | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> Path:
     """Fit a validated WebP to a byte target using at most twelve encodes."""
+
     _raise_if_fit_cancelled(is_cancelled)
     if rgba_ownership_tracker is None:
         source = _validate_frame_inputs(
@@ -350,17 +354,13 @@ def fit_webp_to_size(
         for attempt in range(_MAX_FIT_ENCODINGS):
             _raise_if_fit_cancelled(is_cancelled)
             candidate = scratch / f"candidate-{attempt:02d}.webp"
-            if rgba_ownership_tracker is None:
-                summary = encode_lossless_webp(
-                    current_paths, source.delays_ms, candidate
-                )
-            else:
-                summary = encode_lossless_webp(
-                    current_paths,
-                    source.delays_ms,
-                    candidate,
-                    rgba_ownership_tracker=rgba_ownership_tracker,
-                )
+            summary = _encode_candidate(
+                current_paths,
+                source.delays_ms,
+                candidate,
+                rgba_ownership_tracker,
+                progress,
+            )
             _raise_if_fit_cancelled(is_cancelled)
             if summary.file_size <= target_bytes:
                 candidate_frames = _validate_frame_inputs(
@@ -469,6 +469,24 @@ def fit_webp_to_size(
             _cleanup_file(prepared_output, primary)
         if not scratch_cleaned:
             _cleanup_tree(scratch, primary)
+
+
+def _encode_candidate(
+    frame_paths: Sequence[Path],
+    delays_ms: Sequence[int],
+    destination: Path,
+    rgba_ownership_tracker: RgbaOwnershipTracker | None,
+    progress: Callable[[int, int], None] | None,
+) -> EncodeSummary:
+    if rgba_ownership_tracker is None and progress is None:
+        return encode_lossless_webp(frame_paths, delays_ms, destination)
+    return encode_lossless_webp(
+        frame_paths,
+        delays_ms,
+        destination,
+        rgba_ownership_tracker=rgba_ownership_tracker,
+        progress=progress,
+    )
 
 
 def _validate_frame_inputs(
@@ -630,6 +648,7 @@ def _encode_animation(
     frames: _FrameSet,
     destination: Path,
     rgba_ownership_tracker: RgbaOwnershipTracker | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> None:
     base_frames, repeat_counts = _animation_base_frames(frames)
     width, height = frames.size
@@ -656,6 +675,7 @@ def _encode_animation(
             stream,
             container,
             rgba_ownership_tracker,
+            progress,
         )
     finally:
         container.close()
@@ -670,6 +690,7 @@ def _encode_animation_frames(
     stream: av.video.stream.VideoStream,
     container: av.container.OutputContainer,
     rgba_ownership_tracker: RgbaOwnershipTracker | None,
+    progress: Callable[[int, int], None] | None,
 ) -> None:
     if len(frames.paths) == 1:
         path = frames.paths[0]
@@ -685,6 +706,8 @@ def _encode_animation_frames(
             container,
             rgba_ownership_tracker,
         )
+        if progress is not None:
+            progress(1, len(frames.paths))
         # libwebp_anim emits a still for one input frame; a distinct sentinel
         # forces animation metadata before the sentinel is removed.
         _encode_animation_frame(
@@ -700,9 +723,9 @@ def _encode_animation_frames(
         )
     else:
         timestamp = 0
-        for path, identity, delay in zip(
+        for index, (path, identity, delay) in enumerate(zip(
             frames.paths, frames.identities, frames.delays_ms, strict=True
-        ):
+        )):
             _encode_animation_frame(
                 path,
                 identity,
@@ -713,6 +736,8 @@ def _encode_animation_frames(
                 container,
                 rgba_ownership_tracker,
             )
+            if progress is not None:
+                progress(index + 1, len(frames.paths))
             timestamp += delay
     for packet in stream.encode():
         container.mux(packet)

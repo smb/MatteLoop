@@ -22,6 +22,8 @@ class ProgressEvent:
     completed: int
     total: int | None = None
     detail: str = ""
+    overall_completed: int | None = None
+    overall_total: int | None = None
 
 
 class JobTerminalState(StrEnum):
@@ -95,11 +97,17 @@ class JobContext:
         # thread cannot publish a terminal transition until the callback ends.
         self._lock = RLock()
         self._terminal_state = JobTerminalState.RUNNING
+        self._overall_progress: tuple[int, int] | None = None
 
     @property
     def terminal_state(self) -> JobTerminalState:
         with self._lock:
             return self._terminal_state
+
+    @property
+    def overall_progress(self) -> tuple[int, int] | None:
+        with self._lock:
+            return self._overall_progress
 
     def progress(
         self,
@@ -108,6 +116,8 @@ class JobContext:
         *,
         total: int | None = None,
         detail: str = "",
+        overall_completed: int | None = None,
+        overall_total: int | None = None,
     ) -> ProgressEvent:
         if not isinstance(stage, str) or not stage:
             raise ValueError("stage must be a non-empty string")
@@ -123,15 +133,62 @@ class JobContext:
             raise ValueError("total must be an integer at least completed")
         if not isinstance(detail, str):
             raise ValueError("detail must be a string")
-        event = ProgressEvent(self.job_id, stage, completed, total, detail)
+        if (overall_completed is None) != (overall_total is None):
+            raise ValueError(
+                "overall_completed and overall_total must be supplied together"
+            )
+        if overall_completed is not None and (
+            not isinstance(overall_completed, int)
+            or isinstance(overall_completed, bool)
+            or overall_completed < 0
+            or overall_total is None
+            or not isinstance(overall_total, int)
+            or isinstance(overall_total, bool)
+            or overall_total < overall_completed
+        ):
+            raise ValueError(
+                "overall counts must be integers with total at least completed"
+            )
+        event = ProgressEvent(
+            self.job_id,
+            stage,
+            completed,
+            total,
+            detail,
+            overall_completed,
+            overall_total,
+        )
         with self._lock:
             if self._terminal_state not in {
                 JobTerminalState.RUNNING,
                 JobTerminalState.CANCEL_PENDING,
             }:
                 raise RuntimeError("terminal jobs cannot report progress")
+            if overall_completed is not None and overall_total is not None:
+                self._overall_progress = (overall_completed, overall_total)
             self.progress_sink(event)
         return event
+
+    def frame_progress(
+        self,
+        stage: str,
+        completed: int,
+        total: int,
+        *,
+        overall: tuple[int, int] | None = None,
+    ) -> ProgressEvent:
+        """Publish a counted frame event with the standard detail wording."""
+        detail = f"{stage} frame {completed} of {total}"
+        if overall is None:
+            return self.progress(stage, completed, total=total, detail=detail)
+        return self.progress(
+            stage,
+            completed,
+            total=total,
+            detail=detail,
+            overall_completed=overall[0] + completed,
+            overall_total=overall[1],
+        )
 
     def request_cancel(self) -> bool:
         with self._lock:

@@ -541,6 +541,8 @@ def _normalise_progress(event: ProgressEvent) -> ProgressEvent:
         event.completed,
         event.total,
         event.detail,
+        event.overall_completed,
+        event.overall_total,
     )
 
 

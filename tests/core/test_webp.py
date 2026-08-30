@@ -256,6 +256,22 @@ def test_animated_webp_is_lossless_alpha_and_has_expected_duration(
         )
 
 
+def test_animation_encode_reports_each_frame_after_it_is_walked(
+    tmp_path: Path,
+) -> None:
+    paths = rgba_fixture_paths(tmp_path)
+    progress: list[tuple[int, int]] = []
+
+    encode_lossless_webp(
+        paths,
+        (67, 66, 67),
+        tmp_path / "out.webp",
+        progress=lambda completed, total: progress.append((completed, total)),
+    )
+
+    assert progress == [(1, 3), (2, 3), (3, 3)]
+
+
 def test_identical_rgba_frames_become_one_held_frame_with_exact_duration(
     tmp_path: Path,
 ) -> None:

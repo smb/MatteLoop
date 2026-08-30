@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections import deque
+from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
 from typing import TypedDict
@@ -31,6 +32,74 @@ class SourcePresentation(TypedDict):
     source_frame_rate: str
     source_file_size: str
     source_path: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class JobProgressMetrics:
+    """Qt-free text for the changing metrics in the job dialog."""
+
+    elapsed: str
+    rate: str
+    estimate: str
+
+
+class JobProgressPresenter:
+    """Present elapsed time and smoothed frame metrics for one job."""
+
+    def __init__(self) -> None:
+        self._started_at = 0.0
+        self._rate_estimator = DownloadRateEstimator()
+        self._rate: float | None = None
+        self._overall_completed: int | None = None
+        self._overall_total: int | None = None
+
+    def reset(self, started_at: float) -> JobProgressMetrics:
+        if not math.isfinite(started_at):
+            raise ValueError("started_at must be finite")
+        self._started_at = started_at
+        self._rate_estimator = DownloadRateEstimator()
+        self._rate = None
+        self._overall_completed = None
+        self._overall_total = None
+        return self.current(started_at)
+
+    def update(
+        self,
+        overall_completed: object,
+        overall_total: object,
+        timestamp: float,
+    ) -> JobProgressMetrics:
+        if (
+            isinstance(overall_completed, int)
+            and not isinstance(overall_completed, bool)
+            and isinstance(overall_total, int)
+            and not isinstance(overall_total, bool)
+            and 0 <= overall_completed <= overall_total
+        ):
+            rate = self._rate_estimator.update(overall_completed, timestamp)
+            if rate is not None:
+                self._rate = rate
+            self._overall_completed = overall_completed
+            self._overall_total = overall_total
+        return self.current(timestamp)
+
+    def current(self, timestamp: float) -> JobProgressMetrics:
+        if not math.isfinite(timestamp):
+            timestamp = self._started_at
+        elapsed = max(0.0, timestamp - self._started_at)
+        estimate = ""
+        if (
+            self._rate is not None
+            and self._overall_completed is not None
+            and self._overall_total is not None
+        ):
+            remaining = self._overall_total - self._overall_completed
+            estimate = f"{format_elapsed(remaining / self._rate)} remaining"
+        return JobProgressMetrics(
+            format_elapsed(elapsed),
+            format_frame_rate(self._rate),
+            estimate,
+        )
 
 
 def format_source_filename(path: object) -> str:
@@ -93,6 +162,30 @@ def format_source_file_size(size: object) -> str:
             return f"{value:.1f} {unit}"
         value /= 1024
     return ""
+
+
+def format_elapsed(seconds: object) -> str:
+    """Return whole elapsed seconds using the shared timecode formatter."""
+    if (
+        not isinstance(seconds, (int, float))
+        or isinstance(seconds, bool)
+        or not math.isfinite(float(seconds))
+        or seconds < 0
+    ):
+        return ""
+    return format_timecode(Fraction(math.floor(float(seconds)))).removesuffix(".000")
+
+
+def format_frame_rate(frames_per_second: object) -> str:
+    """Return a readable positive frame throughput."""
+    if (
+        not isinstance(frames_per_second, (int, float))
+        or isinstance(frames_per_second, bool)
+        or not math.isfinite(float(frames_per_second))
+        or frames_per_second <= 0
+    ):
+        return ""
+    return f"{float(frames_per_second):.1f} fps"
 
 
 class DownloadRateEstimator:

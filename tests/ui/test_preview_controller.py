@@ -317,3 +317,32 @@ def test_model_download_dialog_shows_human_byte_totals(qtbot) -> None:
     assert dialog.detail_label.text() == (
         "Downloading BiRefNet Portrait — 412.3 MiB of 927.6 MiB"
     )
+
+
+def test_job_dialog_keeps_stage_detail_and_overall_progress_separate(qtbot) -> None:
+    dialog = PreviewJobDialog()
+    qtbot.addWidget(dialog)
+
+    dialog.set_progress(
+        ProgressEvent(
+            "job",
+            "Encode",
+            12,
+            39,
+            "Encode frame 12 of 39",
+            51,
+            78,
+        )
+    )
+
+    assert dialog.stage_label.text() == "Encode"
+    assert dialog.detail_label.text() == "Encode frame 12 of 39"
+    assert (dialog.progress_bar.minimum(), dialog.progress_bar.maximum()) == (0, 39)
+    assert dialog.progress_bar.value() == 12
+    assert (
+        dialog.overall_progress_bar.minimum(),
+        dialog.overall_progress_bar.maximum(),
+    ) == (0, 78)
+    assert dialog.overall_progress_bar.value() == 51
+    assert dialog.rate_label.text() == ""
+    assert dialog.estimate_label.text() == ""
