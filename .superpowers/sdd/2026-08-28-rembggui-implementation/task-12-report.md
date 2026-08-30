@@ -402,6 +402,32 @@ permits locking past end of file, so an empty exclusively-created slot needs no
 sentinel write before ownership is established:
 <https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/locking>.
 
+The lock-lifetime audit then paused each owner inside `os.close()`. Both owner
+types previously issued `LOCK_UN`/`LK_UNLCK` first, marked themselves unlocked,
+and released the local guard before descriptor close had completed. The two
+fork REDs proved the consequence directly: while the first process was paused
+in close, a contender acquired the same transaction-lock or fixed-slot inode and
+truncated its live bytes. Separate close-EIO REDs showed that the retained retry
+owner held only an unlocked descriptor and no local exclusion.
+
+Close now provides the only lock-release linearization. A locked transaction or
+slot descriptor is passed directly to `os.close()` without an earlier adapter
+unlock. Only a confirmed successful close clears `_locked` and releases the
+in-process guard. If close raises, the same descriptor, kernel-lock state, and
+local guard remain attached to the retry owner; retry closes that exact held
+descriptor. Repeated close after success remains a no-op. Descriptors for which
+nonblocking acquisition returned contention were never locked, so their cleanup
+can close and release the local guard independently; an acquisition exception
+now transfers slot-descriptor ownership before the adapter call so a secondary
+close failure is retryable rather than leaked.
+
+The Windows adapter likewise no longer issues `LK_UNLCK` during normal owner
+cleanup. Its contract test observes acquisition only and descriptor close owns
+the release. Microsoft documents that outstanding byte-range locks are released
+when their file handle closes; the native timing remains a platform release-test
+item rather than something the macOS fork suite can prove:
+<https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfileex>.
+
 ## Architecture and safety decisions
 
 - `cut_cache_key_inputs()` is the only authoritative cut-input mapping. The
@@ -442,18 +468,18 @@ sentinel write before ownership is established:
 
 ## Verification
 
-- `.venv/bin/pytest -q --tb=short` — **997 passed in 50.89s** outside the
-  restricted shared-memory sandbox. The 13 warnings are Python 3.13's macOS warning for
+- `.venv/bin/pytest -q --tb=short` — **1000 passed in 51.02s** outside the
+  restricted shared-memory sandbox. The 15 warnings are Python 3.13's macOS warning for
   the deliberately forked cross-process lock repros in an already
   multi-threaded pytest process; no test failed or hung.
-- Focused native cache-filesystem, workspace, and render gate — **237 passed in
+- Focused native cache-filesystem, workspace, and render gate — **240 passed in
   5.11s**. The slower WebP and Rebuild gate is separately **81 passed in
   33.03s**. Together they include canonical alias serialization,
   lock/private-directory/anchor replacement, fixed-slot inode ownership,
   crash-released stale-slot reuse, parent-namespace swaps, durable sync ordering,
   retry-owner retention, and bidirectional Windows-sharing fakes.
 - `ruff check .` — passed.
-- `ruff format --check` over all 4 changed Python files — passed.
+- `ruff format --check` over both changed Python files — passed.
 - `mypy src` — passed for 29 source files.
 - `git diff --check` — passed.
 

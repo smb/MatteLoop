@@ -2648,21 +2648,6 @@ class _SystemAdvisoryFileLock:
             raise
         return True
 
-    def release(self, descriptor: int) -> None:
-        if type(descriptor) is not int or descriptor < 0:
-            raise ValueError("advisory-lock descriptor must be a non-negative int")
-        if self._platform == "posix":
-            posix = self._posix
-            if posix is None:
-                raise RuntimeError("POSIX advisory-lock adapter is unavailable")
-            posix.flock(descriptor, posix.LOCK_UN)
-            return
-        windows = self._windows
-        if windows is None:
-            raise RuntimeError("Windows advisory-lock adapter is unavailable")
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        windows.locking(descriptor, windows.LK_UNLCK, 1)
-
 
 class AdvisoryFileLock:
     """Owned advisory lock, optionally bound to an output-parent anchor."""
@@ -2775,18 +2760,10 @@ class AdvisoryFileLock:
         if descriptor is None and self._anchor_descriptor is None:
             return
         failures: list[BaseException] = []
-        if self._locked:
-            if descriptor is None:
-                failures.append(
-                    _unsafe_error("output transaction lost its locked descriptor")
-                )
-            else:
-                try:
-                    self._adapter.release(descriptor)
-                except BaseException as error:
-                    failures.append(error)
-                else:
-                    self._locked = False
+        if self._locked and descriptor is None:
+            failures.append(
+                _unsafe_error("output transaction lost its locked descriptor")
+            )
         for attribute in ("_descriptor", "_anchor_descriptor"):
             owned_descriptor = getattr(self, attribute)
             if owned_descriptor is None:
@@ -2798,8 +2775,9 @@ class AdvisoryFileLock:
             else:
                 setattr(self, attribute, None)
                 if attribute == "_descriptor":
-                    # Closing the OS handle releases any kernel lock even when
-                    # the explicit unlock call itself reported an error.
+                    # The descriptor close is the lock-release linearization.
+                    # Never unlock first: a failed/blocked close must retain
+                    # both kernel and local ownership for its retry owner.
                     self._locked = False
         if not self._locked or self._descriptor is None:
             local_lock = self._local_lock
@@ -2910,19 +2888,14 @@ class LockedSlotFile:
         if descriptor is None:
             return
         failures: list[BaseException] = []
-        if self._locked:
-            try:
-                self._adapter.release(descriptor)
-            except BaseException as error:
-                failures.append(error)
-            else:
-                self._locked = False
         try:
             os.close(descriptor)
         except BaseException as error:
             failures.append(error)
         else:
             self._descriptor = None
+            # As with the transaction lock, close—not an earlier explicit
+            # unlock—is the ownership-release linearization.
             self._locked = False
         if not self._locked or self._descriptor is None:
             local_lock = self._local_lock
@@ -3149,23 +3122,6 @@ class RecoveryDirectory:
                     "output private slot is already active",
                 )
             adapter = _SystemAdvisoryFileLock()
-            if not adapter.acquire_nonblocking(descriptor):
-                held = LockedSlotFile(
-                    self,
-                    name,
-                    descriptor,
-                    identity,
-                    adapter,
-                    local_key,
-                    local_lock,
-                    locked=False,
-                )
-                descriptor = None
-                local_lock = None
-                raise BlockingIOError(
-                    errno.EWOULDBLOCK,
-                    "output private slot is already active",
-                )
             held = LockedSlotFile(
                 self,
                 name,
@@ -3174,9 +3130,16 @@ class RecoveryDirectory:
                 adapter,
                 local_key,
                 local_lock,
+                locked=False,
             )
             descriptor = None
             local_lock = None
+            if not adapter.acquire_nonblocking(held.descriptor):
+                raise BlockingIOError(
+                    errno.EWOULDBLOCK,
+                    "output private slot is already active",
+                )
+            held._locked = True
             held.assert_owned()
             owner.assert_owned()
             return held

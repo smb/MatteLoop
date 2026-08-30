@@ -1028,6 +1028,156 @@ def test_parent_anchor_close_failure_retains_exact_retry_owner(
     publication.close()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="uses fork to exercise POSIX lock lifetime")
+def test_transaction_lock_stays_exclusive_until_descriptor_close_completes(
+    tmp_path: Path,
+) -> None:
+    context = multiprocessing.get_context("fork")
+    close_started = context.Event()
+    finish_close = context.Event()
+    result = context.Queue()
+
+    def close_owner() -> None:
+        publication = workspace_module.PublicationDirectory.open(tmp_path)
+        private = publication.open_private_directory(
+            ".rembggui-publish",
+            "publication",
+        )
+        key = publication.target_key(tmp_path / "output.webp")
+        lock = publication.acquire_output_lock(private, key)
+        descriptor = lock._descriptor
+        assert descriptor is not None
+        actual_close = workspace_module.os.close
+
+        def pause_locked_descriptor_close(value: int) -> None:
+            if value == descriptor:
+                close_started.set()
+                if not finish_close.wait(10):
+                    raise RuntimeError("test did not finish transaction-lock close")
+            actual_close(value)
+
+        workspace_module.os.close = pause_locked_descriptor_close
+        try:
+            lock.close()
+            lock.close()
+        except BaseException as error:
+            result.put((type(error).__name__, str(error)))
+        else:
+            result.put(("ok", ""))
+        finally:
+            private.close()
+            publication.close()
+
+    process = context.Process(target=close_owner)
+    process.start()
+    contender_descriptor: int | None = None
+    acquired = False
+    try:
+        assert close_started.wait(5)
+        lock_path = next((tmp_path / ".rembggui-publish").glob("*.transaction.lock"))
+        original_bytes = lock_path.read_bytes()
+        contender_descriptor = os.open(lock_path, os.O_RDWR)
+        contender = workspace_module._SystemAdvisoryFileLock()
+        acquired = contender.acquire_nonblocking(contender_descriptor)
+        if acquired:
+            os.ftruncate(contender_descriptor, 0)
+
+        assert not acquired
+        assert lock_path.read_bytes() == original_bytes
+    finally:
+        if contender_descriptor is not None:
+            os.close(contender_descriptor)
+        finish_close.set()
+        process.join(10)
+
+    assert process.exitcode == 0
+    assert result.get(timeout=2) == ("ok", "")
+    publication = workspace_module.PublicationDirectory.open(tmp_path)
+    private = publication.open_private_directory(
+        ".rembggui-publish",
+        "publication",
+    )
+    key = publication.target_key(tmp_path / "output.webp")
+    reused = publication.acquire_output_lock(private, key)
+    reused.close()
+    private.close()
+    publication.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses fork to exercise POSIX lock lifetime")
+def test_fixed_slot_lock_stays_exclusive_until_descriptor_close_completes(
+    tmp_path: Path,
+) -> None:
+    context = multiprocessing.get_context("fork")
+    close_started = context.Event()
+    finish_close = context.Event()
+    result = context.Queue()
+
+    def close_owner() -> None:
+        publication = workspace_module.PublicationDirectory.open(tmp_path)
+        private = publication.open_private_directory(
+            ".rembggui-publish",
+            "publication",
+        )
+        key = publication.target_key(tmp_path / "output.webp")
+        lock = publication.acquire_output_lock(private, key)
+        slot = private.open_locked_slot(f".{key}.publish-pending", lock)
+        os.write(slot.descriptor, b"live-slot")
+        descriptor = slot.descriptor
+        actual_close = workspace_module.os.close
+
+        def pause_locked_descriptor_close(value: int) -> None:
+            if value == descriptor:
+                close_started.set()
+                if not finish_close.wait(10):
+                    raise RuntimeError("test did not finish fixed-slot close")
+            actual_close(value)
+
+        workspace_module.os.close = pause_locked_descriptor_close
+        try:
+            slot.close()
+            slot.close()
+        except BaseException as error:
+            result.put((type(error).__name__, str(error)))
+        else:
+            result.put(("ok", ""))
+        finally:
+            lock.close()
+            private.close()
+            publication.close()
+
+    process = context.Process(target=close_owner)
+    process.start()
+    contender_descriptor: int | None = None
+    acquired = False
+    try:
+        assert close_started.wait(5)
+        slot_path = next((tmp_path / ".rembggui-publish").glob(".*.publish-pending"))
+        contender_descriptor = os.open(slot_path, os.O_RDWR)
+        contender = workspace_module._SystemAdvisoryFileLock()
+        acquired = contender.acquire_nonblocking(contender_descriptor)
+        if acquired:
+            os.ftruncate(contender_descriptor, 0)
+
+        assert not acquired
+        assert slot_path.read_bytes() == b"live-slot"
+    finally:
+        if contender_descriptor is not None:
+            os.close(contender_descriptor)
+        finish_close.set()
+        process.join(10)
+
+    assert process.exitcode == 0
+    assert result.get(timeout=2) == ("ok", "")
+    slot_path = next((tmp_path / ".rembggui-publish").glob(".*.publish-pending"))
+    descriptor = os.open(slot_path, os.O_RDWR)
+    adapter = workspace_module._SystemAdvisoryFileLock()
+    try:
+        assert adapter.acquire_nonblocking(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 @pytest.mark.skipif(os.name == "nt", reason="exercises POSIX descriptor cleanup")
 def test_locked_slot_close_failure_retains_exact_retry_owner(
     tmp_path: Path,
@@ -1055,8 +1205,22 @@ def test_locked_slot_close_failure_retains_exact_retry_owner(
         slot.close()
 
     assert slot.descriptor == slot_descriptor
+    contender = None
+    try:
+        contender = private.open_locked_slot(
+            slot.name,
+            lock,
+            create_if_missing=False,
+        )
+    except BlockingIOError:
+        remained_busy = True
+    else:
+        remained_busy = False
+        contender.close()
     fail_slot = False
     assert workspace_module._drain_attached_bound_directory_closes(exc.value) == 1
+    assert remained_busy
+    slot.close()
     with pytest.raises(AppError, match="closed"):
         _ = slot.descriptor
     lock.close()
@@ -1065,7 +1229,7 @@ def test_locked_slot_close_failure_retains_exact_retry_owner(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="exercises POSIX descriptor cleanup")
-def test_unlock_error_with_successful_close_releases_local_and_kernel_ownership(
+def test_transaction_close_failure_keeps_lock_until_retry_close_succeeds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1076,26 +1240,35 @@ def test_unlock_error_with_successful_close_releases_local_and_kernel_ownership(
     )
     key = publication.target_key(tmp_path / "output.webp")
     lock = publication.acquire_output_lock(private, key)
-    fail_release = True
-    actual_release = workspace_module._SystemAdvisoryFileLock.release
+    descriptor = lock._descriptor
+    assert descriptor is not None
+    fail_close = True
+    actual_close = workspace_module.os.close
 
-    def injected_release(self, descriptor: int) -> None:
-        if fail_release:
-            raise OSError(errno.EIO, "synthetic unlock failure")
-        actual_release(self, descriptor)
+    def injected_close(value: int) -> None:
+        if fail_close and value == descriptor:
+            raise OSError(errno.EIO, "synthetic transaction-lock close failure")
+        actual_close(value)
 
-    monkeypatch.setattr(
-        workspace_module._SystemAdvisoryFileLock,
-        "release",
-        injected_release,
-    )
-    with pytest.raises(AppError, match="synthetic unlock failure"):
+    monkeypatch.setattr(workspace_module.os, "close", injected_close)
+    with pytest.raises(AppError, match="transaction-lock close failure") as exc:
         lock.close()
 
-    assert lock._descriptor is None
+    assert lock._descriptor == descriptor
     assert lock._anchor_descriptor is None
+    contender = None
+    try:
+        contender = publication.acquire_output_lock(private, key)
+    except BlockingIOError:
+        remained_busy = True
+    else:
+        remained_busy = False
+        contender.close()
+    fail_close = False
+    assert workspace_module._drain_attached_bound_directory_closes(exc.value) == 1
+    assert remained_busy
+    lock.close()
     reused = publication.acquire_output_lock(private, key)
-    fail_release = False
     reused.close()
     private.close()
     publication.close()
@@ -1111,11 +1284,6 @@ def test_private_output_lock_serializes_threads_even_if_platform_lock_reenters(
         workspace_module._SystemAdvisoryFileLock,
         "acquire_nonblocking",
         lambda _self, _descriptor: True,
-    )
-    monkeypatch.setattr(
-        workspace_module._SystemAdvisoryFileLock,
-        "release",
-        lambda _self, _descriptor: None,
     )
     first_directory = RecoveryDirectory.open(tmp_path, private_path.name)
     second_directory = RecoveryDirectory.open(tmp_path, private_path.name)
@@ -1145,11 +1313,6 @@ def test_fixed_slot_serializes_threads_even_if_platform_lock_reenters(
         workspace_module._SystemAdvisoryFileLock,
         "acquire_nonblocking",
         lambda _self, _descriptor: True,
-    )
-    monkeypatch.setattr(
-        workspace_module._SystemAdvisoryFileLock,
-        "release",
-        lambda _self, _descriptor: None,
     )
     first = first_directory.open_locked_slot(f".{key}.publish-pending", owner)
     try:
@@ -1209,12 +1372,56 @@ def test_contended_output_lock_retains_descriptor_when_close_fails(
         directory.close()
 
 
-def test_windows_advisory_lock_adapter_uses_nonblocking_byte_range_contract(
+def test_slot_lock_acquisition_error_retains_unclosed_descriptor_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publication = workspace_module.PublicationDirectory.open(tmp_path)
+    private = publication.open_private_directory(
+        ".rembggui-publish",
+        "publication",
+    )
+    key = publication.target_key(tmp_path / "output.webp")
+    transaction = publication.acquire_output_lock(private, key)
+    failed_descriptor: int | None = None
+    close_fails = True
+    actual_close = workspace_module.os.close
+
+    def fail_acquisition(_self, descriptor: int) -> bool:
+        nonlocal failed_descriptor
+        failed_descriptor = descriptor
+        raise OSError(errno.EIO, "synthetic slot-lock acquisition failure")
+
+    def fail_descriptor_close(descriptor: int) -> None:
+        if close_fails and descriptor == failed_descriptor:
+            raise OSError(errno.EIO, "synthetic slot descriptor close failure")
+        actual_close(descriptor)
+
+    monkeypatch.setattr(
+        workspace_module._SystemAdvisoryFileLock,
+        "acquire_nonblocking",
+        fail_acquisition,
+    )
+    monkeypatch.setattr(workspace_module.os, "close", fail_descriptor_close)
+    try:
+        with pytest.raises(OSError, match="slot-lock acquisition failure") as exc:
+            private.open_locked_slot(f".{key}.publish-pending", transaction)
+
+        owners = getattr(exc.value, "_rembggui_bound_directory_close_owners")
+        assert len(owners) == 1
+        close_fails = False
+        assert workspace_module._drain_attached_bound_directory_closes(exc.value) == 1
+    finally:
+        transaction.close()
+        private.close()
+        publication.close()
+
+
+def test_windows_lock_owner_relies_on_descriptor_close_without_explicit_unlock(
     tmp_path: Path,
 ) -> None:
     class FakeMsvcrt:
         LK_NBLCK = 3
-        LK_UNLCK = 4
 
         def __init__(self) -> None:
             self.calls: list[tuple[int, int, int]] = []
@@ -1233,18 +1440,28 @@ def test_windows_advisory_lock_adapter_uses_nonblocking_byte_range_contract(
         platform="windows",
         windows_module=windows,
     )
+    assert adapter.acquire_nonblocking(descriptor)
+    local_lock = threading.Lock()
+    local_lock.acquire()
+    owner = workspace_module.AdvisoryFileLock(
+        "output.transaction.lock",
+        descriptor,
+        adapter,
+        "windows-owner-close",
+        local_lock,
+    )
+    owner.close()
+
+    contender_descriptor = os.open(lock_path, os.O_RDWR)
     try:
-        assert adapter.acquire_nonblocking(descriptor)
-        adapter.release(descriptor)
         windows.busy = True
-        assert not adapter.acquire_nonblocking(descriptor)
+        assert not adapter.acquire_nonblocking(contender_descriptor)
     finally:
-        os.close(descriptor)
+        os.close(contender_descriptor)
 
     assert windows.calls == [
         (descriptor, windows.LK_NBLCK, 1),
-        (descriptor, windows.LK_UNLCK, 1),
-        (descriptor, windows.LK_NBLCK, 1),
+        (contender_descriptor, windows.LK_NBLCK, 1),
     ]
 
 
