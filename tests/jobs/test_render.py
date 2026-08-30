@@ -16,7 +16,12 @@ from PIL import Image
 import rembggui.jobs.render as render_module
 import rembggui.jobs.workspace as workspace_module
 from rembggui.core.errors import AppError, ErrorCode
-from rembggui.core.specs import CollisionPolicy, FramingSpec, SamplingSpec
+from rembggui.core.specs import (
+    CollisionPolicy,
+    FramingSpec,
+    OutputSpec,
+    SamplingSpec,
+)
 from rembggui.core.state import JobKind
 from rembggui.core.webp import EncodeSummary, encode_lossless_webp, validate_webp
 from rembggui.jobs.context import JobTerminalState
@@ -1186,6 +1191,62 @@ def test_render_encodes_and_validates_a_real_lossless_webp(tmp_path) -> None:
     assert (info.width, info.height) == (128, 128)
     assert artifact.ownership_peak <= 3
     assert artifact.ownership_current == 0
+
+
+def test_render_succeeds_when_a_static_passage_repeats_sampled_pixels(
+    tmp_path,
+) -> None:
+    class StaticSource(FakeSource):
+        def decode(self, *args, **kwargs):
+            decoded = super().decode(*args, **kwargs)
+            decoded.image.paste((12, 34, 56, 255), (0, 0, 128, 128))
+            return decoded
+
+    source = StaticSource()
+    artifact = render_service(
+        source=source,
+        encoder=PillowWebPEncoder(),
+    ).render(request(tmp_path), job(tmp_path, "static-passage", JobKind.RENDER))
+
+    info = validate_webp(
+        artifact.output_path, expected_frames=1, expected_duration_ms=1000
+    )
+
+    assert info.frames == 1
+    assert info.duration_ms == 1000
+    assert artifact.duration_ms == 1000
+    assert artifact.ownership_peak <= 3
+
+
+def test_render_auto_fit_validates_emitted_static_run_count(
+    tmp_path,
+) -> None:
+    class StaticSource(FakeSource):
+        def decode(self, *args, **kwargs):
+            decoded = super().decode(*args, **kwargs)
+            decoded.image.paste((12, 34, 56, 255), (0, 0, 128, 128))
+            return decoded
+
+    render_request = replace(
+        request(tmp_path),
+        output=OutputSpec(
+            tmp_path,
+            "output.webp",
+            max_bytes=100_000,
+            collision_policy=CollisionPolicy.REPLACE,
+        ),
+    )
+    artifact = render_service(
+        source=StaticSource(),
+        encoder=PillowWebPEncoder(),
+    ).render(render_request, job(tmp_path, "static-auto-fit", JobKind.RENDER))
+
+    info = validate_webp(
+        artifact.output_path, expected_frames=1, expected_duration_ms=1000
+    )
+
+    assert info.frames == 1
+    assert info.duration_ms == 1000
 
 
 @pytest.mark.parametrize(

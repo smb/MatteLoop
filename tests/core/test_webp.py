@@ -45,6 +45,17 @@ def save_rgba(path: Path, size: tuple[int, int], color: tuple[int, ...]) -> Path
     return path
 
 
+def save_rgba_with_compression(
+    path: Path,
+    size: tuple[int, int],
+    color: tuple[int, ...],
+    compress_level: int,
+) -> Path:
+    with Image.new("RGBA", size, color) as image:
+        image.save(path, compress_level=compress_level)
+    return path
+
+
 def noisy_rgba(path: Path, size: tuple[int, int] = (256, 256)) -> Path:
     width, height = size
     pixels = bytes(
@@ -243,6 +254,116 @@ def test_animated_webp_is_lossless_alpha_and_has_expected_duration(
             second.tobytes(),
             third.tobytes(),
         )
+
+
+def test_identical_rgba_frames_become_one_held_frame_with_exact_duration(
+    tmp_path: Path,
+) -> None:
+    paths = tuple(
+        save_rgba_with_compression(
+            tmp_path / f"identical-{index}.png",
+            (128, 128),
+            (12, 34, 56, 255),
+            index % 2 * 9,
+        )
+        for index in range(6)
+    )
+    assert paths[0].read_bytes() != paths[1].read_bytes()
+    output = tmp_path / "held.webp"
+
+    summary = encode_lossless_webp(paths, (67,) * 6, output)
+    info = validate_webp(output, expected_frames=1, expected_duration_ms=402)
+
+    assert summary.frames == 1
+    assert summary.duration_ms == 402
+    assert info.delays_ms == (402,)
+    with Image.open(output) as encoded, Image.open(paths[0]) as source:
+        assert encoded.n_frames == 1
+        assert encoded.convert("RGBA").tobytes() == source.tobytes()
+
+
+def test_overlong_identical_run_splits_duration_without_losing_time(
+    tmp_path: Path,
+) -> None:
+    paths = tuple(
+        save_rgba(tmp_path / f"overlong-{index}.png", (128, 128), (12, 34, 56, 255))
+        for index in range(2)
+    )
+    delays = (8_388_608, 8_388_608)
+    output = tmp_path / "overlong.webp"
+
+    summary = encode_lossless_webp(paths, delays, output)
+    info = validate_webp(output, expected_frames=2, expected_duration_ms=16_777_216)
+
+    assert summary.frames == 2
+    assert summary.duration_ms == 16_777_216
+    assert info.delays_ms == (16_777_215, 1)
+
+
+def test_mixed_identical_runs_keep_run_delays_and_total_duration(
+    tmp_path: Path,
+) -> None:
+    colors = (
+        (12, 34, 56, 255),
+        (12, 34, 56, 255),
+        (78, 90, 12, 255),
+        (78, 90, 12, 255),
+        (123, 45, 67, 255),
+    )
+    paths = tuple(
+        save_rgba_with_compression(
+            tmp_path / f"mixed-{index}.png",
+            (128, 128),
+            color,
+            index % 2 * 9,
+        )
+        for index, color in enumerate(colors)
+    )
+    delays = (67, 66, 70, 71, 68)
+    output = tmp_path / "mixed.webp"
+
+    summary = encode_lossless_webp(paths, delays, output)
+    info = validate_webp(output, expected_frames=3, expected_duration_ms=342)
+
+    assert summary.frames == 3
+    assert summary.duration_ms == 342
+    assert info.delays_ms == (133, 141, 68)
+    with Image.open(output) as encoded:
+        decoded_pixels = tuple(
+            frame.convert("RGBA").tobytes() for frame in ImageSequence.Iterator(encoded)
+        )
+    with (
+        Image.open(paths[0]) as first,
+        Image.open(paths[2]) as second,
+        Image.open(paths[4]) as third,
+    ):
+        assert decoded_pixels == (first.tobytes(), second.tobytes(), third.tobytes())
+
+
+def test_distinct_rgba_frames_keep_each_emitted_frame_and_delay(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "distinct.webp"
+    paths = rgba_fixture_paths(tmp_path)
+
+    summary = encode_lossless_webp(paths, (67, 66, 67), output)
+    info = validate_webp(output, expected_frames=3, expected_duration_ms=200)
+
+    assert summary.frames == 3
+    assert summary.duration_ms == 200
+    assert info.delays_ms == (67, 66, 67)
+
+
+def test_single_rgba_frame_remains_a_valid_still(tmp_path: Path) -> None:
+    source = save_rgba(tmp_path / "single.png", (128, 128), (12, 34, 56, 78))
+    output = tmp_path / "single.webp"
+
+    summary = encode_lossless_webp((source,), (402,), output)
+    info = validate_webp(output, expected_frames=1, expected_duration_ms=0)
+
+    assert summary.frames == 1
+    assert summary.duration_ms == 0
+    assert info.delays_ms == ()
 
 
 def test_animated_cutouts_preserve_transparent_canvas_pixels(tmp_path: Path) -> None:

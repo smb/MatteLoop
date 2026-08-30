@@ -8,7 +8,7 @@
     "long_functions": 1
   },
   "src/rembggui/core/webp.py": {
-    "lines": 1375,
+    "lines": 1603,
     "long_functions": 5
   },
   "src/rembggui/jobs/models/cache_fs.py": {
@@ -24,7 +24,7 @@
     "long_functions": 1
   },
   "src/rembggui/jobs/render.py": {
-    "lines": 2848,
+    "lines": 2853,
     "long_functions": 11
   },
   "src/rembggui/jobs/segmentation_host.py": {

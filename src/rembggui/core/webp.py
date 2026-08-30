@@ -84,10 +84,11 @@ class _FrameSet:
     delays_ms: tuple[int, ...]
     size: tuple[int, int]
     identities: tuple[_FileIdentity, ...]
+    animated: bool
 
     @property
     def encoded_duration_ms(self) -> int:
-        return sum(self.delays_ms) if len(self.paths) > 1 else 0
+        return sum(self.delays_ms) if self.animated else 0
 
 
 @dataclass(frozen=True)
@@ -136,50 +137,55 @@ def encode_lossless_webp(
             delays_ms,
             rgba_ownership_tracker,
         )
+    emitted = (
+        _collapse_identical_frames(frames, rgba_ownership_tracker)
+        if frames.animated
+        else frames
+    )
     destination = _validate_destination(destination)
     temporary = _sibling_temporary(destination)
     primary: BaseException | None = None
     try:
-        if len(frames.paths) == 1:
+        if not emitted.animated:
             if rgba_ownership_tracker is None:
-                _encode_still(frames.paths[0], frames.identities[0], temporary)
+                _encode_still(emitted.paths[0], emitted.identities[0], temporary)
             else:
                 _encode_still(
-                    frames.paths[0],
-                    frames.identities[0],
+                    emitted.paths[0],
+                    emitted.identities[0],
                     temporary,
                     rgba_ownership_tracker,
                 )
         else:
             if rgba_ownership_tracker is None:
-                _encode_animation(frames, temporary)
+                _encode_animation(emitted, temporary)
             else:
-                _encode_animation(frames, temporary, rgba_ownership_tracker)
+                _encode_animation(emitted, temporary, rgba_ownership_tracker)
         _fsync_file(temporary)
         if rgba_ownership_tracker is None:
             info = validate_webp(
                 temporary,
-                expected_frames=len(frames.paths),
+                expected_frames=len(emitted.paths),
                 expected_duration_ms=frames.encoded_duration_ms,
             )
         else:
             info = validate_webp(
                 temporary,
-                expected_frames=len(frames.paths),
+                expected_frames=len(emitted.paths),
                 expected_duration_ms=frames.encoded_duration_ms,
                 rgba_ownership_tracker=rgba_ownership_tracker,
             )
         if (info.width, info.height) != frames.size:
             raise _invalid_output("encoded dimensions do not match the input frames")
-        expected_delays = frames.delays_ms if len(frames.paths) > 1 else ()
+        expected_delays = emitted.delays_ms if emitted.animated else ()
         if info.delays_ms != expected_delays:
             raise _invalid_output(
                 "encoded frame delays do not match the input sequence"
             )
         _validate_encoded_pixels(
-            frames.paths,
+            emitted.paths,
             temporary,
-            frames.identities,
+            emitted.identities,
             rgba_ownership_tracker,
         )
         os.replace(temporary, destination)
@@ -296,6 +302,7 @@ def fit_webp_to_size(
     *,
     is_cancelled: Callable[[], bool] | None = None,
     rgba_ownership_tracker: RgbaOwnershipTracker | None = None,
+    summary_out: list[EncodeSummary] | None = None,
 ) -> Path:
     """Fit a validated WebP to a byte target using at most twelve encodes."""
     _raise_if_fit_cancelled(is_cancelled)
@@ -356,11 +363,24 @@ def fit_webp_to_size(
                 )
             _raise_if_fit_cancelled(is_cancelled)
             if summary.file_size <= target_bytes:
+                candidate_frames = _validate_frame_inputs(
+                    current_paths,
+                    source.delays_ms,
+                    rgba_ownership_tracker,
+                    is_cancelled=is_cancelled,
+                )
+                emitted = (
+                    _collapse_identical_frames(
+                        candidate_frames, rgba_ownership_tracker
+                    )
+                    if candidate_frames.animated
+                    else candidate_frames
+                )
                 prepared_output = _prepare_candidate(
                     candidate,
                     destination,
-                    current_paths,
-                    source.delays_ms,
+                    emitted,
+                    source.encoded_duration_ms,
                     current_size,
                     target_bytes,
                     rgba_ownership_tracker,
@@ -375,6 +395,17 @@ def fit_webp_to_size(
                         error, "cannot atomically promote fitted WebP"
                     ) from error
                 prepared_output = None
+                if summary_out is not None:
+                    summary_out.append(
+                        EncodeSummary(
+                            destination,
+                            summary.width,
+                            summary.height,
+                            summary.frames,
+                            summary.duration_ms,
+                            summary.file_size,
+                        )
+                    )
                 return destination
 
             if attempt + 1 == _MAX_FIT_ENCODINGS:
@@ -500,7 +531,74 @@ def _validate_frame_inputs(
         identities.append(identity)
 
     assert expected_size is not None
-    return _FrameSet(tuple(paths), delays, expected_size, tuple(identities))
+    return _FrameSet(
+        tuple(paths), delays, expected_size, tuple(identities), count > 1
+    )
+
+
+def _collapse_identical_frames(
+    frames: _FrameSet,
+    rgba_ownership_tracker: RgbaOwnershipTracker | None,
+) -> _FrameSet:
+    run_paths: list[Path] = []
+    run_delays: list[int] = []
+    run_identities: list[_FileIdentity] = []
+    previous_pixels: np.ndarray | None = None
+    for path, identity, delay in zip(
+        frames.paths, frames.identities, frames.delays_ms, strict=True
+    ):
+        pixels = _read_rgba_pixels(path, identity, rgba_ownership_tracker)
+        if previous_pixels is not None and np.array_equal(previous_pixels, pixels):
+            run_delays[-1] += delay
+            del pixels
+            continue
+        run_paths.append(path)
+        run_delays.append(delay)
+        run_identities.append(identity)
+        previous_pixels = pixels
+    del previous_pixels
+    collapsed = _FrameSet(
+        tuple(run_paths),
+        tuple(run_delays),
+        frames.size,
+        tuple(run_identities),
+        frames.animated,
+    )
+    return _split_long_animation_runs(collapsed)
+
+
+def _split_long_animation_runs(frames: _FrameSet) -> _FrameSet:
+    paths: list[Path] = []
+    delays: list[int] = []
+    identities: list[_FileIdentity] = []
+    for path, delay, identity in zip(
+        frames.paths, frames.delays_ms, frames.identities, strict=True
+    ):
+        while delay > _MAX_WEBP_DELAY_MS:
+            paths.append(path)
+            delays.append(_MAX_WEBP_DELAY_MS)
+            identities.append(identity)
+            delay -= _MAX_WEBP_DELAY_MS
+        paths.append(path)
+        delays.append(delay)
+        identities.append(identity)
+    return _FrameSet(tuple(paths), tuple(delays), frames.size, tuple(identities), True)
+
+
+def _read_rgba_pixels(
+    path: Path,
+    identity: _FileIdentity,
+    rgba_ownership_tracker: RgbaOwnershipTracker | None,
+) -> np.ndarray:
+    with _open_stable_binary(path, identity) as (input_file, _opened_identity):
+        with _open_pillow(input_file) as image:
+            image.load()
+            if rgba_ownership_tracker is not None:
+                rgba_ownership_tracker.register(image)
+            pixels = np.array(image, dtype=np.uint8, copy=True)
+            if rgba_ownership_tracker is not None:
+                rgba_ownership_tracker.register(pixels)
+            return pixels
 
 
 def _encode_still(
@@ -533,6 +631,7 @@ def _encode_animation(
     destination: Path,
     rgba_ownership_tracker: RgbaOwnershipTracker | None = None,
 ) -> None:
+    base_frames, repeat_counts = _animation_base_frames(frames)
     width, height = frames.size
     container = av.open(
         str(destination), mode="w", format="webp", options={"loop": "0"}
@@ -552,6 +651,54 @@ def _encode_animation(
             "quality": "100",
             "compression_level": "6",
         }
+        _encode_animation_frames(
+            base_frames,
+            stream,
+            container,
+            rgba_ownership_tracker,
+        )
+    finally:
+        container.close()
+    if len(base_frames.paths) == 1:
+        _remove_last_animation_frame(destination)
+    _expand_animation_frames(destination, repeat_counts)
+    _rewrite_animation_durations(destination, frames.delays_ms)
+
+
+def _encode_animation_frames(
+    frames: _FrameSet,
+    stream: av.video.stream.VideoStream,
+    container: av.container.OutputContainer,
+    rgba_ownership_tracker: RgbaOwnershipTracker | None,
+) -> None:
+    if len(frames.paths) == 1:
+        path = frames.paths[0]
+        identity = frames.identities[0]
+        delay = frames.delays_ms[0]
+        _encode_animation_frame(
+            path,
+            identity,
+            delay,
+            0,
+            frames.size,
+            stream,
+            container,
+            rgba_ownership_tracker,
+        )
+        # libwebp_anim emits a still for one input frame; a distinct sentinel
+        # forces animation metadata before the sentinel is removed.
+        _encode_animation_frame(
+            path,
+            identity,
+            1,
+            delay,
+            frames.size,
+            stream,
+            container,
+            rgba_ownership_tracker,
+            mutate_pixel=True,
+        )
+    else:
         timestamp = 0
         for path, identity, delay in zip(
             frames.paths, frames.identities, frames.delays_ms, strict=True
@@ -567,11 +714,8 @@ def _encode_animation(
                 rgba_ownership_tracker,
             )
             timestamp += delay
-        for packet in stream.encode():
-            container.mux(packet)
-    finally:
-        container.close()
-    _rewrite_animation_durations(destination, frames.delays_ms)
+    for packet in stream.encode():
+        container.mux(packet)
 
 
 def _encode_animation_frame(
@@ -583,13 +727,21 @@ def _encode_animation_frame(
     stream: av.video.stream.VideoStream,
     container: av.container.OutputContainer,
     rgba_ownership_tracker: RgbaOwnershipTracker | None,
+    *,
+    mutate_pixel: bool = False,
 ) -> None:
     with _open_stable_binary(path, identity) as (input_file, _opened_identity):
         with _open_pillow(input_file) as image:
             image.load()
             if rgba_ownership_tracker is not None:
                 rgba_ownership_tracker.register(image)
-            pixels = np.asarray(image)
+            pixels = (
+                np.array(image, dtype=np.uint8, copy=True)
+                if mutate_pixel
+                else np.asarray(image)
+            )
+            if mutate_pixel:
+                pixels[0, 0, 0] ^= 1
             if rgba_ownership_tracker is not None:
                 rgba_ownership_tracker.register(pixels)
             frame = av.VideoFrame.from_ndarray(pixels, format="rgba")
@@ -603,6 +755,81 @@ def _encode_animation_frame(
     frame.time_base = Fraction(1, 1000)
     for packet in stream.encode(frame):
         container.mux(packet)
+
+
+def _animation_base_frames(
+    frames: _FrameSet,
+) -> tuple[_FrameSet, tuple[int, ...]]:
+    paths: list[Path] = []
+    delays: list[int] = []
+    identities: list[_FileIdentity] = []
+    repeat_counts: list[int] = []
+    for path, delay, identity in zip(
+        frames.paths, frames.delays_ms, frames.identities, strict=True
+    ):
+        if paths and path == paths[-1] and identity == identities[-1]:
+            repeat_counts[-1] += 1
+            continue
+        paths.append(path)
+        delays.append(delay)
+        identities.append(identity)
+        repeat_counts.append(1)
+    return (
+        _FrameSet(tuple(paths), tuple(delays), frames.size, tuple(identities), True),
+        tuple(repeat_counts),
+    )
+
+
+def _expand_animation_frames(path: Path, repeat_counts: tuple[int, ...]) -> None:
+    if all(repeat_count == 1 for repeat_count in repeat_counts):
+        return
+    with path.open("rb") as source:
+        data = source.read()
+    output = bytearray(data[:12])
+    position = 12
+    frame_index = 0
+    while position < len(data):
+        size = int.from_bytes(data[position + 4 : position + 8], "little")
+        end = position + 8 + size + (size & 1)
+        chunk = data[position:end]
+        if data[position : position + 4] == b"ANMF":
+            for _ in range(repeat_counts[frame_index]):
+                output.extend(chunk)
+            frame_index += 1
+        else:
+            output.extend(chunk)
+        position = end
+    if frame_index != len(repeat_counts):
+        raise _invalid_output("encoder returned an incomplete animation")
+    output[4:8] = (len(output) - 8).to_bytes(4, "little")
+    with path.open("r+b") as destination:
+        destination.seek(0)
+        destination.write(output)
+        destination.truncate()
+        destination.flush()
+        os.fsync(destination.fileno())
+
+
+def _remove_last_animation_frame(path: Path) -> None:
+    last_frame: int | None = None
+    frame_count = 0
+    position = 12
+    with path.open("rb") as source:
+        file_size = _read_riff_header(source)
+        while position < file_size:
+            tag, size = _read_chunk_header_at(source, position)
+            if tag == b"ANMF":
+                last_frame = position
+                frame_count += 1
+            position += 8 + size + (size & 1)
+    if frame_count != 2 or last_frame is None:
+        raise _invalid_output("encoder returned an incomplete animation")
+    with path.open("r+b") as output:
+        output.truncate(last_frame)
+        output.seek(4)
+        output.write((last_frame - 8).to_bytes(4, "little"))
+        output.flush()
+        os.fsync(output.fileno())
 
 
 def _rewrite_animation_durations(path: Path, delays_ms: tuple[int, ...]) -> None:
@@ -1011,8 +1238,8 @@ def _scaled_dimensions(
 def _prepare_candidate(
     candidate: Path,
     destination: Path,
-    current_frame_paths: tuple[Path, ...],
-    delays_ms: tuple[int, ...],
+    frames: _FrameSet,
+    expected_duration_ms: int,
     expected_dimensions: tuple[int, int],
     target_bytes: int,
     rgba_ownership_tracker: RgbaOwnershipTracker | None = None,
@@ -1026,18 +1253,19 @@ def _prepare_candidate(
             os.fsync(output.fileno())
         info = validate_webp(
             temporary,
-            expected_frames=len(current_frame_paths),
-            expected_duration_ms=sum(delays_ms) if len(delays_ms) > 1 else 0,
+            expected_frames=len(frames.paths),
+            expected_duration_ms=expected_duration_ms,
             rgba_ownership_tracker=rgba_ownership_tracker,
         )
-        expected_delays = delays_ms if len(delays_ms) > 1 else ()
+        expected_delays = frames.delays_ms if frames.animated else ()
         if info.delays_ms != expected_delays:
             raise _invalid_output("fitted WebP frame delays changed during promotion")
         if (info.width, info.height) != expected_dimensions:
             raise _invalid_output("fitted WebP dimensions changed during promotion")
         _validate_encoded_pixels(
-            current_frame_paths,
+            frames.paths,
             temporary,
+            frames.identities,
             rgba_ownership_tracker=rgba_ownership_tracker,
         )
         if info.file_size > target_bytes:

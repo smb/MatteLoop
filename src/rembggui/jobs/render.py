@@ -549,6 +549,7 @@ class PillowWebPEncoder:
                 rgba_ownership_tracker=ownership,
             )
         else:
+            fit_summaries: list[EncodeSummary] = []
             try:
                 fit_webp_to_size(
                     frame_paths,
@@ -558,14 +559,18 @@ class PillowWebPEncoder:
                     destination,
                     is_cancelled=lambda: context.cancellation.requested,
                     rgba_ownership_tracker=ownership,
+                    summary_out=fit_summaries,
                 )
             except AppError as error:
                 if error.code is ErrorCode.JOB_CANCELLED:
                     context.checkpoint("auto-fit")
                 raise
+            if len(fit_summaries) != 1:
+                raise _output_error("auto-fit did not return its final summary")
+            fitted_summary = fit_summaries[0]
             info = validate_webp(
                 destination,
-                len(frame_paths),
+                fitted_summary.frames,
                 sum(delays_ms) if len(frame_paths) > 1 else 0,
                 rgba_ownership_tracker=ownership,
             )
