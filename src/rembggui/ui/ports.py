@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 from rembggui.core.state import AppState, Event
@@ -22,7 +23,14 @@ class StateStore(Protocol):
 
 @dataclass(frozen=True)
 class ChooseVideoRequested:
-    pass
+    replace: bool = False
+
+
+@dataclass(frozen=True)
+class VideoDropped:
+    """One validated local video selected through the native drop target."""
+
+    path: Path
 
 
 @dataclass(frozen=True)
@@ -62,6 +70,7 @@ class ManageWorkspacesRequested:
 
 type WindowCommand = (
     ChooseVideoRequested
+    | VideoDropped
     | PreviewFrameRequested
     | RenderVideoRequested
     | RebuildEditedCutsRequested

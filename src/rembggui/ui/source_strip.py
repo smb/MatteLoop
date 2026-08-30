@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QFontMetrics
+from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QFontMetrics
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+
+SUPPORTED_VIDEO_SUFFIXES = frozenset({".mp4", ".mov", ".webm", ".mkv"})
 
 
 class SourceStrip(QWidget):
@@ -20,6 +22,7 @@ class SourceStrip(QWidget):
         layout.setSpacing(12)
         self.filename = QLabel()
         self.filename.setObjectName("source_filename")
+        self.filename.setAccessibleName("Source video")
         self.filename.setProperty("mono", True)
         self.dimensions = self._label("source_dimensions")
         self.duration = self._label("source_duration")
@@ -72,21 +75,22 @@ class SourceStrip(QWidget):
             metadata, "peak_rate", None
         )
         self.frame_rate.setText(f"{rate} fps" if rate is not None else "")
-        if path is not None:
-            try:
-                self.file_size.setText(f"{Path(path).stat().st_size:,} bytes")
-            except OSError:
-                self.file_size.setText("")
-        else:
-            self.file_size.setText("")
+        revision = getattr(metadata, "revision", None)
+        size = getattr(revision, "size", None)
+        self.file_size.setText(f"{size:,} bytes" if isinstance(size, int) else "")
 
 
 class SourceDropSurface(QWidget):
     """Restrained empty/recovery source-selection surface."""
 
+    video_dropped = Signal(object)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setObjectName("source_drop_surface")
+        self.setObjectName("source_drop_target")
+        self.setAccessibleName("Video drop area")
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAcceptDrops(True)
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.heading = QLabel("Drop a video here")
@@ -94,7 +98,41 @@ class SourceDropSurface(QWidget):
         self.heading.setAccessibleName("Choose a video")
         self.button = QPushButton("Choose Video…")
         self.button.setObjectName("choose_video")
-        self.button.setAccessibleName("Choose Video…")
+        self.button.setAccessibleName("Choose Video")
         self.button.setMinimumHeight(44)
         layout.addWidget(self.heading)
         layout.addWidget(self.button, alignment=Qt.AlignmentFlag.AlignCenter)
+
+    @staticmethod
+    def _drop_path(mime_data: object) -> Path | None:
+        if not hasattr(mime_data, "urls"):
+            return None
+        urls = mime_data.urls()
+        if len(urls) != 1:
+            return None
+        url = urls[0]
+        if not isinstance(url, QUrl) or not url.isLocalFile():
+            return None
+        path = Path(url.toLocalFile())
+        if path.suffix.casefold() not in SUPPORTED_VIDEO_SUFFIXES:
+            return None
+        try:
+            if not path.is_file():
+                return None
+        except OSError:
+            return None
+        return path
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if self._drop_path(event.mimeData()) is not None:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        path = self._drop_path(event.mimeData())
+        if path is None:
+            event.ignore()
+            return
+        self.video_dropped.emit(path)
+        event.acceptProposedAction()

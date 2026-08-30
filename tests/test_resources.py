@@ -107,6 +107,19 @@ def test_resource_path_resolves_source_resource() -> None:
     )
 
 
+def test_resource_path_resolves_wheel_package_resource(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = tmp_path / "site-packages" / "rembggui"
+    package_resource = package / "resources" / "model-manifest.json"
+    package_resource.parent.mkdir(parents=True)
+    package_resource.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(resources_module, "__file__", str(package / "resources.py"))
+
+    assert resource_path("model-manifest.json") == package_resource
+    assert read_resource_bytes("model-manifest.json") == b"{}"
+
+
 def test_resource_path_fails_closed_when_source_resource_is_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

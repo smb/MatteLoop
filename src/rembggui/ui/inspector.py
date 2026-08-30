@@ -26,6 +26,7 @@ class Inspector(QFrame):
     def __init__(self, settings: QSettings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("inspector")
+        self.setAccessibleName("Processing settings")
         self._settings = settings
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -41,17 +42,24 @@ class Inspector(QFrame):
         content_layout.setContentsMargins(16, 12, 16, 16)
         content_layout.setSpacing(4)
         self.disclosures: dict[str, tuple[QToolButton, QWidget]] = {}
+        self.edited_cut_recovery = QPushButton("Retry Rebuild")
+        self.edited_cut_recovery.setObjectName("edited_cut_recovery")
+        self.edited_cut_recovery.setAccessibleName("Edited cut recovery")
+        self.edited_cut_recovery.setToolTip(
+            "Edited cut frames could not be validated. Retry the rebuild scan."
+        )
+        self.edited_cut_recovery.hide()
+        content_layout.addWidget(self.edited_cut_recovery)
+        self.rebuild_button = QPushButton("Rebuild from edited cuts")
+        self.rebuild_button.setObjectName("rebuild_action")
+        self.rebuild_button.setAccessibleName("Rebuild from edited cuts")
+        self.rebuild_button.setMinimumHeight(40)
         self.manage_models = QPushButton("Manage Models…")
         self.manage_models.setObjectName("manage_models")
         self.manage_models.setAccessibleName("Manage Models…")
         self.manage_workspaces = QPushButton("Manage Workspaces…")
         self.manage_workspaces.setObjectName("manage_workspaces")
         self.manage_workspaces.setAccessibleName("Manage Workspaces…")
-        self.edited_cut_recovery = QLabel("Edited cuts need attention")
-        self.edited_cut_recovery.setObjectName("edited_cut_recovery")
-        self.edited_cut_recovery.setAccessibleName("Edited cut recovery")
-        self.edited_cut_recovery.setProperty("secondary", True)
-        self.edited_cut_recovery.hide()
         for key, title, default in _DISCLOSURES:
             section = self._section(key, title, default)
             content_layout.addWidget(section)
@@ -68,6 +76,7 @@ class Inspector(QFrame):
         button.setText(title)
         button.setCheckable(True)
         button.setObjectName(f"{key}_disclosure")
+        button.setAccessibleName(title)
         body = QWidget()
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(0, 0, 8, 8)
@@ -77,7 +86,7 @@ class Inspector(QFrame):
         if key == "segmentation":
             body_layout.addWidget(self.manage_models)
         if key == "workspace":
-            body_layout.addWidget(self.edited_cut_recovery)
+            body_layout.addWidget(self.rebuild_button)
             body_layout.addWidget(self.manage_workspaces)
         checked = self._read_bool(f"inspector/{key}", default)
         button.setChecked(checked)
@@ -90,6 +99,13 @@ class Inspector(QFrame):
         layout.addWidget(body)
         self.disclosures[key] = (button, body)
         return section
+
+    def show_workspace_attention(self, visible: bool) -> None:
+        """Keep Workspace recovery visible while preserving its disclosure layout."""
+        workspace_button, workspace_body = self.disclosures["workspace"]
+        if visible and not workspace_button.isChecked():
+            workspace_button.setChecked(True)
+        workspace_body.setVisible(workspace_button.isChecked())
 
     def _read_bool(self, name: str, default: bool) -> bool:
         value = self._settings.value(name, default)

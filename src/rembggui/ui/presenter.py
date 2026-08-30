@@ -36,7 +36,23 @@ class PresentationModel:
     primary_action: str | None
     focus_target: FocusTarget
     source_error_message: str | None
+    source_error_detail: str | None
     stale_category: str | None
+    source_surface_visible: bool
+    source_strip_visible: bool
+    source_error_visible: bool
+    source_surface_heading: str
+    result_status: str
+    result_checkerboard: bool
+    result_accessible_name: str
+    result_status_marker: str | None
+    recovery_visible: bool
+    recovery_label: str
+    artifact_path: str | None
+    success_label: str
+    source_metadata: object | None
+    source_loading: bool
+    inspector_enabled: bool
 
 
 def present(state: AppState) -> PresentationModel:
@@ -50,24 +66,52 @@ def present(state: AppState) -> PresentationModel:
     if state.source is SourceState.LOADING:
         message = "Reading video…"
     elif state.source is SourceState.ERROR:
-        message = "Choose another video"
-    elif not state.model_available:
-        message = "Download required"
+        message = "This video could not be read. Choose another video."
+    elif state.preview is PreviewState.ERROR:
+        marker = "Preview failed"
+        message = "Preview failed — retry Preview Frame"
     elif state.preview is PreviewState.RUNNING:
         message = (
             "Current preview — previewing selected frame"
             if state.preview_result is not None
             else "Previewing selected frame"
         )
+    elif not state.model_available:
+        message = "Download required"
     elif state.preview is PreviewState.CURRENT:
         marker = "Current preview"
         message = "Current preview"
     elif state.preview is PreviewState.STALE:
         marker = "Settings changed — preview again"
         message = marker
-    elif state.preview is PreviewState.ERROR:
-        marker = "Preview failed"
-        message = "Preview failed — retry Preview Frame"
+
+    result_status_marker: str | None
+    if state.edited_cuts:
+        message = "Model preview — rebuild uses edited cut frames"
+
+    if state.edited_cuts:
+        result_status_marker = "Edited cuts changed"
+    elif marker is not None and state.stale_category is not None:
+        result_status_marker = f"{marker} · {state.stale_category}"
+    else:
+        result_status_marker = marker
+
+    result_status = (
+        "error" if state.source is SourceState.ERROR else state.preview.value
+    )
+    result_checkerboard = state.preview in {
+        PreviewState.CURRENT,
+        PreviewState.STALE,
+    } or (state.preview is PreviewState.RUNNING and state.preview_result is not None)
+    source_error_detail = str(state.source_error) if state.source_error else None
+    source_error_message = (
+        "This video could not be read. Choose another video."
+        if state.source is SourceState.ERROR
+        else None
+    )
+    artifact_path = (
+        str(state.artifact_result.value) if state.artifact_result is not None else None
+    )
 
     if active or not ready:
         primary: str | None = None
@@ -84,7 +128,12 @@ def present(state: AppState) -> PresentationModel:
         source_mode=source_mode,
         result_message=message,
         result_marker=marker,
-        show_stage=state.source in {SourceState.LOADING, SourceState.READY},
+        show_stage=state.source
+        in {
+            SourceState.LOADING,
+            SourceState.READY,
+            SourceState.ERROR,
+        },
         show_timeline=state.source in {SourceState.LOADING, SourceState.READY},
         show_success=state.artifact is ArtifactState.VALID,
         show_rebuild=state.edited_cuts,
@@ -103,6 +152,31 @@ def present(state: AppState) -> PresentationModel:
         open_folder_enabled=allowed.can_open_folder,
         primary_action=primary,
         focus_target=allowed.focus_target,
-        source_error_message=(str(state.source_error) if state.source_error else None),
+        source_error_message=source_error_message,
+        source_error_detail=source_error_detail,
         stale_category=state.stale_category,
+        source_surface_visible=state.source in {SourceState.EMPTY, SourceState.ERROR},
+        source_strip_visible=state.source in {SourceState.LOADING, SourceState.READY},
+        source_error_visible=state.source is SourceState.ERROR,
+        source_surface_heading=(
+            "Choose another video"
+            if state.source is SourceState.ERROR
+            else "Drop a video here"
+        ),
+        result_status=result_status,
+        result_checkerboard=result_checkerboard,
+        result_accessible_name="Background-removed result",
+        result_status_marker=result_status_marker,
+        recovery_visible=state.edited_cuts_error is not None,
+        recovery_label=(
+            "Retry Rebuild"
+            if state.edited_cuts_error is not None
+            else "Rebuild from edited cuts"
+        ),
+        artifact_path=artifact_path,
+        success_label="Render complete",
+        source_metadata=state.source_value,
+        source_loading=state.source is SourceState.LOADING,
+        inspector_enabled=not active
+        and state.source in {SourceState.EMPTY, SourceState.READY},
     )

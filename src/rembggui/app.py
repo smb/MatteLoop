@@ -49,7 +49,9 @@ def _run_gui() -> int:
     if not isinstance(application, QApplication):
         application = QApplication(["rembggui"])
     application.setApplicationName("rembgGUI")
+    application.setApplicationDisplayName("rembgGUI")
     application.setOrganizationName("rembgGUI")
+    application.setApplicationVersion(__version__)
     install_theme(application)
     settings = QSettings()
     window = MainWindow(ReducerStore(), NoOpServices(), settings)

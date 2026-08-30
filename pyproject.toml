@@ -38,6 +38,14 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/rembggui"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"resources/model-manifest.json" = "rembggui/resources/model-manifest.json"
+"resources/model-provenance.json" = "rembggui/resources/model-provenance.json"
+"resources/fonts/IBMPlexSans-Regular.ttf" = "rembggui/resources/fonts/IBMPlexSans-Regular.ttf"
+"resources/fonts/IBMPlexSans-SemiBold.ttf" = "rembggui/resources/fonts/IBMPlexSans-SemiBold.ttf"
+"resources/fonts/IBMPlexMono-Regular.ttf" = "rembggui/resources/fonts/IBMPlexMono-Regular.ttf"
+"resources/fonts/OFL.txt" = "rembggui/resources/fonts/OFL.txt"
+
 [tool.hatch.version]
 path = "src/rembggui/__init__.py"
 

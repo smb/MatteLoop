@@ -191,4 +191,8 @@ def _resource_directories(runtime_root: Path | None) -> tuple[Path, ...]:
         if executable_dir.name == "MacOS" and executable_dir.parent.name == "Contents":
             directories.append(executable_dir.parent / "Resources")
         return tuple(directories)
-    return (Path(__file__).resolve().parents[2] / _RESOURCE_DIRECTORY,)
+    source_directory = Path(__file__).resolve().parents[2] / _RESOURCE_DIRECTORY
+    package_directory = Path(__file__).resolve().parent / _RESOURCE_DIRECTORY
+    if package_directory == source_directory:
+        return (source_directory,)
+    return (source_directory, package_directory)

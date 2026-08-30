@@ -43,6 +43,10 @@ extra_args =
 	--include-module=PIL.WebPImagePlugin
 	--include-data-files=resources/model-manifest.json=resources/model-manifest.json
 	--include-data-files=resources/model-provenance.json=resources/model-provenance.json
+	--include-data-files=resources/fonts/IBMPlexSans-Regular.ttf=resources/fonts/IBMPlexSans-Regular.ttf
+	--include-data-files=resources/fonts/IBMPlexSans-SemiBold.ttf=resources/fonts/IBMPlexSans-SemiBold.ttf
+	--include-data-files=resources/fonts/IBMPlexMono-Regular.ttf=resources/fonts/IBMPlexMono-Regular.ttf
+	--include-data-files=resources/fonts/OFL.txt=resources/fonts/OFL.txt
 	--nofollow-import-to=tests
 	--nofollow-import-to=pytest
 	--noinclude-data-files=**/tests/**

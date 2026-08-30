@@ -34,8 +34,17 @@ def install_theme(
         QPushButton { background: #202428; border: 1px solid #30353A;
                       border-radius: 4px; min-height: 38px; padding: 0 12px; }
         QPushButton:hover { border-color: #C8FF63; }
-        QPushButton:focus { outline: none; border: 2px solid #B7F34A; }
-        QPushButton[primary='true'] { background: #B7F34A; color: #10140A;
+        QPushButton:focus, QLabel:focus, QFrame:focus, QWidget:focus {
+            outline: none; border: 2px solid #B7F34A;
+        }
+        QLabel#result_canvas[status='stale'] { color: #F3B849; }
+        QLabel#result_canvas[status='error'] { color: #FF6B6B; }
+        QLabel#result_canvas[checkerboard='true'] {
+            background-color: #252A2E;
+        }
+        QFrame#success_banner_container { border-top: 1px solid #30353A; }
+        QLabel#success_banner { color: #63D69A; }
+        QPushButton[primaryAction='true'] { background: #B7F34A; color: #10140A;
                                       border-color: #B7F34A; }
         QLabel[secondary='true'] { color: #A3ABB2; }
         QLabel[mono='true'] { font-family: 'IBM Plex Mono', monospace; }
