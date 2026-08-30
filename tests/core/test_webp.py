@@ -442,6 +442,24 @@ def test_still_webp_preserves_exact_rgba_without_metadata(tmp_path: Path) -> Non
         assert "xmp" not in actual.info
 
 
+def test_validation_of_an_open_binary_preserves_position_and_caller_ownership(
+    tmp_path: Path,
+) -> None:
+    source = save_rgba(tmp_path / "source.png", (128, 128), (10, 30, 220, 91))
+    output = tmp_path / "still.webp"
+    encode_lossless_webp((source,), (100,), output)
+    expected_tail = output.read_bytes()[7:15]
+
+    with output.open("rb") as held:
+        held.seek(7)
+        info = validate_webp(held, expected_frames=1, expected_duration_ms=0)
+
+        assert (info.width, info.height, info.frames) == (128, 128, 1)
+        assert held.tell() == 7
+        assert held.read(8) == expected_tail
+        assert not held.closed
+
+
 def test_animated_webp_stores_each_odd_delay_exactly(tmp_path: Path) -> None:
     paths = rgba_fixture_paths(tmp_path, count=6)
     output = tmp_path / "odd-delays.webp"

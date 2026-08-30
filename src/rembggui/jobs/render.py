@@ -342,9 +342,7 @@ class ValidatedCandidate:
                 raise _output_error("candidate path changed before WebP validation")
             digest = _sha256_descriptor(descriptor)
             info = _validate_held_candidate_webp(
-                path,
                 descriptor,
-                before,
                 summary,
                 ownership,
             )
@@ -623,25 +621,32 @@ class AtomicOutputPublisher:
             or (cleanup_notes is not None and not isinstance(cleanup_notes, list))
         ):
             raise _output_error("candidate must be a sibling and policy must be valid")
-        backup: _RollbackBackup | None = None
+        previous: _HeldPreviousOutput | None = None
+        staged: _HeldStagedFile | None = None
         primary: BaseException | None = None
         try:
             _require_candidate_current(candidate)
             if policy is CollisionPolicy.REPLACE:
-                backup = _snapshot_existing_output(destination)
-                if backup is not None:
-                    _require_existing_output_current(destination, backup)
+                previous = _snapshot_existing_output(destination)
+                if previous is not None:
+                    _require_existing_output_current(destination, previous)
                 _require_candidate_current(candidate)
                 os.replace(candidate.path, destination)
                 try:
                     _require_published_candidate(candidate, destination)
                 except BaseException as error:
-                    _rollback_publication(destination, backup, error)
-                    backup = None
+                    _rollback_publication(destination, previous, error)
                     raise
             else:
+                staged = _stage_descriptor_copy(
+                    candidate._descriptor,
+                    candidate.identity.size,
+                    candidate.sha256,
+                    destination,
+                    suffix=".publish",
+                )
                 try:
-                    os.link(candidate.path, destination, follow_symlinks=False)
+                    os.link(staged.path, destination, follow_symlinks=False)
                 except FileExistsError as error:
                     action = (
                         "choose-another-name"
@@ -656,17 +661,24 @@ class AtomicOutputPublisher:
                         action,
                     ) from error
                 try:
-                    _require_published_candidate(candidate, destination)
-                except BaseException as error:
-                    _remove_failed_no_clobber_output(destination, error)
-                    raise
-                try:
-                    candidate.path.unlink()
-                except OSError as error:
-                    if cleanup_notes is not None:
-                        cleanup_notes.append(
-                            f"additional output-candidate cleanup failure: {error}"
+                    if not _published_file_matches(
+                        destination,
+                        staged.identity,
+                        staged.sha256,
+                    ):
+                        raise _output_error(
+                            "no-clobber output changed after atomic reservation"
                         )
+                except BaseException:
+                    # A mismatched destination may now belong to a concurrent
+                    # writer. Never unlink it by pathname.
+                    raise
+                _cleanup_candidate(
+                    candidate.path,
+                    None,
+                    cleanup_notes if cleanup_notes is not None else [],
+                    expected_identity=candidate.identity,
+                )
         except AppError as error:
             primary = error
             raise
@@ -678,8 +690,10 @@ class AtomicOutputPublisher:
             primary = error
             raise
         finally:
-            if backup is not None:
-                _cleanup_publication_backup(backup.path, cleanup_notes, primary)
+            if staged is not None:
+                _close_staged_file(staged, cleanup_notes, primary)
+            if previous is not None:
+                _close_previous_output(previous, cleanup_notes, primary)
         return destination
 
 
@@ -1239,7 +1253,14 @@ class RenderService:
             if validated is not None:
                 _close_validated_candidate(validated, publish_error, notes)
             if not published:
-                _cleanup_candidate(candidate, publish_error, notes)
+                _cleanup_candidate(
+                    candidate,
+                    publish_error,
+                    notes,
+                    expected_identity=(
+                        validated.identity if validated is not None else None
+                    ),
+                )
         assert summary is not None
         return RenderArtifact(
             output_path,
@@ -1508,10 +1529,21 @@ def _cleanup_scratch_owners(
 
 
 @dataclass(frozen=True, slots=True)
-class _RollbackBackup:
-    path: Path
-    source_identity: CandidateFileIdentity
+class _HeldPreviousOutput:
+    descriptor: int = field(repr=False, compare=False)
+    identity: CandidateFileIdentity
     sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class _HeldStagedFile:
+    path: Path
+    descriptor: int = field(repr=False, compare=False)
+    identity: CandidateFileIdentity
+    sha256: str
+
+
+_MAX_ROLLBACK_RESTORE_ATTEMPTS = 4
 
 
 def _open_held_file(path: Path) -> int:
@@ -1605,43 +1637,24 @@ def _require_candidate_current(candidate: ValidatedCandidate) -> None:
 
 
 def _validate_held_candidate_webp(
-    path: Path,
     descriptor: int,
-    identity: CandidateFileIdentity,
     summary: EncodeSummary,
     ownership: RgbaOwnershipTracker | None,
 ) -> WebPInfo:
-    """Validate a private hard link proven to name the held file description."""
-    validation_link = path.parent / f".rembggui-{uuid.uuid4().hex}.validation"
-    primary: BaseException | None = None
-    linked = False
+    """Validate a duplicate of the exact held candidate file description."""
+    duplicate = os.dup(descriptor)
     try:
-        os.link(path, validation_link, follow_symlinks=False)
-        linked = True
-        if (
-            _path_identity(validation_link) != identity
-            or _candidate_identity(os.fstat(descriptor)) != identity
-        ):
-            raise _output_error("candidate changed while binding WebP validation")
-        return validate_webp(
-            validation_link,
-            summary.frames,
-            summary.duration_ms,
-            rgba_ownership_tracker=ownership,
-        )
-    except BaseException as error:
-        primary = error
-        raise
+        with os.fdopen(duplicate, "rb") as held:
+            duplicate = -1
+            return validate_webp(
+                held,
+                summary.frames,
+                summary.duration_ms,
+                rgba_ownership_tracker=ownership,
+            )
     finally:
-        if linked:
-            try:
-                validation_link.unlink()
-            except OSError as error:
-                detail = f"additional candidate-validation cleanup failure: {error}"
-                if primary is not None:
-                    primary.add_note(detail)
-                else:
-                    raise _map_output_os_error(error, detail) from error
+        if duplicate >= 0:
+            os.close(duplicate)
 
 
 def _require_published_candidate(
@@ -1654,6 +1667,7 @@ def _require_published_candidate(
     ):
         raise _output_error("validated candidate bytes changed during publication")
     published_descriptor = _open_held_file(destination)
+    primary: BaseException | None = None
     try:
         published_identity = _candidate_identity(os.fstat(published_descriptor))
         if (
@@ -1662,8 +1676,21 @@ def _require_published_candidate(
             or _sha256_descriptor(published_descriptor) != candidate.sha256
         ):
             raise _output_error("published output is not the validated candidate")
+    except BaseException as error:
+        primary = error
+        raise
     finally:
-        os.close(published_descriptor)
+        try:
+            os.close(published_descriptor)
+        except OSError as error:
+            if primary is not None:
+                primary.add_note(
+                    f"additional published-output cleanup failure: {error}"
+                )
+            else:
+                raise _map_output_os_error(
+                    error, "cannot close published-output verification handle"
+                ) from error
 
 
 def _copy_descriptor(source: int, destination: int) -> None:
@@ -1681,104 +1708,300 @@ def _copy_descriptor(source: int, destination: int) -> None:
         os.lseek(source, source_position, os.SEEK_SET)
 
 
-def _snapshot_existing_output(destination: Path) -> _RollbackBackup | None:
+def _stage_descriptor_copy(
+    source: int,
+    expected_size: int,
+    expected_sha256: str,
+    destination: Path,
+    *,
+    suffix: str,
+) -> _HeldStagedFile:
+    raw_descriptor: int | None = None
+    held_descriptor: int | None = None
+    path: Path | None = None
+    identity: CandidateFileIdentity | None = None
+    try:
+        raw_descriptor, raw_path = tempfile.mkstemp(
+            prefix=f".{destination.name}.",
+            suffix=suffix,
+            dir=destination.parent,
+        )
+        path = Path(raw_path)
+        _copy_descriptor(source, raw_descriptor)
+        os.fsync(raw_descriptor)
+        identity = _candidate_identity(os.fstat(raw_descriptor))
+        if (
+            identity.size != expected_size
+            or _sha256_descriptor(raw_descriptor) != expected_sha256
+            or _path_identity(path) != identity
+        ):
+            raise _output_error("staged publication copy changed while written")
+        os.close(raw_descriptor)
+        raw_descriptor = None
+        held_descriptor = _open_held_file(path)
+        held_identity = _candidate_identity(os.fstat(held_descriptor))
+        if (
+            held_identity != identity
+            or _path_identity(path) != identity
+            or _sha256_descriptor(held_descriptor) != expected_sha256
+        ):
+            raise _output_error("staged publication copy changed while reopened")
+        staged = _HeldStagedFile(path, held_descriptor, identity, expected_sha256)
+        held_descriptor = None
+        return staged
+    except BaseException as error:
+        for descriptor in (raw_descriptor, held_descriptor):
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError as close_error:
+                    error.add_note(
+                        f"additional staged-copy handle cleanup failure: {close_error}"
+                    )
+        if path is not None:
+            failures: list[str] = []
+            _cleanup_owned_temporary(path, identity, failures)
+            for failure in failures:
+                error.add_note(failure)
+        raise
+
+
+def _snapshot_existing_output(destination: Path) -> _HeldPreviousOutput | None:
     try:
         source = _open_held_file(destination)
     except FileNotFoundError:
         return None
-    backup: Path | None = None
-    backup_descriptor: int | None = None
     try:
         identity = _candidate_identity(os.fstat(source))
         if _path_identity(destination) != identity:
             raise _output_error("existing output changed before publication")
         digest = _sha256_descriptor(source)
-        backup_descriptor, raw_backup = tempfile.mkstemp(
-            prefix=f".{destination.name}.",
-            suffix=".rollback",
-            dir=destination.parent,
-        )
-        backup = Path(raw_backup)
-        _copy_descriptor(source, backup_descriptor)
-        os.fsync(backup_descriptor)
         if (
             _candidate_identity(os.fstat(source)) != identity
             or _path_identity(destination) != identity
             or _sha256_descriptor(source) != digest
         ):
-            raise _output_error("existing output changed while preparing rollback")
-        return _RollbackBackup(backup, identity, digest)
-    except BaseException:
-        if backup is not None:
-            try:
-                backup.unlink()
-            except OSError:
-                pass
+            raise _output_error("existing output changed while taking stable snapshot")
+        return _HeldPreviousOutput(source, identity, digest)
+    except BaseException as error:
+        try:
+            os.close(source)
+        except OSError as close_error:
+            error.add_note(
+                f"additional previous-output handle cleanup failure: {close_error}"
+            )
         raise
-    finally:
-        if backup_descriptor is not None:
-            os.close(backup_descriptor)
-        os.close(source)
 
 
 def _require_existing_output_current(
-    destination: Path, backup: _RollbackBackup
+    destination: Path, previous: _HeldPreviousOutput
 ) -> None:
     current = _open_held_file(destination)
+    primary: BaseException | None = None
     try:
         if (
-            _candidate_identity(os.fstat(current)) != backup.source_identity
-            or _path_identity(destination) != backup.source_identity
-            or _sha256_descriptor(current) != backup.sha256
+            _candidate_identity(os.fstat(current)) != previous.identity
+            or _path_identity(destination) != previous.identity
+            or _sha256_descriptor(current) != previous.sha256
         ):
             raise _output_error("existing output changed before atomic publication")
+    except BaseException as error:
+        primary = error
+        raise
     finally:
-        os.close(current)
+        try:
+            os.close(current)
+        except OSError as error:
+            if primary is not None:
+                primary.add_note(f"additional previous-output cleanup failure: {error}")
+            else:
+                raise _map_output_os_error(
+                    error, "cannot close previous-output verification handle"
+                ) from error
 
 
 def _rollback_publication(
     destination: Path,
-    backup: _RollbackBackup | None,
+    previous: _HeldPreviousOutput | None,
     primary: BaseException,
 ) -> None:
-    try:
-        if backup is None:
-            destination.unlink()
-            return
-        os.replace(backup.path, destination)
-        restored = _open_held_file(destination)
+    if previous is None:
         try:
-            if _sha256_descriptor(restored) != backup.sha256:
-                raise _output_error("rollback restored different output bytes")
+            destination.unlink()
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            primary.add_note(f"additional output rollback failure: {error}")
+        return
+
+    failures: list[str] = []
+    for _attempt in range(_MAX_ROLLBACK_RESTORE_ATTEMPTS):
+        staged: _HeldStagedFile | None = None
+        try:
+            staged = _stage_descriptor_copy(
+                previous.descriptor,
+                previous.identity.size,
+                previous.sha256,
+                destination,
+                suffix=".restore",
+            )
+            os.replace(staged.path, destination)
+            if _published_file_matches(
+                destination,
+                staged.identity,
+                previous.sha256,
+            ):
+                return
+            failures.append("rollback destination identity changed after replace")
+        except BaseException as error:
+            failures.append(str(error))
         finally:
-            os.close(restored)
-    except FileNotFoundError:
-        if backup is not None:
-            primary.add_note("additional output rollback failure: output disappeared")
-    except BaseException as error:
-        primary.add_note(f"additional output rollback failure: {error}")
+            if staged is not None:
+                try:
+                    os.close(staged.descriptor)
+                except OSError as error:
+                    failures.append(f"rollback descriptor cleanup failed: {error}")
+                _cleanup_owned_temporary(staged.path, staged.identity, failures)
+
+    recovery = _write_recovery_snapshot(destination, previous, failures)
+    detail = (
+        "atomic output rollback could not defeat repeated filesystem interference; "
+        f"old bytes retained at {recovery}"
+    )
+    catastrophic = AppError(
+        ErrorCode.INVALID_OUTPUT,
+        "publish-rollback",
+        "error.output.failed",
+        detail,
+        "recover-output",
+    )
+    catastrophic.add_note(f"original publication failure: {primary}")
+    for failure in failures:
+        catastrophic.add_note(f"rollback attempt: {failure}")
+    raise catastrophic from primary
 
 
-def _remove_failed_no_clobber_output(destination: Path, primary: BaseException) -> None:
+def _published_file_matches(
+    destination: Path,
+    identity: CandidateFileIdentity,
+    sha256: str,
+) -> bool:
+    published = _open_held_file(destination)
+    primary: BaseException | None = None
     try:
-        destination.unlink()
+        return (
+            _candidate_identity(os.fstat(published)) == identity
+            and _path_identity(destination) == identity
+            and _sha256_descriptor(published) == sha256
+        )
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        try:
+            os.close(published)
+        except OSError as error:
+            if primary is not None:
+                primary.add_note(
+                    f"additional published-output cleanup failure: {error}"
+                )
+            else:
+                raise _map_output_os_error(
+                    error, "cannot close published-output verification handle"
+                ) from error
+
+
+def _cleanup_owned_temporary(
+    path: Path,
+    identity: CandidateFileIdentity | None,
+    failures: list[str],
+) -> None:
+    if identity is None:
+        failures.append(f"unverified private staged file retained at {path}")
+        return
+    try:
+        if _path_identity(path) != identity:
+            failures.append(f"foreign private staged path retained at {path}")
+            return
+        path.unlink()
     except FileNotFoundError:
         return
-    except OSError as error:
-        primary.add_note(f"additional failed-publication cleanup failure: {error}")
+    except BaseException as error:
+        failures.append(f"private staged-file cleanup failed: {error}")
 
 
-def _cleanup_publication_backup(
-    backup: Path,
+def _write_recovery_snapshot(
+    destination: Path,
+    previous: _HeldPreviousOutput,
+    failures: list[str],
+) -> Path:
+    for _attempt in range(_MAX_ROLLBACK_RESTORE_ATTEMPTS):
+        recovery_path: Path | None = None
+        recovery_descriptor: int | None = None
+        recovery_identity: CandidateFileIdentity | None = None
+        valid = False
+        try:
+            recovery_descriptor, raw_recovery = tempfile.mkstemp(
+                prefix=f".{destination.name}.",
+                suffix=".recovery",
+                dir=destination.parent,
+            )
+            recovery_path = Path(raw_recovery)
+            _copy_descriptor(previous.descriptor, recovery_descriptor)
+            os.fsync(recovery_descriptor)
+            recovery_identity = _candidate_identity(os.fstat(recovery_descriptor))
+            if (
+                recovery_identity.size == previous.identity.size
+                and _sha256_descriptor(recovery_descriptor) == previous.sha256
+                and _path_identity(recovery_path) == recovery_identity
+            ):
+                valid = True
+                return recovery_path
+            failures.append("recovery snapshot identity or bytes changed")
+        except BaseException as error:
+            failures.append(f"recovery snapshot failed: {error}")
+        finally:
+            if recovery_descriptor is not None:
+                try:
+                    os.close(recovery_descriptor)
+                except OSError as error:
+                    failures.append(f"recovery descriptor cleanup failed: {error}")
+            if recovery_path is not None and not valid:
+                _cleanup_owned_temporary(
+                    recovery_path,
+                    recovery_identity,
+                    failures,
+                )
+    raise _output_error("cannot retain a recovery snapshot of the previous output")
+
+
+def _close_previous_output(
+    previous: _HeldPreviousOutput,
     cleanup_notes: list[str] | None,
     primary: BaseException | None,
 ) -> None:
     try:
-        backup.unlink()
-    except FileNotFoundError:
-        return
+        os.close(previous.descriptor)
     except OSError as error:
-        detail = f"additional output rollback-backup cleanup failure: {error}"
+        detail = f"additional previous-output handle cleanup failure: {error}"
+        if primary is not None:
+            primary.add_note(detail)
+        elif cleanup_notes is not None:
+            cleanup_notes.append(detail)
+
+
+def _close_staged_file(
+    staged: _HeldStagedFile,
+    cleanup_notes: list[str] | None,
+    primary: BaseException | None,
+) -> None:
+    failures: list[str] = []
+    try:
+        os.close(staged.descriptor)
+    except OSError as error:
+        failures.append(f"staged-publication handle cleanup failed: {error}")
+    _cleanup_owned_temporary(staged.path, staged.identity, failures)
+    for detail in failures:
         if primary is not None:
             primary.add_note(detail)
         elif cleanup_notes is not None:
@@ -1786,8 +2009,37 @@ def _cleanup_publication_backup(
 
 
 def _cleanup_candidate(
-    candidate: Path, primary: BaseException | None, notes: list[str]
+    candidate: Path,
+    primary: BaseException | None,
+    notes: list[str],
+    *,
+    expected_identity: CandidateFileIdentity | None = None,
 ) -> None:
+    if expected_identity is not None:
+        try:
+            current_identity = _path_identity(candidate)
+        except FileNotFoundError:
+            return
+        except BaseException as error:
+            detail = (
+                "unverified output-candidate path retained instead of being unlinked: "
+                f"{candidate}: {error}"
+            )
+            if primary is not None:
+                primary.add_note(detail)
+            else:
+                notes.append(detail)
+            return
+        if current_identity != expected_identity:
+            detail = (
+                "foreign output-candidate path retained instead of being unlinked: "
+                f"{candidate}"
+            )
+            if primary is not None:
+                primary.add_note(detail)
+            else:
+                notes.append(detail)
+            return
     try:
         candidate.unlink()
     except FileNotFoundError:

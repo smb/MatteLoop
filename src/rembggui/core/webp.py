@@ -211,14 +211,18 @@ def encode_lossless_webp(
 
 
 def validate_webp(
-    path: Path,
+    source: Path | BinaryIO,
     expected_frames: int,
     expected_duration_ms: int,
     *,
     rgba_ownership_tracker: RgbaOwnershipTracker | None = None,
 ) -> WebPInfo:
-    """Validate WebP structure, timing, dimensions, losslessness, and decoding."""
-    path = _require_path(path, "WebP path")
+    """Validate a WebP path or caller-owned stable binary file.
+
+    An open binary is never closed and its logical position is restored.  RIFF
+    parsing and Pillow decoding use a duplicate of that exact file descriptor,
+    so neither phase reopens a mutable pathname.
+    """
     if (
         not isinstance(expected_frames, int)
         or isinstance(expected_frames, bool)
@@ -233,24 +237,24 @@ def validate_webp(
         raise _invalid_output("expected duration must be a non-negative integer")
 
     try:
-        file_size = path.stat().st_size
-        if not stat.S_ISREG(path.stat().st_mode):
-            raise _invalid_output("WebP path must be a regular file")
-        if file_size >= _RIFF_LIMIT:
-            raise _invalid_output("WebP output must be smaller than 4 GiB")
-        riff = _parse_riff(path, file_size)
-        with _open_pillow(path) as image:
-            if image.format != "WEBP":
-                raise _invalid_output("output is not a WebP image")
-            width, height = FramingSpec().validate_final_dimensions(*image.size)
-            decoded_frames = getattr(image, "n_frames", 1)
-            has_alpha = False
-            for index in range(decoded_frames):
-                image.seek(index)
-                image.load()
-                if rgba_ownership_tracker is not None:
-                    rgba_ownership_tracker.register(image)
-                has_alpha = has_alpha or image.mode in {"RGBA", "LA"}
+        with _open_webp_validation_source(source) as (held, file_size):
+            if file_size >= _RIFF_LIMIT:
+                raise _invalid_output("WebP output must be smaller than 4 GiB")
+            with _duplicate_binary(held) as validation_input:
+                riff = _parse_riff(validation_input, file_size)
+                validation_input.seek(0)
+                with _open_pillow(validation_input) as image:
+                    if image.format != "WEBP":
+                        raise _invalid_output("output is not a WebP image")
+                    width, height = FramingSpec().validate_final_dimensions(*image.size)
+                    decoded_frames = getattr(image, "n_frames", 1)
+                    has_alpha = False
+                    for index in range(decoded_frames):
+                        image.seek(index)
+                        image.load()
+                        if rgba_ownership_tracker is not None:
+                            rgba_ownership_tracker.register(image)
+                        has_alpha = has_alpha or image.mode in {"RGBA", "LA"}
     except AppError:
         raise
     except (OSError, EOFError, ValueError, SyntaxError) as error:
@@ -671,57 +675,56 @@ def _read_chunk_header_at(source: BinaryIO, position: int) -> tuple[bytes, int]:
     return _read_chunk_header(source)
 
 
-def _parse_riff(path: Path, actual_size: int) -> _RiffFacts:
-    with path.open("rb") as source:
-        declared_size = _read_riff_header(source)
-        if declared_size != actual_size:
-            raise _invalid_output("RIFF length does not match the complete file")
-        first = _chunk_at(source, 12, actual_size)
-        if first[0] == b"VP8L":
-            if first[4] != actual_size:
-                raise _invalid_output("still WebP must contain a single VP8L chunk")
-            width, height, has_alpha = _parse_vp8l_header(source, first[2], first[1])
-            _require_zero_padding(source, first[3], first[1])
-            return _RiffFacts(width, height, (), 0, has_alpha)
-        if first[0] != b"VP8X":
-            raise _invalid_output("animated WebP must begin with one VP8X chunk")
+def _parse_riff(source: BinaryIO, actual_size: int) -> _RiffFacts:
+    declared_size = _read_riff_header(source)
+    if declared_size != actual_size:
+        raise _invalid_output("RIFF length does not match the complete file")
+    first = _chunk_at(source, 12, actual_size)
+    if first[0] == b"VP8L":
+        if first[4] != actual_size:
+            raise _invalid_output("still WebP must contain a single VP8L chunk")
+        width, height, has_alpha = _parse_vp8l_header(source, first[2], first[1])
+        _require_zero_padding(source, first[3], first[1])
+        return _RiffFacts(width, height, (), 0, has_alpha)
+    if first[0] != b"VP8X":
+        raise _invalid_output("animated WebP must begin with one VP8X chunk")
 
-        width, height, has_alpha_flag = _parse_vp8x(source, first)
-        second = _chunk_at(source, first[4], actual_size)
-        if second[0] != b"ANIM":
-            if second[0] == b"VP8X":
-                raise _invalid_output("animated WebP contains a duplicate VP8X chunk")
-            raise _invalid_output("VP8X must be followed by one ANIM chunk")
-        if second[1] != 6:
-            raise _invalid_output("WebP has an invalid ANIM chunk")
-        source.seek(second[2])
-        animation_data = _read_exact(source, 6)
-        background_has_alpha = animation_data[3] < 255
-        loop = int.from_bytes(animation_data[4:6], "little")
-        _require_zero_padding(source, second[3], second[1])
+    width, height, has_alpha_flag = _parse_vp8x(source, first)
+    second = _chunk_at(source, first[4], actual_size)
+    if second[0] != b"ANIM":
+        if second[0] == b"VP8X":
+            raise _invalid_output("animated WebP contains a duplicate VP8X chunk")
+        raise _invalid_output("VP8X must be followed by one ANIM chunk")
+    if second[1] != 6:
+        raise _invalid_output("WebP has an invalid ANIM chunk")
+    source.seek(second[2])
+    animation_data = _read_exact(source, 6)
+    background_has_alpha = animation_data[3] < 255
+    loop = int.from_bytes(animation_data[4:6], "little")
+    _require_zero_padding(source, second[3], second[1])
 
-        position = second[4]
-        delays: list[int] = []
-        frame_alpha: list[bool] = []
-        while position < actual_size:
-            chunk = _chunk_at(source, position, actual_size)
-            if chunk[0] == b"ANIM":
-                raise _invalid_output("animated WebP contains a duplicate ANIM chunk")
-            if chunk[0] == b"VP8X":
-                raise _invalid_output("animated WebP contains a duplicate VP8X chunk")
-            if chunk[0] != b"ANMF":
-                raise _invalid_output("animated WebP may contain only ANMF frames")
-            delay, alpha = _parse_anmf(source, chunk, (width, height))
-            delays.append(delay)
-            frame_alpha.append(alpha)
-            if len(delays) > MAX_OUTPUT_FRAMES:
-                raise _invalid_output("WebP frame count exceeds 100000")
-            position = chunk[4]
-        if not delays:
-            raise _invalid_output("animated WebP must contain at least one ANMF frame")
-        if has_alpha_flag != (background_has_alpha or any(frame_alpha)):
-            raise _invalid_output("VP8X alpha flag does not match VP8L frame alpha")
-        return _RiffFacts(width, height, tuple(delays), loop, has_alpha_flag)
+    position = second[4]
+    delays: list[int] = []
+    frame_alpha: list[bool] = []
+    while position < actual_size:
+        chunk = _chunk_at(source, position, actual_size)
+        if chunk[0] == b"ANIM":
+            raise _invalid_output("animated WebP contains a duplicate ANIM chunk")
+        if chunk[0] == b"VP8X":
+            raise _invalid_output("animated WebP contains a duplicate VP8X chunk")
+        if chunk[0] != b"ANMF":
+            raise _invalid_output("animated WebP may contain only ANMF frames")
+        delay, alpha = _parse_anmf(source, chunk, (width, height))
+        delays.append(delay)
+        frame_alpha.append(alpha)
+        if len(delays) > MAX_OUTPUT_FRAMES:
+            raise _invalid_output("WebP frame count exceeds 100000")
+        position = chunk[4]
+    if not delays:
+        raise _invalid_output("animated WebP must contain at least one ANMF frame")
+    if has_alpha_flag != (background_has_alpha or any(frame_alpha)):
+        raise _invalid_output("VP8X alpha flag does not match VP8L frame alpha")
+    return _RiffFacts(width, height, tuple(delays), loop, has_alpha_flag)
 
 
 def _parse_vp8x(
@@ -1118,6 +1121,79 @@ def _require_path(value: object, name: str) -> Path:
     if not is_local_path_syntax(value):
         raise _invalid_output(f"{name} must use local path syntax")
     return value
+
+
+@contextmanager
+def _open_webp_validation_source(
+    source: Path | BinaryIO,
+) -> Iterator[tuple[BinaryIO, int]]:
+    if isinstance(source, Path):
+        path = _require_path(source, "WebP path")
+        with _open_stable_binary(path) as (held, identity):
+            yield held, identity.size
+        return
+    if not all(
+        callable(getattr(source, method, None))
+        for method in ("fileno", "read", "seek", "tell")
+    ):
+        raise _invalid_output("WebP source must be a path or seekable binary file")
+    try:
+        descriptor = source.fileno()
+        before = _identity_from_stat(os.fstat(descriptor))
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise _invalid_output("WebP source must be a regular file")
+        position = source.tell()
+    except AppError:
+        raise
+    except (OSError, ValueError) as error:
+        raise _invalid_output(f"cannot inspect open WebP source: {error}") from error
+
+    primary: BaseException | None = None
+    try:
+        yield source, before.size
+        if _identity_from_stat(os.fstat(descriptor)) != before:
+            raise _invalid_output("open WebP source changed during validation")
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        try:
+            source.seek(position)
+        except (OSError, ValueError) as error:
+            detail = f"cannot restore open WebP source position: {error}"
+            if primary is not None:
+                primary.add_note(detail)
+            else:
+                raise _invalid_output(detail) from error
+
+
+@contextmanager
+def _duplicate_binary(source: BinaryIO) -> Iterator[BinaryIO]:
+    try:
+        descriptor = os.dup(source.fileno())
+    except (OSError, ValueError) as error:
+        raise _invalid_output(f"cannot duplicate open WebP source: {error}") from error
+    duplicate: BinaryIO | None = None
+    primary: BaseException | None = None
+    try:
+        duplicate = os.fdopen(descriptor, "rb")
+        descriptor = -1
+        yield duplicate
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        try:
+            if duplicate is not None:
+                duplicate.close()
+            elif descriptor >= 0:
+                os.close(descriptor)
+        except OSError as error:
+            detail = f"cannot close duplicate WebP source: {error}"
+            if primary is not None:
+                primary.add_note(detail)
+            else:
+                raise _invalid_output(detail) from error
 
 
 @contextmanager

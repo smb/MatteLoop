@@ -81,17 +81,40 @@ prepared identity, track and deduplicate every actual scratch owner, acknowledge
 cancellation per auto-fit frame/copy/resize, enforce a public 255 erosion maximum
 at domain/wire/child boundaries, and report Rebuild `actual_pts=None` honestly.
 The encoder now returns an immutable, non-publicly-constructible
-`ValidatedCandidate`: WebP validation runs through a private hard link proven to
-name a held file descriptor, with stable file identity, byte size, and SHA-256.
-Publication rechecks that descriptor immediately before commit and verifies the
-final entry afterward. Replace publication keeps an fsynced sibling rollback
-copy and atomically restores it on identity/content mismatch; no-clobber removes
-the link it created on mismatch. Candidate handles remain held through the
-commit decision and are closed before failure cleanup, including Windows handles
-opened with read/write/delete sharing.
+`ValidatedCandidate`, with stable file identity, byte size, and SHA-256.
+Candidate handles remain held through the commit decision and are closed before
+failure cleanup, including Windows handles opened with read/write/delete sharing.
 
 The hardened changed-contract batch is **493 passed**; the final repository-wide
 suite is **913 passed**.
+
+A follow-up publication-race audit proved three remaining pathname gaps with
+direct RED tests. A private validation hard link could be swapped between its
+identity check and `validate_webp`; a closed rollback pathname could be replaced
+before rollback; and no-clobber mismatch cleanup could unlink a concurrent
+writer's replacement output. The failures were observed respectively as an
+invalid candidate being accepted, attacker bytes replacing the known-good old
+output, and the concurrent output disappearing.
+
+The final GREEN boundary is descriptor-based end to end:
+
+- `validate_webp` accepts either a local `Path` or a caller-owned stable binary
+  file. RIFF parsing and Pillow decode use a duplicate of that exact descriptor;
+  an open caller is neither closed nor repositioned.
+- Replace retains the previous output as an open identity/SHA-bound descriptor
+  for the whole transaction. Rollback recreates old bytes into a fresh exclusive
+  file, fsyncs, reopens it with delete sharing, atomically replaces, and verifies
+  the final descriptor identity and SHA. Transient and repeated rollback-path
+  substitutions are retried within a fixed bound; terminal interference leaves
+  an exact recovery snapshot and a structured `publish-rollback` error.
+- No-clobber first copies the validated descriptor into a private, fsynced,
+  identity-bound stage and atomically hard-links that stage. If the final entry
+  changes afterward, publication fails but never unlinks the now-foreign target.
+  Private candidates and stages are removed only when their identities still
+  match; ambiguous foreign paths are retained with diagnostics.
+
+The direct race/ownership suite is **9 passed**, the complete WebP and render
+orchestration gate is **117 passed**, and the final full suite is **918 passed**.
 
 ## Architecture and safety decisions
 
@@ -118,11 +141,13 @@ suite is **913 passed**.
   The ownership tracker also follows encoder validation and auto-fit resizes;
   production integration records peak at most three and current zero.
 - The encoder never receives the final path. It returns only a descriptor-bound,
-  SHA-verified `ValidatedCandidate`. `REPLACE` uses atomic replacement followed
-  by descriptor/byte verification and atomic rollback; `CHOOSE_ANOTHER_NAME`
-  and `CANCEL` use atomic hard-link no-clobber publication followed by the same
-  verification. Actual disk-full, quota, permission, read-only, candidate-swap,
-  collision, and publication failures preserve the prior output byte-for-byte.
+  SHA-verified `ValidatedCandidate`. WebP parsing/decoding never reopens its
+  pathname. `REPLACE` uses atomic replacement followed by descriptor/byte
+  verification and restoration from the held prior-output descriptor;
+  `CHOOSE_ANOTHER_NAME` and `CANCEL` reserve via an identity-bound private copy
+  and atomic hard link. Actual disk-full, quota, permission, read-only,
+  candidate/stage-swap, collision, and publication failures cannot report
+  attacker or concurrent bytes as a successful output.
 - `JobContext.commit_if_not_cancelled()` serializes cancellation against the
   one final publish linearization. Artifact identity and cleanup complete before
   that commit, and there is no cancellation checkpoint afterward. Cleanup errors
@@ -130,12 +155,12 @@ suite is **913 passed**.
 
 ## Verification
 
-- `uv run pytest -q` — **913 passed in 48.25s** outside the restricted
+- `uv run pytest -q` — **918 passed in 48.27s** outside the restricted
   shared-memory sandbox.
-- Hardened changed contract and orchestration suites — **493 passed in 44.85s**;
-  focused Publisher and service gates — **10 passed** and **45 passed**.
+- Final WebP/render/preview/Rebuild gate — **117 passed in 34.36s**; direct
+  publication-race and descriptor-ownership gate — **9 passed in 0.51s**.
 - `uv run ruff check .` — passed.
-- `uv run ruff format --check` over all 14 fix-round Python files — passed.
+- `uv run ruff format --check` over all 4 publication-fix Python files — passed.
 - `uv run mypy src` — passed for 29 source files.
 - `git diff --check` — passed.
 
@@ -146,3 +171,6 @@ models or invoke live ONNX/rembg inference. The exact documented rembg kwargs ar
 unit-tested at the child boundary, and the real local lossless WebP path is
 integration-tested; a manual release qualification with already-cached model
 weights remains appropriate before shipping the GUI integration.
+The Windows `CreateFileW` sharing branch remains type-checked and isolated behind
+the same identity contracts, but this race-hardening round executed real
+filesystem mutations on POSIX/macOS rather than a Windows host.

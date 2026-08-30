@@ -14,7 +14,7 @@ import rembggui.jobs.render as render_module
 from rembggui.core.errors import AppError, ErrorCode
 from rembggui.core.specs import CollisionPolicy, FramingSpec, SamplingSpec
 from rembggui.core.state import JobKind
-from rembggui.core.webp import encode_lossless_webp, validate_webp
+from rembggui.core.webp import EncodeSummary, encode_lossless_webp, validate_webp
 from rembggui.jobs.context import JobTerminalState
 from rembggui.jobs.render import (
     AtomicOutputPublisher,
@@ -446,6 +446,56 @@ def test_replace_policy_commits_candidate_atomically(tmp_path) -> None:
     assert not candidate.path.exists()
 
 
+def test_candidate_validation_uses_the_held_file_not_a_swappable_helper_path(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publisher = AtomicOutputPublisher()
+    target = tmp_path / "output.webp"
+    valid = _validated_candidate(publisher, target, tmp_path, "valid-source")
+    valid.close()
+    valid_path = valid.path
+    valid_bytes = valid_path.read_bytes()
+    invalid_path = publisher.candidate_path(target, "invalid-source")
+    invalid_path.write_bytes(b"X" + valid_bytes[1:])
+    summary = EncodeSummary(
+        invalid_path,
+        valid.summary.width,
+        valid.summary.height,
+        valid.summary.frames,
+        valid.summary.duration_ms,
+        len(valid_bytes),
+    )
+    actual_validate = render_module.validate_webp
+    opened_descriptors: list[int] = []
+    actual_open = render_module._open_held_file
+
+    def observe_open(path: Path) -> int:
+        descriptor = actual_open(path)
+        opened_descriptors.append(descriptor)
+        return descriptor
+
+    def swap_path_before_reopened_validation(source, *args, **kwargs):
+        if isinstance(source, Path) and source.suffix == ".validation":
+            os.replace(valid_path, source)
+        return actual_validate(source, *args, **kwargs)
+
+    monkeypatch.setattr(render_module, "_open_held_file", observe_open)
+    monkeypatch.setattr(
+        render_module,
+        "validate_webp",
+        swap_path_before_reopened_validation,
+    )
+
+    with pytest.raises(AppError) as exc:
+        ValidatedCandidate.validate(invalid_path, summary)
+
+    assert exc.value.code is ErrorCode.INVALID_OUTPUT
+    assert opened_descriptors
+    for descriptor in opened_descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+
 def test_replace_rolls_back_if_validated_candidate_is_swapped_at_commit(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -478,16 +528,89 @@ def test_replace_rolls_back_if_validated_candidate_is_swapped_at_commit(
     assert target.read_bytes() == b"old-output"
 
 
-def test_no_clobber_removes_swapped_candidate_instead_of_publishing_it(
+@pytest.mark.parametrize("rollback_swaps", [1, 2])
+def test_replace_recreates_rollback_from_held_old_output_after_temp_swaps(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    rollback_swaps: int,
+) -> None:
+    publisher = AtomicOutputPublisher()
+    target = tmp_path / "output.webp"
+    old_bytes = b"known-good-old-output"
+    target.write_bytes(old_bytes)
+    candidate = _validated_candidate(publisher, target, tmp_path, "held-rollback")
+    candidate_attacker = tmp_path / ".candidate-attacker"
+    candidate_attacker.write_bytes(b"candidate-attacker")
+    rollback_attackers = []
+    for index in range(rollback_swaps):
+        attacker = tmp_path / f".rollback-attacker-{index}"
+        attacker.write_bytes(f"rollback-attacker-{index}".encode())
+        rollback_attackers.append(attacker)
+    actual_replace = os.replace
+    actual_open = render_module._open_held_file
+    actual_close = os.close
+    publisher_descriptors: list[int] = []
+    closed_descriptors: list[int] = []
+    candidate_swapped = False
+    rollback_swap_count = 0
+
+    def observe_open(path: Path) -> int:
+        descriptor = actual_open(path)
+        publisher_descriptors.append(descriptor)
+        return descriptor
+
+    def observe_close(descriptor: int) -> None:
+        closed_descriptors.append(descriptor)
+        actual_close(descriptor)
+
+    def swap_publication_and_rollback(source_path, destination_path):
+        nonlocal candidate_swapped, rollback_swap_count
+        source = Path(source_path)
+        destination = Path(destination_path)
+        if source == candidate.path and destination == target:
+            actual_replace(candidate_attacker, candidate.path)
+            candidate_swapped = True
+        elif (
+            destination == target
+            and source.suffix in {".rollback", ".restore"}
+            and rollback_swap_count < rollback_swaps
+        ):
+            actual_replace(rollback_attackers[rollback_swap_count], source)
+            rollback_swap_count += 1
+        return actual_replace(source, destination)
+
+    monkeypatch.setattr(render_module, "_open_held_file", observe_open)
+    monkeypatch.setattr(render_module.os, "close", observe_close)
+    monkeypatch.setattr(os, "replace", swap_publication_and_rollback)
+
+    try:
+        with pytest.raises(AppError) as exc:
+            publisher.publish(candidate, target, CollisionPolicy.REPLACE)
+
+        assert exc.value.code is ErrorCode.INVALID_OUTPUT
+        assert candidate_swapped
+        assert rollback_swap_count == rollback_swaps
+        assert target.read_bytes() == old_bytes
+        assert set(publisher_descriptors) <= set(closed_descriptors)
+        assert not tuple(tmp_path.glob(".output.webp.*.rollback"))
+        assert not tuple(tmp_path.glob(".output.webp.*.restore"))
+    finally:
+        candidate.close()
+
+
+def test_no_clobber_publishes_held_copy_when_candidate_path_is_swapped(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     publisher = AtomicOutputPublisher()
     target = tmp_path / "output.webp"
     candidate = _validated_candidate(publisher, target, tmp_path, "swap-link")
+    candidate_bytes = candidate.path.read_bytes()
     attacker = tmp_path / ".attacker"
-    attacker.write_bytes(b"attacker-not-webp")
+    attacker_bytes = b"attacker-not-webp"
+    attacker.write_bytes(attacker_bytes)
     actual_link = os.link
     swapped = False
+    notes: list[str] = []
 
     def swap_candidate_then_link(source_path, destination_path, **kwargs):
         nonlocal swapped
@@ -496,6 +619,53 @@ def test_no_clobber_removes_swapped_candidate_instead_of_publishing_it(
         return actual_link(source_path, destination_path, **kwargs)
 
     monkeypatch.setattr(os, "link", swap_candidate_then_link)
+
+    try:
+        assert (
+            publisher.publish(
+                candidate,
+                target,
+                CollisionPolicy.CHOOSE_ANOTHER_NAME,
+                cleanup_notes=notes,
+            )
+            == target
+        )
+    finally:
+        candidate.close()
+
+    assert swapped
+    assert target.read_bytes() == candidate_bytes
+    assert candidate.path.read_bytes() == attacker_bytes
+    assert any("foreign output-candidate path retained" in note for note in notes)
+    assert not tuple(tmp_path.glob(".output.webp.*.publish"))
+
+
+def test_no_clobber_never_unlinks_a_concurrent_output_after_reservation(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publisher = AtomicOutputPublisher()
+    target = tmp_path / "output.webp"
+    candidate = _validated_candidate(publisher, target, tmp_path, "foreign-writer")
+    foreign = tmp_path / ".foreign-writer"
+    foreign_bytes = b"concurrent-writer-output"
+    foreign.write_bytes(foreign_bytes)
+    actual_link = os.link
+    actual_replace = os.replace
+    actual_stage = render_module._stage_descriptor_copy
+    staged_descriptors: list[int] = []
+
+    def observe_stage(*args, **kwargs):
+        staged = actual_stage(*args, **kwargs)
+        staged_descriptors.append(staged.descriptor)
+        return staged
+
+    def replace_reserved_output(source_path, destination_path, **kwargs):
+        result = actual_link(source_path, destination_path, **kwargs)
+        actual_replace(foreign, target)
+        return result
+
+    monkeypatch.setattr(os, "link", replace_reserved_output)
+    monkeypatch.setattr(render_module, "_stage_descriptor_copy", observe_stage)
 
     try:
         with pytest.raises(AppError) as exc:
@@ -507,9 +677,13 @@ def test_no_clobber_removes_swapped_candidate_instead_of_publishing_it(
     finally:
         candidate.close()
 
-    assert swapped
     assert exc.value.code is ErrorCode.INVALID_OUTPUT
-    assert not target.exists()
+    assert target.read_bytes() == foreign_bytes
+    assert staged_descriptors
+    for descriptor in staged_descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+    assert not tuple(tmp_path.glob(".output.webp.*.publish"))
 
 
 def test_no_clobber_candidate_cleanup_failure_is_returned_as_a_note(
@@ -547,6 +721,7 @@ def test_no_clobber_candidate_cleanup_failure_is_returned_as_a_note(
         "additional output-candidate cleanup failure: "
         "[Errno 13] synthetic candidate cleanup failure"
     ]
+    assert not tuple(tmp_path.glob(".output.webp.*.publish"))
 
 
 def test_framed_png_cleanup_failure_is_not_primary(
