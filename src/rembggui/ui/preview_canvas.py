@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 
@@ -11,6 +12,8 @@ class PreviewCanvas(QLabel):
         self, title: str, object_name: str, parent: QWidget | None = None
     ) -> None:
         super().__init__(parent)
+        self._placeholder = title
+        self._frame: QImage | None = None
         self.setObjectName(object_name)
         self.setAccessibleName(
             "Original video frame"
@@ -22,6 +25,7 @@ class PreviewCanvas(QLabel):
         self.setMinimumWidth(200)
         self.setMinimumHeight(180)
         self.setWordWrap(True)
+        self.setText(self._placeholder)
         self.status_label = QLabel(self)
         self.status_label.setObjectName(f"{object_name}_status")
         self.status_label.setProperty("secondary", True)
@@ -34,6 +38,36 @@ class PreviewCanvas(QLabel):
     def set_status_marker(self, marker: str | None) -> None:
         self.status_label.setText(marker or "")
         self.status_label.setVisible(bool(marker))
+
+    def set_frame(self, image: QImage | None) -> None:
+        """Display a GUI-owned pixmap scaled to fit the current canvas."""
+        if image is None or image.isNull():
+            self._frame = None
+            self.clear()
+            self.setText(self._placeholder)
+            return
+        self._frame = QImage(image)
+        self.setText("")
+        self._update_pixmap()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        super().resizeEvent(event)
+        self._update_pixmap()
+
+    def _update_pixmap(self) -> None:
+        if self._frame is None:
+            return
+        margins = self.layout().contentsMargins()  # type: ignore[union-attr]
+        size = QSize(
+            max(1, self.width() - margins.left() - margins.right()),
+            max(1, self.height() - margins.top() - margins.bottom()),
+        )
+        pixmap = QPixmap.fromImage(self._frame).scaled(
+            size,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.setPixmap(pixmap)
 
 
 class PreviewStage(QFrame):

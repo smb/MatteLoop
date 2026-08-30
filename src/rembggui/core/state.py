@@ -102,6 +102,7 @@ class AppState:
     source_id: str | None = None
     source_request_id: str | None = None
     source_value: object | None = None
+    source_frame: object | None = None
     source_error: object | None = None
     model_available: bool = True
     model_supports_render: bool = True
@@ -205,6 +206,7 @@ class SourceLoaded:
     source_id: str
     request_id: str
     value: object
+    frame: object | None = None
 
 
 @dataclass(frozen=True)
@@ -361,6 +363,7 @@ def reduce(state: AppState, event: Event) -> AppState:
             source=SourceState.LOADING,
             source_id=event.source_id,
             source_request_id=event.request_id,
+            source_frame=None,
             model_available=state.model_available,
             model_supports_render=state.model_supports_render,
             focus_target=FocusTarget.NONE,
@@ -373,6 +376,7 @@ def reduce(state: AppState, event: Event) -> AppState:
             state,
             source=SourceState.READY,
             source_value=event.value,
+            source_frame=event.frame,
             source_error=None,
             focus_target=FocusTarget.PREVIEW_ACTION,
         )
@@ -384,6 +388,7 @@ def reduce(state: AppState, event: Event) -> AppState:
             state,
             source=SourceState.ERROR,
             source_value=None,
+            source_frame=None,
             source_error=event.error,
             focus_target=FocusTarget.SOURCE_ERROR_HEADING,
         )

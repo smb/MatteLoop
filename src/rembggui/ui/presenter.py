@@ -55,6 +55,7 @@ class PresentationModel:
     workspace_attention: bool
     workspace_open: bool
     source_metadata: object | None
+    source_frame: object | None
     source_loading: bool
     inspector_enabled: bool
 
@@ -202,6 +203,7 @@ def present(state: AppState) -> PresentationModel:
         workspace_attention=state.edited_cuts or state.edited_cuts_error is not None,
         workspace_open=state.edited_cuts or state.edited_cuts_error is not None,
         source_metadata=state.source_value,
+        source_frame=state.source_frame,
         source_loading=state.source is SourceState.LOADING,
         inspector_enabled=not active
         and state.source in {SourceState.EMPTY, SourceState.READY},

@@ -18,32 +18,10 @@ def _run_gui() -> int:
     from PySide6.QtCore import QSettings
     from PySide6.QtWidgets import QApplication
 
-    from rembggui.core.state import AppState, Event, reduce
+    from rembggui.ui.controller import SourceController
     from rembggui.ui.main_window import MainWindow
-    from rembggui.ui.ports import WindowCommand
+    from rembggui.ui.store import ReducerStore
     from rembggui.ui.theme import install_theme
-
-    class ReducerStore:
-        def __init__(self) -> None:
-            self.state = AppState()
-            self._listeners: list[object] = []
-
-        def dispatch(self, event: Event) -> None:
-            self.state = reduce(self.state, event)
-            for listener in tuple(self._listeners):
-                listener(self.state)  # type: ignore[operator]
-
-        def subscribe(self, listener: object):  # type: ignore[no-untyped-def]
-            self._listeners.append(listener)
-
-            def unsubscribe() -> None:
-                self._listeners.remove(listener)
-
-            return unsubscribe
-
-    class NoOpServices:
-        def dispatch(self, command: WindowCommand) -> None:
-            del command
 
     application = QApplication.instance()
     if not isinstance(application, QApplication):
@@ -54,7 +32,11 @@ def _run_gui() -> int:
     application.setApplicationVersion(__version__)
     install_theme(application)
     settings = QSettings()
-    window = MainWindow(ReducerStore(), NoOpServices(), settings)
+    store = ReducerStore()
+    controller = SourceController(store, parent=application)
+    window = MainWindow(store, controller, settings)
+    controller.set_dialog_parent(window)
+    application.aboutToQuit.connect(controller.shutdown)
     window.show()
     return application.exec()
 

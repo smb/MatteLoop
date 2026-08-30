@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from PySide6.QtCore import QByteArray, QSettings, Qt, QTimer
-from PySide6.QtGui import QFontMetrics
+from PySide6.QtGui import QFontMetrics, QImage
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -262,6 +262,10 @@ class MainWindow(QMainWindow):
             self.source_strip.set_metadata(model.source_metadata)
         elif model.source_loading:
             self.source_strip.filename.setText("Reading video…")
+        source_frame = model.source_frame
+        self.original_canvas.set_frame(
+            source_frame if isinstance(source_frame, QImage) else None
+        )
         self.result_canvas.setText(model.result_message)
         self.result_canvas.setAccessibleName(model.result_accessible_name)
         self.result_canvas.setAccessibleDescription(model.result_accessible_description)
