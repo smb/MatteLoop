@@ -1,5 +1,10 @@
 # rembgGUI Complete Implementation Plan
 
+> **Historical (2026-08-30).** This plan is retained so older commit messages
+> stay readable. Its task numbering is reference only, and its "V1 complete"
+> contract has been superseded. `docs/v1-scope.md` is authoritative for scope;
+> `docs/engineering-guardrails.md` is authoritative for working method.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the approved cross-platform PySide6 desktop application that previews and removes video backgrounds with `rembg`, preserves editable cut PNGs, rebuilds lossless animated WebP output, and packages without system Python or external media CLIs.

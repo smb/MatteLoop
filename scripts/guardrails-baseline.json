@@ -1,0 +1,90 @@
+{
+  "src/rembggui/core/geometry.py": {
+    "lines": 1057,
+    "long_functions": 1
+  },
+  "src/rembggui/core/state.py": {
+    "lines": 853,
+    "long_functions": 1
+  },
+  "src/rembggui/core/webp.py": {
+    "lines": 1375,
+    "long_functions": 5
+  },
+  "src/rembggui/jobs/models/cache_fs.py": {
+    "lines": 1522,
+    "long_functions": 4
+  },
+  "src/rembggui/jobs/models/download.py": {
+    "lines": 604,
+    "long_functions": 2
+  },
+  "src/rembggui/jobs/models/session.py": {
+    "lines": 345,
+    "long_functions": 1
+  },
+  "src/rembggui/jobs/render.py": {
+    "lines": 2848,
+    "long_functions": 11
+  },
+  "src/rembggui/jobs/segmentation_host.py": {
+    "lines": 1629,
+    "long_functions": 8
+  },
+  "src/rembggui/jobs/source.py": {
+    "lines": 1636,
+    "long_functions": 5
+  },
+  "src/rembggui/jobs/thumbnails.py": {
+    "lines": 280,
+    "long_functions": 2
+  },
+  "src/rembggui/jobs/workspace/_cut_ops.py": {
+    "lines": 442,
+    "long_functions": 1
+  },
+  "src/rembggui/jobs/workspace/_filesystem.py": {
+    "lines": 686,
+    "long_functions": 1
+  },
+  "src/rembggui/jobs/workspace/_manifest.py": {
+    "lines": 434,
+    "long_functions": 2
+  },
+  "src/rembggui/jobs/workspace/_manifest_io.py": {
+    "lines": 377,
+    "long_functions": 2
+  },
+  "src/rembggui/jobs/workspace/_manifest_validation.py": {
+    "lines": 344,
+    "long_functions": 1
+  },
+  "src/rembggui/jobs/workspace/_recovery.py": {
+    "lines": 653,
+    "long_functions": 3
+  },
+  "src/rembggui/jobs/workspace/_scan.py": {
+    "lines": 334,
+    "long_functions": 2
+  },
+  "src/rembggui/jobs/workspace/_snapshot_ops.py": {
+    "lines": 410,
+    "long_functions": 2
+  },
+  "src/rembggui/smoke.py": {
+    "lines": 464,
+    "long_functions": 1
+  },
+  "src/rembggui/smoke_child.py": {
+    "lines": 81,
+    "long_functions": 1
+  },
+  "src/rembggui/ui/main_window.py": {
+    "lines": 374,
+    "long_functions": 2
+  },
+  "src/rembggui/ui/presenter.py": {
+    "lines": 209,
+    "long_functions": 1
+  }
+}
