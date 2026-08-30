@@ -37,7 +37,8 @@ cancellation boundaries; child crash pass-through; disk and publish failures;
 collision races; immutable Rebuild snapshots; external edits; union invalidation
 and CAS loss; and source functions that hard-fail if Rebuild touches them.
 
-Final focused GREEN for every changed contract and service suite:
+Focused GREEN for every changed contract and service suite before the final
+cleanup audit:
 
 ```text
 439 passed in 43.09s
@@ -52,6 +53,14 @@ orchestration regression GREEN:
 ```text
 170 passed in 10.91s
 ```
+
+A final cleanup audit then added two focused REDs: failure to remove the
+hard-link no-clobber candidate after a successful commit was silently ignored,
+and failure to remove a framed-PNG temporary after a primary write error was
+also swallowed. The publisher now returns the first condition through artifact
+notes, while the second is attached to the primary exception. The primary
+publication/write outcome is never replaced. Final service GREEN was 40 passed;
+the subsequent full suite was 888 passed.
 
 ## Architecture and safety decisions
 
@@ -89,9 +98,10 @@ orchestration regression GREEN:
 
 ## Verification
 
-- `uv run pytest -q` — **886 passed in 45.96s** outside the restricted
+- `uv run pytest -q` — **888 passed in 45.95s** outside the restricted
   shared-memory sandbox.
-- All changed contract and orchestration suites — **439 passed in 43.09s**.
+- All changed contract and orchestration suites before the final audit —
+  **439 passed in 43.09s**; final orchestration suite — **40 passed in 1.06s**.
 - `uv run ruff check .` — passed.
 - `uv run ruff format --check` over all 22 changed Python files — passed.
 - `uv run mypy src` — passed for 29 source files.

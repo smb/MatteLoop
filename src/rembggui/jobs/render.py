@@ -183,6 +183,8 @@ class OutputPublisher(Protocol):
         candidate: Path,
         destination: Path,
         policy: CollisionPolicy,
+        *,
+        cleanup_notes: list[str] | None = None,
     ) -> Path: ...
 
 
@@ -493,6 +495,8 @@ class AtomicOutputPublisher:
         candidate: Path,
         destination: Path,
         policy: CollisionPolicy,
+        *,
+        cleanup_notes: list[str] | None = None,
     ) -> Path:
         if (
             not isinstance(candidate, Path)
@@ -500,6 +504,7 @@ class AtomicOutputPublisher:
             or candidate.parent != destination.parent
             or candidate == destination
             or not isinstance(policy, CollisionPolicy)
+            or (cleanup_notes is not None and not isinstance(cleanup_notes, list))
         ):
             raise _output_error("candidate must be a sibling and policy must be valid")
         try:
@@ -528,8 +533,11 @@ class AtomicOutputPublisher:
                     ) from error
                 try:
                     candidate.unlink()
-                except OSError:
-                    pass
+                except OSError as error:
+                    if cleanup_notes is not None:
+                        cleanup_notes.append(
+                            f"additional output-candidate cleanup failure: {error}"
+                        )
         except AppError:
             raise
         except OSError as error:
@@ -1074,6 +1082,7 @@ class RenderService:
                     candidate,
                     request.output.path,
                     request.output.collision_policy,
+                    cleanup_notes=notes,
                 )
             )
             published = True
@@ -1274,6 +1283,7 @@ def _union_bounds(
 
 def _persist_framed_png(path: Path, image: Image.Image) -> None:
     temporary: Path | None = None
+    primary: BaseException | None = None
     try:
         descriptor, raw = tempfile.mkstemp(
             prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
@@ -1286,15 +1296,23 @@ def _persist_framed_png(path: Path, image: Image.Image) -> None:
         os.replace(temporary, path)
         temporary = None
     except OSError as error:
-        raise _map_output_os_error(error, "cannot persist framed PNG") from error
+        wrapped = _map_output_os_error(error, "cannot persist framed PNG")
+        primary = wrapped
+        raise wrapped from error
     except ValueError as error:
-        raise _output_error(f"cannot persist framed PNG: {error}") from error
+        wrapped = _output_error(f"cannot persist framed PNG: {error}")
+        primary = wrapped
+        raise wrapped from error
+    except BaseException as error:
+        primary = error
+        raise
     finally:
         if temporary is not None:
             try:
                 temporary.unlink()
-            except OSError:
-                pass
+            except OSError as error:
+                if primary is not None:
+                    primary.add_note(f"additional framed-PNG cleanup failure: {error}")
 
 
 def _cleanup_stage(

@@ -8,6 +8,7 @@ from fractions import Fraction
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 import rembggui.jobs.render as render_module
 from rembggui.core.errors import AppError, ErrorCode
@@ -419,6 +420,67 @@ def test_replace_policy_commits_candidate_atomically(tmp_path) -> None:
     assert publisher.publish(candidate, target, CollisionPolicy.REPLACE) == target
     assert target.read_bytes() == b"new"
     assert not candidate.exists()
+
+
+def test_no_clobber_candidate_cleanup_failure_is_returned_as_a_note(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publisher = AtomicOutputPublisher()
+    target = tmp_path / "output.webp"
+    candidate = publisher.candidate_path(target, "job")
+    candidate.write_bytes(b"new")
+    notes: list[str] = []
+    actual_unlink = Path.unlink
+
+    def fail_candidate_unlink(path: Path, *args, **kwargs):
+        if path == candidate:
+            raise OSError(errno.EACCES, "synthetic candidate cleanup failure")
+        return actual_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_candidate_unlink)
+
+    assert (
+        publisher.publish(
+            candidate,
+            target,
+            CollisionPolicy.CHOOSE_ANOTHER_NAME,
+            cleanup_notes=notes,
+        )
+        == target
+    )
+    assert target.read_bytes() == b"new"
+    assert candidate.read_bytes() == b"new"
+    assert notes == [
+        "additional output-candidate cleanup failure: "
+        "[Errno 13] synthetic candidate cleanup failure"
+    ]
+
+
+def test_framed_png_cleanup_failure_is_not_primary(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "frame.png"
+
+    def fail_save(self, path, *args, **kwargs):
+        del self, path, args, kwargs
+        raise OSError(errno.ENOSPC, "synthetic frame write failure")
+
+    def fail_unlink(self: Path, *args, **kwargs):
+        del self, args, kwargs
+        raise OSError(errno.EACCES, "synthetic temp cleanup failure")
+
+    monkeypatch.setattr(Image.Image, "save", fail_save)
+    monkeypatch.setattr(Path, "unlink", fail_unlink)
+
+    with Image.new("RGBA", (128, 128)) as image:
+        with pytest.raises(AppError) as exc:
+            render_module._persist_framed_png(output, image)
+
+    assert exc.value.retry_action == "free-disk-space"
+    assert exc.value.__notes__ == [
+        "additional framed-PNG cleanup failure: "
+        "[Errno 13] synthetic temp cleanup failure"
+    ]
 
 
 def test_all_fallible_artifact_identity_work_finishes_before_publish(
