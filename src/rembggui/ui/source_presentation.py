@@ -2,11 +2,24 @@
 
 from __future__ import annotations
 
+import math
+from collections import deque
 from fractions import Fraction
 from pathlib import Path
 from typing import TypedDict
 
 _SOURCE_FILENAME_MAX_LENGTH = 40
+# The download callback fires per 256 KiB chunk — about 60 times a second at
+# 15 MiB/s — so a sample-count window spans milliseconds and the figure is
+# unreadable. Average over wall-clock time instead.
+_DOWNLOAD_RATE_WINDOW_SECONDS = 5.0
+_DOWNLOAD_RATE_MINIMUM_SECONDS = 1.5
+# progress() fires per read chunk — roughly 1000 times a second at 15 MiB/s with
+# 16 KiB reads — so store at most one sample per interval. Capping by sample
+# count instead would shrink the window below the minimum span and the rate
+# would never be reported at all.
+_DOWNLOAD_RATE_SAMPLE_INTERVAL_SECONDS = 0.05
+_DOWNLOAD_RATE_MAX_SAMPLES = 256
 
 
 class SourcePresentation(TypedDict):
@@ -84,6 +97,80 @@ def format_source_file_size(size: object) -> str:
             return f"{value:.1f} {unit}"
         value /= 1024
     return ""
+
+
+class DownloadRateEstimator:
+    """Estimate download speed from a short, timestamped sample window."""
+
+    def __init__(self) -> None:
+        self._samples: deque[tuple[float, int]] = deque(
+            maxlen=_DOWNLOAD_RATE_MAX_SAMPLES
+        )
+
+    def update(self, completed: int, timestamp: float) -> float | None:
+        """Return the average rate over the trailing wall-clock window."""
+        if not math.isfinite(timestamp):
+            return None
+        if self._samples:
+            previous_timestamp, previous_completed = self._samples[-1]
+            if timestamp < previous_timestamp or completed < previous_completed:
+                return None
+        if (
+            not self._samples
+            or timestamp - self._samples[-1][0]
+            >= _DOWNLOAD_RATE_SAMPLE_INTERVAL_SECONDS
+        ):
+            self._samples.append((timestamp, completed))
+        cutoff = timestamp - _DOWNLOAD_RATE_WINDOW_SECONDS
+        while len(self._samples) > 1 and self._samples[0][0] < cutoff:
+            self._samples.popleft()
+        first_timestamp, first_completed = self._samples[0]
+        elapsed = timestamp - first_timestamp
+        transferred = completed - first_completed
+        if elapsed < _DOWNLOAD_RATE_MINIMUM_SECONDS or transferred <= 0:
+            return None
+        return transferred / elapsed
+
+
+def format_download_speed(bytes_per_second: object) -> str:
+    """Return a positive download rate using the source binary-size format."""
+    if (
+        not isinstance(bytes_per_second, (int, float))
+        or isinstance(bytes_per_second, bool)
+        or not math.isfinite(float(bytes_per_second))
+        or bytes_per_second < 1
+    ):
+        return ""
+    value = format_source_file_size(int(bytes_per_second))
+    return f"{value}/s" if value else ""
+
+
+def format_model_download_progress(completed: object, total: object) -> str:
+    """Return human-readable transferred and total download sizes."""
+    completed_size = format_source_file_size(completed)
+    total_size = format_source_file_size(total)
+    if not completed_size or not total_size:
+        return ""
+    return f"{completed_size} of {total_size}"
+
+
+def format_model_download_detail(
+    model_name: object,
+    completed: object | None = None,
+    total: object | None = None,
+    bytes_per_second: object | None = None,
+) -> str:
+    """Return the model download detail shown below the current stage."""
+    if not isinstance(model_name, str) or not model_name:
+        return ""
+    detail = f"Downloading {model_name}"
+    progress = format_model_download_progress(completed, total)
+    if progress:
+        detail += f" — {progress}"
+    speed = format_download_speed(bytes_per_second)
+    if speed:
+        detail += f" · {speed}"
+    return detail
 
 
 def present_source_metadata(

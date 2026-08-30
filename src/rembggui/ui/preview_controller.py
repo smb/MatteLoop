@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from decimal import Decimal
 from fractions import Fraction
@@ -72,6 +73,11 @@ from rembggui.ui.download_transport import (
     QtNetworkDownloadTransport as _QtNetworkDownloadTransport,
 )
 from rembggui.ui.ports import PreviewFrameRequested, StateStore
+from rembggui.ui.source_presentation import (
+    DownloadRateEstimator,
+    format_model_download_detail,
+    format_model_download_progress,
+)
 
 
 class PreviewRuntime(Protocol):
@@ -116,6 +122,8 @@ class ProductionPreviewRuntime:
         )
         self._context: JobContext | None = None
         self._prepared: PreparedSegmentation | None = None
+        self._download_model_name = ""
+        self._download_rate = DownloadRateEstimator()
         self._sessions = _SessionHolder()
         self._manager = ModelSessionManager(
             catalog=self.catalog,
@@ -147,10 +155,12 @@ class ProductionPreviewRuntime:
                     detail="Using cached model weights",
                 )
             else:
+                self._download_model_name = spec.display_name
+                self._download_rate = DownloadRateEstimator()
                 context.progress(
                     "Downloading model",
                     0,
-                    detail="Downloading model weights",
+                    detail=format_model_download_detail(spec.display_name),
                 )
         else:
             context.progress("Preparing model", 0, detail="Reusing prepared session")
@@ -206,11 +216,14 @@ class ProductionPreviewRuntime:
     def _download_progress(self, completed: int, total: int) -> None:
         if self._context is None:
             return
+        speed = self._download_rate.update(completed, time.monotonic())
         self._context.progress(
             "Downloading model",
             completed,
             total=total,
-            detail=f"{completed:,} / {total:,} bytes",
+            detail=format_model_download_detail(
+                self._download_model_name, completed, total, speed
+            ),
         )
 
     def _is_cancelled(self) -> bool:
@@ -277,7 +290,12 @@ class PreviewJobDialog(QDialog):
         else:
             self.progress_bar.setRange(0, event.total)
             self.progress_bar.setValue(event.completed)
-            self.progress_bar.setFormat("%v / %m bytes")
+            if event.stage == "Downloading model":
+                self.progress_bar.setFormat(
+                    format_model_download_progress(event.completed, event.total)
+                )
+            else:
+                self.progress_bar.setFormat("%v / %m bytes")
 
     def set_cancelling(self) -> None:
         self.stage_label.setText("Cancelling…")

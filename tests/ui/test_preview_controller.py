@@ -17,7 +17,7 @@ from rembggui.core.state import (
     PreviewState,
     PreviewSucceeded,
 )
-from rembggui.jobs.context import JobContext
+from rembggui.jobs.context import JobContext, ProgressEvent
 from rembggui.jobs.render import ImmutableRgba, PreparedSegmentation, PreviewResult
 from rembggui.ui.controller import SourceController, SourceLoadResult
 from rembggui.ui.main_window import MainWindow
@@ -239,3 +239,23 @@ def test_job_dialog_rejects_user_close_until_terminal_event(qtbot) -> None:
 
     dialog.close_for_terminal()
     assert not dialog.isVisible()
+
+
+def test_model_download_dialog_shows_human_byte_totals(qtbot) -> None:
+    dialog = PreviewJobDialog()
+    qtbot.addWidget(dialog)
+
+    dialog.set_progress(
+        ProgressEvent(
+            "job",
+            "Downloading model",
+            int(412.3 * 1024**2),
+            int(927.6 * 1024**2),
+            "Downloading BiRefNet Portrait — 412.3 MiB of 927.6 MiB",
+        )
+    )
+
+    assert dialog.progress_bar.format() == "412.3 MiB of 927.6 MiB"
+    assert dialog.detail_label.text() == (
+        "Downloading BiRefNet Portrait — 412.3 MiB of 927.6 MiB"
+    )
