@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import os
+import stat
 from dataclasses import replace
 from decimal import Decimal
 from fractions import Fraction
@@ -390,8 +391,12 @@ def test_atomic_replace_maps_real_publish_failures_without_clobbering(
     candidate_bytes = candidate.path.read_bytes()
     target.write_bytes(b"old")
 
-    def fail_replace(_source, _target):
-        raise OSError(error_number, "synthetic publication failure")
+    actual_replace = os.replace
+
+    def fail_replace(source, destination, **kwargs):
+        if Path(source) == candidate.path and Path(destination) == target:
+            raise OSError(error_number, "synthetic publication failure")
+        return actual_replace(source, destination, **kwargs)
 
     monkeypatch.setattr(os, "replace", fail_replace)
 
@@ -540,12 +545,12 @@ def test_replace_rolls_back_if_validated_candidate_is_swapped_at_commit(
     actual_replace = os.replace
     swapped = False
 
-    def swap_candidate_then_replace(source_path, destination_path):
+    def swap_candidate_then_replace(source_path, destination_path, **kwargs):
         nonlocal swapped
         if Path(source_path) == candidate.path and Path(destination_path) == target:
             actual_replace(attacker, candidate.path)
             swapped = True
-        return actual_replace(source_path, destination_path)
+        return actual_replace(source_path, destination_path, **kwargs)
 
     monkeypatch.setattr(os, "replace", swap_candidate_then_replace)
 
@@ -615,14 +620,14 @@ def test_replace_without_previous_output_never_unlinks_a_foreign_commit_mismatch
     actual_replace = os.replace
     swapped = False
 
-    def swap_candidate_at_commit(source_path, destination_path):
+    def swap_candidate_at_commit(source_path, destination_path, **kwargs):
         nonlocal swapped
         source = Path(source_path)
         destination = Path(destination_path)
         if source == candidate.path and destination == target:
             actual_replace(foreign, candidate.path)
             swapped = True
-        return actual_replace(source, destination)
+        return actual_replace(source, destination, **kwargs)
 
     monkeypatch.setattr(os, "replace", swap_candidate_at_commit)
 
@@ -652,12 +657,12 @@ def test_replace_retains_precommit_recovery_when_restore_cannot_allocate(
     actual_stage = render_module._stage_descriptor_copy
     actual_mkstemp = render_module.tempfile.mkstemp
 
-    def swap_candidate_at_commit(source_path, destination_path):
+    def swap_candidate_at_commit(source_path, destination_path, **kwargs):
         source = Path(source_path)
         destination = Path(destination_path)
         if source == candidate.path and destination == target:
             actual_replace(foreign, candidate.path)
-        return actual_replace(source, destination)
+        return actual_replace(source, destination, **kwargs)
 
     def fail_restore_copy(*args, **kwargs):
         if kwargs.get("suffix") == ".restore":
@@ -705,28 +710,32 @@ def test_recovery_preparation_failure_aborts_before_destructive_replace(
     old_bytes = b"old-output"
     target.write_bytes(old_bytes)
     candidate = _validated_candidate(publisher, target, tmp_path, "recovery-prepare")
-    actual_stage = render_module._stage_descriptor_copy
+    actual_stage = render_module._stage_bound_recovery_copy
     candidate_commit_attempted = False
 
     def fail_recovery_link(source_path, destination_path, **kwargs):
         del source_path, destination_path, kwargs
         raise OSError(failure_errno, "synthetic recovery link failure")
 
-    def fail_recovery_copy(*args, **kwargs):
-        if kwargs.get("suffix") == ".recovery-pending":
+    def fail_recovery_copy(directory, name, *args, **kwargs):
+        if name.endswith(".recovery-pending"):
             raise OSError(failure_errno, "synthetic recovery copy failure")
-        return actual_stage(*args, **kwargs)
+        return actual_stage(directory, name, *args, **kwargs)
 
     actual_replace = os.replace
 
-    def observe_replace(source_path, destination_path):
+    def observe_replace(source_path, destination_path, **kwargs):
         nonlocal candidate_commit_attempted
         if Path(source_path) == candidate.path and Path(destination_path) == target:
             candidate_commit_attempted = True
-        return actual_replace(source_path, destination_path)
+        return actual_replace(source_path, destination_path, **kwargs)
 
     monkeypatch.setattr(os, "link", fail_recovery_link)
-    monkeypatch.setattr(render_module, "_stage_descriptor_copy", fail_recovery_copy)
+    monkeypatch.setattr(
+        render_module,
+        "_stage_bound_recovery_copy",
+        fail_recovery_copy,
+    )
     monkeypatch.setattr(os, "replace", observe_replace)
 
     try:
@@ -738,6 +747,159 @@ def test_recovery_preparation_failure_aborts_before_destructive_replace(
     assert exc.value.retry_action == retry_action
     assert not candidate_commit_attempted
     assert target.read_bytes() == old_bytes
+
+
+def test_hard_linked_recovery_file_is_fsynced_before_destructive_replace(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publisher = AtomicOutputPublisher()
+    target = tmp_path / "output.webp"
+    target.write_bytes(b"old-output")
+    old_inode = target.stat().st_ino
+    candidate = _validated_candidate(publisher, target, tmp_path, "recovery-file-fsync")
+    actual_fsync = os.fsync
+    actual_replace = os.replace
+    regular_fsync_inodes: list[int] = []
+    events: list[str] = []
+
+    def observe_fsync(descriptor: int) -> None:
+        info = os.fstat(descriptor)
+        if stat.S_ISREG(info.st_mode):
+            regular_fsync_inodes.append(info.st_ino)
+            if info.st_ino == old_inode:
+                events.append("recovery-file-fsync")
+        actual_fsync(descriptor)
+
+    def observe_replace(source, destination, **kwargs):
+        if Path(source) == candidate.path and Path(destination) == target:
+            events.append("destructive-commit")
+        return actual_replace(source, destination, **kwargs)
+
+    monkeypatch.setattr(os, "fsync", observe_fsync)
+    monkeypatch.setattr(os, "replace", observe_replace)
+
+    try:
+        publisher.publish(candidate, target, CollisionPolicy.REPLACE)
+    finally:
+        candidate.close()
+
+    assert old_inode in regular_fsync_inodes
+    assert events.index("recovery-file-fsync") < events.index("destructive-commit")
+
+
+def test_recovery_directory_fsync_failure_leaves_no_pending_after_next_success(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publisher = AtomicOutputPublisher()
+    target = tmp_path / "output.webp"
+    old_bytes = b"old-output"
+    target.write_bytes(old_bytes)
+    actual_fsync_directory = render_module._fsync_directory
+    failed_once = False
+
+    def fail_first_recovery_directory_fsync(directory: Path) -> None:
+        nonlocal failed_once
+        if directory.name == ".rembggui-recovery" and not failed_once:
+            failed_once = True
+            raise OSError(errno.EIO, "synthetic recovery-directory fsync failure")
+        actual_fsync_directory(directory)
+
+    monkeypatch.setattr(
+        render_module,
+        "_fsync_directory",
+        fail_first_recovery_directory_fsync,
+    )
+
+    first = _validated_candidate(publisher, target, tmp_path, "recovery-fsync-first")
+    try:
+        with pytest.raises(AppError):
+            publisher.publish(first, target, CollisionPolicy.REPLACE)
+    finally:
+        first.close()
+
+    assert failed_once
+    assert target.read_bytes() == old_bytes
+    recovery_directory = tmp_path / ".rembggui-recovery"
+    assert tuple(recovery_directory.glob("*.recovery-pending"))
+
+    second = _validated_candidate(publisher, target, tmp_path, "recovery-fsync-second")
+    try:
+        publisher.publish(second, target, CollisionPolicy.REPLACE)
+    finally:
+        second.close()
+
+    assert not tuple(recovery_directory.glob("*.recovery-pending"))
+
+
+def test_recovery_namespace_swap_never_modifies_the_foreign_replacement(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publisher = AtomicOutputPublisher()
+    target = tmp_path / "output.webp"
+    old_bytes = b"old-output"
+    target.write_bytes(old_bytes)
+    recovery_directory = tmp_path / ".rembggui-recovery"
+    recovery_directory.mkdir(mode=0o700)
+    foreign_directory = tmp_path / ".foreign-recovery-directory"
+    foreign_directory.mkdir(mode=0o700)
+    sentinel = foreign_directory / "sentinel"
+    sentinel_bytes = b"foreign-namespace-content"
+    sentinel.write_bytes(sentinel_bytes)
+    moved_recovery = tmp_path / ".original-recovery-directory"
+    candidate = _validated_candidate(publisher, target, tmp_path, "namespace-swap")
+    actual_link = os.link
+    actual_replace = os.replace
+    swapped = False
+
+    def swap_namespace_then_link(source, destination, **kwargs):
+        nonlocal swapped
+        if not swapped:
+            actual_replace(recovery_directory, moved_recovery)
+            actual_replace(foreign_directory, recovery_directory)
+            swapped = True
+        return actual_link(source, destination, **kwargs)
+
+    monkeypatch.setattr(os, "link", swap_namespace_then_link)
+
+    try:
+        with pytest.raises(AppError):
+            publisher.publish(candidate, target, CollisionPolicy.REPLACE)
+    finally:
+        candidate.close()
+
+    assert swapped
+    assert target.read_bytes() == old_bytes
+    assert tuple(path.name for path in recovery_directory.iterdir()) == ("sentinel",)
+    assert (recovery_directory / "sentinel").read_bytes() == sentinel_bytes
+
+
+def test_recovery_descriptor_closes_when_shadow_preparation_fails(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publisher = AtomicOutputPublisher()
+    target = tmp_path / "output.webp"
+    old_bytes = b"old-output"
+    target.write_bytes(old_bytes)
+    candidate = _validated_candidate(publisher, target, tmp_path, "shadow-failure")
+    recovery_descriptors: list[int] = []
+
+    def fail_shadow(recovery) -> None:
+        recovery_descriptors.append(recovery.descriptor)
+        raise RuntimeError("synthetic shadow preparation failure")
+
+    monkeypatch.setattr(render_module, "_prepare_recovery_shadow", fail_shadow)
+
+    try:
+        with pytest.raises(RuntimeError, match="synthetic shadow preparation failure"):
+            publisher.publish(candidate, target, CollisionPolicy.REPLACE)
+    finally:
+        candidate.close()
+
+    assert target.read_bytes() == old_bytes
+    assert recovery_descriptors
+    for descriptor in recovery_descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
 
 
 def test_current_recovery_slot_is_reused_without_a_pending_hardlink(
@@ -812,14 +974,14 @@ def test_replace_retries_when_restored_output_is_swapped_during_held_sha(
     commit_swapped = False
     restore_swapped = False
 
-    def swap_commit(source_path, destination_path):
+    def swap_commit(source_path, destination_path, **kwargs):
         nonlocal commit_swapped
         source = Path(source_path)
         destination = Path(destination_path)
         if source == candidate.path and destination == target:
             actual_replace(commit_attacker, candidate.path)
             commit_swapped = True
-        return actual_replace(source, destination)
+        return actual_replace(source, destination, **kwargs)
 
     def swap_restored_destination_after_hash(descriptor: int) -> str:
         nonlocal restore_swapped
@@ -887,12 +1049,12 @@ def test_rollback_reports_when_recovery_path_is_swapped_during_held_sha(
             raise OSError(errno.ENOSPC, "synthetic restore ENOSPC")
         return actual_stage(*args, **kwargs)
 
-    def swap_candidate_at_commit(source_path, destination_path):
+    def swap_candidate_at_commit(source_path, destination_path, **kwargs):
         source = Path(source_path)
         destination = Path(destination_path)
         if source == candidate.path and destination == target:
             actual_replace(commit_attacker, candidate.path)
-        return actual_replace(source, destination)
+        return actual_replace(source, destination, **kwargs)
 
     def swap_recovery_after_hash(descriptor: int) -> str:
         nonlocal recovery_swapped
@@ -966,7 +1128,7 @@ def test_replace_recreates_rollback_from_held_old_output_after_temp_swaps(
         closed_descriptors.append(descriptor)
         actual_close(descriptor)
 
-    def swap_publication_and_rollback(source_path, destination_path):
+    def swap_publication_and_rollback(source_path, destination_path, **kwargs):
         nonlocal candidate_swapped, rollback_swap_count
         source = Path(source_path)
         destination = Path(destination_path)
@@ -980,7 +1142,7 @@ def test_replace_recreates_rollback_from_held_old_output_after_temp_swaps(
         ):
             actual_replace(rollback_attackers[rollback_swap_count], source)
             rollback_swap_count += 1
-        return actual_replace(source, destination)
+        return actual_replace(source, destination, **kwargs)
 
     monkeypatch.setattr(render_module, "_open_held_file", observe_open)
     monkeypatch.setattr(render_module.os, "close", observe_close)

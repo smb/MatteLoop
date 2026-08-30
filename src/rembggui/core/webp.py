@@ -1171,6 +1171,15 @@ def _open_webp_validation_source(
                     f"additional duplicate WebP source cleanup failure: {cleanup_error}"
                 )
         raise _invalid_output(f"cannot inspect open WebP source: {error}") from error
+    except BaseException as error:
+        if duplicate_descriptor >= 0:
+            try:
+                os.close(duplicate_descriptor)
+            except OSError as cleanup_error:
+                error.add_note(
+                    f"additional duplicate WebP source cleanup failure: {cleanup_error}"
+                )
+        raise
 
     primary: BaseException | None = None
     try:

@@ -535,6 +535,49 @@ def test_validation_rejects_non_exact_or_negative_binary_descriptors(
     assert source.fileno_calls == 1
 
 
+def test_validation_closes_the_duplicated_descriptor_when_tell_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = save_rgba(tmp_path / "source.png", (128, 128), (10, 30, 220, 91))
+    valid = tmp_path / "valid.webp"
+    encode_lossless_webp((source,), (100,), valid)
+    duplicated: list[int] = []
+    actual_dup = os.dup
+
+    class ExplodingTell:
+        def __init__(self, held) -> None:
+            self.held = held
+
+        def fileno(self):
+            return self.held.fileno()
+
+        def read(self, size=-1):
+            return self.held.read(size)
+
+        def seek(self, offset, whence=0):
+            return self.held.seek(offset, whence)
+
+        def tell(self):
+            raise RuntimeError("synthetic tell failure")
+
+    def observe_dup(descriptor: int) -> int:
+        duplicate = actual_dup(descriptor)
+        duplicated.append(duplicate)
+        return duplicate
+
+    monkeypatch.setattr(webp_module.os, "dup", observe_dup)
+
+    with valid.open("rb") as held:
+        with pytest.raises(RuntimeError, match="synthetic tell failure"):
+            validate_webp(ExplodingTell(held), 1, 0)
+
+        assert not held.closed
+
+    assert len(duplicated) == 1
+    with pytest.raises(OSError):
+        os.fstat(duplicated[0])
+
+
 def test_animated_webp_stores_each_odd_delay_exactly(tmp_path: Path) -> None:
     paths = rgba_fixture_paths(tmp_path, count=6)
     output = tmp_path / "odd-delays.webp"

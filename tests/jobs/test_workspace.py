@@ -33,6 +33,7 @@ from rembggui.jobs.workspace import (
     CutManifest,
     CutUnionMetadata,
     CutWorkspace,
+    RecoveryDirectory,
     cleanup_abandoned_scratch,
     cleanup_scratch,
     compare_and_set_union_metadata,
@@ -372,6 +373,51 @@ def _install_exclusive_windows_cuts_api(
         workspace_module._BoundDirectory, "open", classmethod(injected_open)
     )
     return api
+
+
+def test_windows_recovery_directory_uses_bound_copy_replace_and_flush(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recovery_path = tmp_path / ".rembggui-recovery"
+    recovery_path.mkdir(mode=0o700)
+    api = _install_exclusive_windows_cuts_api(monkeypatch, tmp_path)
+    replacements: list[tuple[int, str, str]] = []
+    flushes: list[int] = []
+    actual_replace = api.replace_at
+
+    def observe_replace(handle: int, source: str, destination: str) -> None:
+        replacements.append((handle, source, destination))
+        actual_replace(handle, source, destination)
+
+    def observe_flush(handle: int) -> None:
+        flushes.append(handle)
+
+    monkeypatch.setattr(api, "replace_at", observe_replace)
+    monkeypatch.setattr(api, "flush_directory_strict", observe_flush)
+
+    recovery = RecoveryDirectory.open(tmp_path, recovery_path.name)
+    try:
+        assert not recovery.link_parent_file("output.webp", ".pending")
+        descriptor = recovery.open_fixed_pending(".pending")
+        try:
+            os.write(descriptor, b"old-output")
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+        recovery.replace(".pending", "output.recovery")
+        recovery.fsync()
+
+        recovery_handle = next(
+            handle for handle, path in api.handle_paths.items() if path == recovery_path
+        )
+        assert replacements == [(recovery_handle, ".pending", "output.recovery")]
+        assert flushes == [recovery_handle]
+        assert (recovery_path / "output.recovery").read_bytes() == b"old-output"
+    finally:
+        recovery.close()
+    assert api.handle_paths == {}
 
 
 def test_windows_share_fake_checks_existing_share_before_granting_new_write(

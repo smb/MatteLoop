@@ -27,6 +27,7 @@ import sys
 import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
@@ -2221,6 +2222,124 @@ class _BoundDirectory:
             _fsync_fd(self.descriptor)
         elif self._windows_handles:
             self._windows_api.flush_directory_strict(self._windows_handles[-1])
+
+
+class RecoveryDirectory:
+    """A narrow handle-bound directory used by output recovery transactions.
+
+    All names are resolved relative to the same Task-11 bound directory handles.
+    ``path_for`` is diagnostic-only and must never be used for filesystem I/O.
+    """
+
+    __slots__ = ("_directory", "_parent", "_stack", "name", "path")
+
+    def __init__(
+        self,
+        path: Path,
+        name: str,
+        parent: _BoundDirectory,
+        directory: _BoundDirectory,
+        stack: ExitStack,
+    ) -> None:
+        self.path = path
+        self.name = name
+        self._parent = parent
+        self._directory = directory
+        self._stack = stack
+
+    @classmethod
+    def open(cls, parent_path: Path, name: str) -> RecoveryDirectory:
+        _validate_component(name)
+        stack = ExitStack()
+        try:
+            parent = stack.enter_context(_BoundDirectory.open(parent_path))
+            try:
+                info = parent.lstat(name)
+            except FileNotFoundError:
+                parent.mkdir(name, exist_ok=False)
+                parent.fsync()
+                info = parent.lstat(name)
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                raise _unsafe_error("output recovery namespace is redirected")
+            if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
+                raise _unsafe_error(
+                    "output recovery namespace must have mode 0700 or stricter"
+                )
+            directory = stack.enter_context(parent.open_child(name))
+            result = cls(parent_path / name, name, parent, directory, stack)
+            result.assert_still_bound()
+            return result
+        except BaseException as error:
+            try:
+                stack.close()
+            except BaseException as cleanup_error:
+                error.add_note(
+                    f"additional recovery-directory cleanup failure: {cleanup_error}"
+                )
+            raise
+
+    def close(self) -> None:
+        self._stack.close()
+
+    def assert_still_bound(self) -> None:
+        self._parent.assert_still_named()
+        self._directory.assert_still_named()
+
+    def path_for(self, name: str) -> Path:
+        _validate_component(name)
+        return self.path / name
+
+    def lstat(self, name: str) -> os.stat_result:
+        return self._directory.lstat(name)
+
+    def open_read(self, name: str) -> int:
+        return self._directory.open_read(name)
+
+    def open_fixed_pending(self, name: str) -> int:
+        """Create or handle-relatively replace one bounded pending file."""
+        try:
+            return self._directory.open_new_fd(name)
+        except FileExistsError:
+            info = self._directory.lstat(name)
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+                raise _unsafe_error("output recovery pending entry is redirected")
+            self._directory.unlink(name)
+            self._directory.fsync()
+            return self._directory.open_new_fd(name)
+
+    def link_parent_file(self, source: str, destination: str) -> bool:
+        _validate_component(source)
+        _validate_component(destination)
+        if self._parent.descriptor is None or self._directory.descriptor is None:
+            return False
+        os.link(
+            source,
+            destination,
+            src_dir_fd=self._parent.descriptor,
+            dst_dir_fd=self._directory.descriptor,
+            follow_symlinks=False,
+        )
+        return True
+
+    def link_file(self, source: str, destination: str) -> bool:
+        _validate_component(source)
+        _validate_component(destination)
+        if self._directory.descriptor is None:
+            return False
+        os.link(
+            source,
+            destination,
+            src_dir_fd=self._directory.descriptor,
+            dst_dir_fd=self._directory.descriptor,
+            follow_symlinks=False,
+        )
+        return True
+
+    def replace(self, source: str, destination: str) -> None:
+        self._directory.replace(source, destination)
+
+    def fsync(self) -> None:
+        self._directory.fsync()
 
 
 def _workspace_layout(

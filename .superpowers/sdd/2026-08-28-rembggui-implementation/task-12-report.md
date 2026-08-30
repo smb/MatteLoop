@@ -167,6 +167,34 @@ and REPLACE consumes its candidate.
 This round's complete jobs contract gate is **526 passed** and the complete
 WebP contract gate is **72 passed**.
 
+A fourth review focused on crash durability and recovery-namespace ownership.
+Four deterministic RED reproducers established that an unexpected `tell()`
+exception leaked the WebP validation duplicate, a hard-linked recovery name was
+not itself file-fsynced, a recovery-directory fsync failure left an unbounded
+random pending name, and replacing the lexical recovery directory could redirect
+later recovery publication into a foreign namespace.
+
+The GREEN recovery transaction now reuses Task 11's handle-bound directory
+infrastructure through a narrow public `RecoveryDirectory` adapter. Parent and
+child directory handles remain open for the complete prepare/verify/rollback
+critical section. Every recovery lstat, open, create, link, replace, unlink, and
+directory sync is relative to those handles; `path_for()` exists only to report
+a retained recovery location. POSIX hard links use source and destination
+`dir_fd`s. Windows deliberately has no hard-link pathname fallback: it creates a
+descriptor-bound copy through the Windows directory-handle API, uses
+handle-relative replace, and requires the Task 11 strict directory flush.
+
+Recovery and shadow pending entries are fixed per destination rather than
+random, so a failed directory flush leaves at most one bounded entry that the
+next transaction reuses handle-relatively. Both hard-linked and copied recovery
+files are `fsync`ed through their held regular-file descriptors before their
+directory entry is made durable and before the output's destructive commit.
+Finally, every exception after `os.dup()` now closes that owned descriptor while
+preserving the original exception and attaching any cleanup failure as a note.
+Recovery-descriptor ownership transfers to the returned artifact only after
+shadow preparation succeeds, so that branch also closes every held descriptor
+on failure.
+
 ## Architecture and safety decisions
 
 - `cut_cache_key_inputs()` is the only authoritative cut-input mapping. The
@@ -206,12 +234,13 @@ WebP contract gate is **72 passed**.
 
 ## Verification
 
-- `uv run pytest -q` — **941 passed in 48.91s** outside the restricted
+- `uv run pytest -q` — **947 passed in 49.17s** outside the restricted
   shared-memory sandbox.
-- Complete jobs contract gate — **526 passed in 14.65s**; complete WebP
-  contract gate — **72 passed in 31.87s**.
+- Focused WebP, render, and workspace contract gate — **227 passed in
+  35.23s**, including the POSIX recovery races and injected Windows
+  handle-relative adapter contract.
 - `uv run ruff check .` — passed.
-- `uv run ruff format --check` over all 5 changed Python files — passed.
+- `uv run ruff format --check` over all 6 changed Python files — passed.
 - `uv run mypy src` — passed for 29 source files.
 - `git diff --check` — passed.
 
