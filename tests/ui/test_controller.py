@@ -3,12 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
-from threading import Event, get_ident
+from threading import Event, Thread, get_ident
 
 import pytest
 from PIL import Image
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QFileDialog
+from PySide6.QtWidgets import QApplication, QFileDialog
 
 from rembggui.core.errors import AppError, ErrorCode
 from rembggui.core.state import SourceState
@@ -16,6 +16,7 @@ from rembggui.jobs.source import decode_frame, probe_source
 from rembggui.ui.controller import SourceController, SourceLoadResult
 from rembggui.ui.main_window import MainWindow
 from rembggui.ui.ports import ChooseVideoRequested, VideoDropped
+from rembggui.ui.source_presentation import format_source_file_size
 from rembggui.ui.store import ReducerStore
 from tests.fixtures.media_factory import make_video
 
@@ -76,13 +77,54 @@ def test_dropped_video_loads_metadata_and_displays_first_frame(tmp_path, qtbot) 
     metadata = store.state.source_value
     assert metadata is not None
     assert window.source_dimensions.text() == "4 × 2"
-    assert window.source_duration.text() == str(metadata.duration)
-    assert window.source_frame_rate.text().endswith("fps")
-    assert window.source_file_size.text().endswith("bytes")
+    assert window.source_duration.text() == "0:01.00"
+    assert window.source_frame_rate.text() == "2 fps"
+    assert window.source_file_size.text() == format_source_file_size(metadata.file_size)
     pixmap = window.original_canvas.pixmap()
     assert pixmap is not None and not pixmap.isNull()
     assert adapter.thread_ids and adapter.thread_ids[0] != get_ident()
     assert window.original_canvas.accessibleName() == "Original video frame"
+
+
+def test_shutdown_waits_for_an_inflight_load_before_returning(qtbot) -> None:
+    path = Path("/tmp/shutdown.mp4")
+
+    class GatedAdapter(FakeSourceAdapter):
+        def __init__(self) -> None:
+            super().__init__(
+                {path: SourceLoadResult(object(), Image.new("RGBA", (2, 2), "red"))}
+            )
+            self.started = Event()
+            self.release = Event()
+            self.finished = Event()
+
+        def load(self, path: Path, request_id: int) -> SourceLoadResult:
+            self.started.set()
+            assert self.release.wait(5)
+            try:
+                return super().load(path, request_id)
+            finally:
+                self.finished.set()
+
+    adapter = GatedAdapter()
+    store = ReducerStore()
+    controller = SourceController(
+        store, source_adapter=adapter, parent=QApplication.instance()
+    )
+    controller.dispatch(VideoDropped(path))
+    qtbot.waitUntil(adapter.started.is_set, timeout=5000)
+
+    def release_load() -> None:
+        Event().wait(0.1)
+        adapter.release.set()
+
+    releaser = Thread(target=release_load)
+    releaser.start()
+    controller.shutdown()
+    releaser.join(timeout=1000)
+
+    assert adapter.finished.is_set()
+    assert controller.active_load_count == 0
 
 
 def test_source_load_failure_is_an_app_error_with_recovery_focus(qtbot) -> None:

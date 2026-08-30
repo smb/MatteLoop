@@ -37,6 +37,7 @@ from rembggui.ui.ports import (
 )
 
 VIDEO_FILE_FILTER = "Video files (*.mp4 *.mov *.webm *.mkv)"
+_THREAD_SHUTDOWN_TIMEOUT_MS = 5000
 
 
 @dataclass(frozen=True)
@@ -142,7 +143,7 @@ class SourceController(QObject):
     @property
     def active_load_count(self) -> int:
         """Expose worker count for lifecycle tests without exposing worker state."""
-        return len(self._threads)
+        return sum(thread.isRunning() for thread, _worker in self._threads.values())
 
     def dispatch(self, command: WindowCommand) -> None:
         if self._closed:
@@ -176,8 +177,11 @@ class SourceController(QObject):
     def shutdown(self) -> None:
         """Stop accepting results while the application is closing."""
         self._closed = True
-        for thread, _worker in tuple(self._threads.values()):
+        threads = tuple(self._threads.items())
+        for _request_id, (thread, _worker) in threads:
             thread.quit()
+        for _request_id, (thread, _worker) in threads:
+            thread.wait(_THREAD_SHUTDOWN_TIMEOUT_MS)
 
     def _choose_video(self, replace: bool) -> None:
         caption = "Replace video" if replace else "Choose video"
