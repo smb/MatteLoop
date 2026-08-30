@@ -2020,12 +2020,14 @@ def _prepare_durable_recovery(
             ):
                 _require_existing_output_current(destination, previous)
                 _fsync_directory(recovery_directory)
-                return _HeldStagedFile(
+                recovery = _HeldStagedFile(
                     recovery_path,
                     existing_descriptor,
                     previous.identity,
                     previous.sha256,
                 )
+                _prepare_recovery_shadow(recovery, recovery_directory)
+                return recovery
         except BaseException as error:
             try:
                 os.close(existing_descriptor)
@@ -2095,6 +2097,7 @@ def _prepare_durable_recovery(
             staged.sha256,
         ):
             raise _output_error("durable output recovery changed after directory sync")
+        _prepare_recovery_shadow(staged, recovery_directory)
         return staged
     except BaseException as error:
         if staged is not None:
@@ -2114,6 +2117,131 @@ def _prepare_durable_recovery(
                     f"cannot inspect retained recovery artifact: {inspect_error}"
                 )
         raise
+
+
+def _prepare_recovery_shadow(
+    recovery: _HeldStagedFile,
+    recovery_directory: Path,
+) -> Path:
+    """Keep a second bounded durable name for recovery-path interference."""
+    shadow_path = recovery.path.with_suffix(".recovery-shadow")
+    if _held_path_matches(
+        shadow_path,
+        recovery.identity,
+        recovery.sha256,
+    ):
+        return shadow_path
+
+    pending = recovery_directory / (
+        f".{recovery.path.stem}.{uuid.uuid4().hex}.recovery-shadow-pending"
+    )
+    staged: _HeldStagedFile | None = None
+    primary: BaseException | None = None
+    try:
+        try:
+            os.link(recovery.path, pending, follow_symlinks=False)
+        except OSError:
+            staged = _stage_descriptor_copy(
+                recovery.descriptor,
+                recovery.identity.size,
+                recovery.sha256,
+                shadow_path,
+                suffix=".recovery-shadow-pending",
+            )
+        else:
+            descriptor = _open_held_file(pending)
+            try:
+                if not _descriptor_path_matches(
+                    pending,
+                    descriptor,
+                    recovery.identity,
+                    recovery.sha256,
+                ):
+                    raise _output_error("recovery shadow changed while hard-linked")
+            except BaseException as error:
+                try:
+                    os.close(descriptor)
+                except OSError as close_error:
+                    error.add_note(
+                        f"additional recovery-shadow cleanup failure: {close_error}"
+                    )
+                raise
+            staged = _HeldStagedFile(
+                pending,
+                descriptor,
+                recovery.identity,
+                recovery.sha256,
+            )
+
+        _fsync_directory(recovery_directory)
+        os.replace(staged.path, shadow_path)
+        staged = _HeldStagedFile(
+            shadow_path,
+            staged.descriptor,
+            staged.identity,
+            staged.sha256,
+        )
+        if not _descriptor_path_matches(
+            shadow_path,
+            staged.descriptor,
+            staged.identity,
+            staged.sha256,
+        ):
+            raise _output_error("durable recovery shadow changed while installed")
+        _fsync_directory(recovery_directory)
+        if not _descriptor_path_matches(
+            shadow_path,
+            staged.descriptor,
+            staged.identity,
+            staged.sha256,
+        ):
+            raise _output_error("durable recovery shadow changed after directory sync")
+        return shadow_path
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        if staged is not None:
+            try:
+                os.close(staged.descriptor)
+            except OSError as error:
+                if primary is not None:
+                    primary.add_note(
+                        f"additional recovery-shadow cleanup failure: {error}"
+                    )
+                else:
+                    raise _map_output_os_error(
+                        error,
+                        "cannot close durable recovery-shadow handle",
+                    ) from error
+
+
+def _held_path_matches(
+    path: Path,
+    identity: CandidateFileIdentity,
+    sha256: str,
+) -> bool:
+    try:
+        descriptor = _open_held_file(path)
+    except FileNotFoundError:
+        return False
+    primary: BaseException | None = None
+    try:
+        return _descriptor_path_matches(path, descriptor, identity, sha256)
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError as error:
+            if primary is not None:
+                primary.add_note(f"additional held-path cleanup failure: {error}")
+            else:
+                raise _map_output_os_error(
+                    error,
+                    "cannot close held-path verification handle",
+                ) from error
 
 
 def _require_existing_output_current(
@@ -2188,22 +2316,33 @@ def _rollback_publication(
                     failures.append(f"rollback descriptor cleanup failed: {error}")
                 _cleanup_owned_temporary(staged.path, staged.identity, failures)
 
+    verified_recovery_path: Path | None = None
     try:
-        recovery_is_current = _descriptor_path_matches(
+        if _descriptor_path_matches(
             recovery.path,
             recovery.descriptor,
             recovery.identity,
             recovery.sha256,
-        )
+        ):
+            verified_recovery_path = recovery.path
     except BaseException as error:
-        recovery_is_current = False
         failures.append(f"durable recovery verification failed: {error}")
-    if not recovery_is_current:
+    if verified_recovery_path is None:
         failures.append("durable recovery path changed during rollback")
-    if recovery_is_current:
+        recovery_shadow = recovery.path.with_suffix(".recovery-shadow")
+        try:
+            if _held_path_matches(
+                recovery_shadow,
+                recovery.identity,
+                recovery.sha256,
+            ):
+                verified_recovery_path = recovery_shadow
+        except BaseException as error:
+            failures.append(f"durable recovery-shadow verification failed: {error}")
+    if verified_recovery_path is not None:
         detail = (
             "atomic output rollback could not defeat repeated filesystem "
-            f"interference; old bytes retained at {recovery.path}"
+            f"interference; old bytes retained at {verified_recovery_path}"
         )
     else:
         detail = (

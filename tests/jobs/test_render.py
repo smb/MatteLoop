@@ -925,8 +925,10 @@ def test_rollback_reports_when_recovery_path_is_swapped_during_held_sha(
     assert recovery is not None
     assert recovery_swapped
     assert exc.value.stage == "publish-rollback"
-    assert "recovery path could not be verified" in exc.value.technical_detail
     assert recovery.path.read_bytes() == recovery_attacker_bytes
+    recovery_shadow = recovery.path.with_suffix(".recovery-shadow")
+    assert recovery_shadow.read_bytes() == b"old-output"
+    assert str(recovery_shadow) in exc.value.technical_detail
 
 
 @pytest.mark.parametrize("rollback_swaps", [1, 2])

@@ -144,10 +144,11 @@ check is the publication verification linearization point.
 REPLACE now creates and fsyncs a durable recovery before its first destructive
 rename. A same-filesystem hard link is preferred and a fully copied/fsynced
 descriptor snapshot is the fallback. Recovery lives in a mode-0700 private
-namespace with one fixed slot per destination, is reused when already exact,
-and is replaced by the next successful transaction. Restore attempts copy only
-from its held descriptor and never depend on allocating a recovery after
-failure. Exhausted restore attempts return `publish-rollback` /
+namespace with two fixed names per destination. The secondary hard-link name
+survives interference with the primary name; both are reused when already exact
+and replaced by the next successful transaction. Restore attempts copy only
+from the held descriptor and never depend on allocating a recovery after failure.
+Exhausted restore attempts return `publish-rollback` /
 `recover-output` and the exact verified recovery path; hostile replacement of
 that path is detected and explicitly reported without claiming that the path
 still contains old bytes.
@@ -192,7 +193,7 @@ WebP contract gate is **72 passed**.
   production integration records peak at most three and current zero.
 - The encoder never receives the final path. It returns only a descriptor-bound,
   SHA-verified `ValidatedCandidate`. WebP parsing/decoding never reopens its
-  pathname. `REPLACE` first persists its bounded recovery slot, then atomically
+  pathname. `REPLACE` first persists its bounded recovery anchors, then atomically
   replaces and descriptor-verifies; `CHOOSE_ANOTHER_NAME` and `CANCEL` consume
   a bounded private copy through native exclusive rename. Actual disk-full,
   quota, permission, read-only, candidate/stage/SHA swaps, collision, and
@@ -205,7 +206,7 @@ WebP contract gate is **72 passed**.
 
 ## Verification
 
-- `uv run pytest -q` — **941 passed in 48.98s** outside the restricted
+- `uv run pytest -q` — **941 passed in 48.91s** outside the restricted
   shared-memory sandbox.
 - Complete jobs contract gate — **526 passed in 14.65s**; complete WebP
   contract gate — **72 passed in 31.87s**.
