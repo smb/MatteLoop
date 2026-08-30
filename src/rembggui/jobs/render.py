@@ -74,6 +74,7 @@ from rembggui.jobs.models.cache_fs import BoundDirectoryCloseError, UnsafeCacheE
 from rembggui.jobs.protocol import PROTOCOL_VERSION, SegmentOptions, SegmentRequest
 from rembggui.jobs.source import DecodedFrame, SourceInfo, decode_frame, probe_source
 from rembggui.jobs.workspace import (
+    AdvisoryFileLock,
     CutFrame,
     CutManifest,
     CutUnionMetadata,
@@ -632,6 +633,7 @@ class AtomicOutputPublisher:
         previous: _HeldPreviousOutput | None = None
         recovery: _HeldRecoveryFile | None = None
         staged: _HeldPublicationFile | None = None
+        transaction: _HeldOutputTransaction | None = None
         publication: PublicationDirectory | None = None
         primary: BaseException | None = None
         cleanup_errors: list[BaseException] = []
@@ -643,6 +645,7 @@ class AtomicOutputPublisher:
                 candidate._descriptor, candidate.identity, candidate.sha256
             ):
                 raise _output_error("validated output candidate changed")
+            transaction = _acquire_output_transaction(publication, destination)
             if policy is CollisionPolicy.REPLACE:
                 previous = _snapshot_existing_output(publication, destination_name)
                 if previous is not None:
@@ -666,6 +669,7 @@ class AtomicOutputPublisher:
                     candidate,
                     publication,
                     destination,
+                    transaction,
                 )
                 try:
                     publication.replace_from(
@@ -698,6 +702,7 @@ class AtomicOutputPublisher:
                     candidate,
                     publication,
                     destination,
+                    transaction,
                 )
                 publication.assert_still_bound()
                 try:
@@ -774,6 +779,10 @@ class AtomicOutputPublisher:
                 _close_recovery_file(recovery, cleanup_notes, primary, cleanup_errors)
             if previous is not None:
                 _close_previous_output(previous, cleanup_notes, primary)
+            if transaction is not None:
+                _close_output_transaction(
+                    transaction, cleanup_notes, primary, cleanup_errors
+                )
             if publication is not None:
                 _close_publication_directory(
                     publication, cleanup_notes, primary, cleanup_errors
@@ -1651,9 +1660,54 @@ class _HeldRecoveryFile:
         return self.directory.path_for(self.shadow_name)
 
 
+@dataclass(frozen=True, slots=True)
+class _HeldOutputTransaction:
+    directory: RecoveryDirectory = field(repr=False, compare=False)
+    lock: AdvisoryFileLock = field(repr=False, compare=False)
+    target_key: str
+
+
 _MAX_ROLLBACK_RESTORE_ATTEMPTS = 4
 _RECOVERY_DIRECTORY_NAME = ".rembggui-recovery"
 _PUBLICATION_DIRECTORY_NAME = ".rembggui-publish"
+
+
+def _output_target_key(destination: Path) -> str:
+    return hashlib.sha256(os.fsencode(str(destination.absolute()))).hexdigest()
+
+
+def _acquire_output_transaction(
+    publication: PublicationDirectory,
+    destination: Path,
+) -> _HeldOutputTransaction:
+    directory = publication.open_private_directory(
+        _PUBLICATION_DIRECTORY_NAME,
+        "publication",
+    )
+    target_key = _output_target_key(destination)
+    try:
+        lock = directory.acquire_advisory_lock(f"{target_key}.transaction.lock")
+        return _HeldOutputTransaction(directory, lock, target_key)
+    except BlockingIOError as error:
+        wrapped = _output_error("output transaction is already active")
+        transfer_deferred_bound_directory_closes(error, wrapped)
+        for note in getattr(error, "__notes__", ()):
+            wrapped.add_note(note)
+        try:
+            directory.close(wrapped)
+        except BaseException as close_error:
+            wrapped.add_note(
+                f"additional transaction-directory cleanup failure: {close_error}"
+            )
+        raise wrapped from error
+    except BaseException as error:
+        try:
+            directory.close(error)
+        except BaseException as close_error:
+            error.add_note(
+                f"additional transaction-directory cleanup failure: {close_error}"
+            )
+        raise
 
 
 def _rename_no_replace(
@@ -1854,13 +1908,15 @@ def _prepare_publication_stage(
     candidate: ValidatedCandidate,
     publication: PublicationDirectory,
     destination: Path,
+    transaction: _HeldOutputTransaction,
 ) -> _HeldPublicationFile:
     """Install one bounded private stage which commit consumes by rename."""
-    publication_directory = publication.open_private_directory(
-        _PUBLICATION_DIRECTORY_NAME,
-        "publication",
-    )
-    target_key = hashlib.sha256(os.fsencode(str(destination.absolute()))).hexdigest()
+    publication.assert_still_bound()
+    publication_directory = transaction.directory
+    publication_directory.assert_still_bound()
+    target_key = transaction.target_key
+    if target_key != _output_target_key(destination):
+        raise _output_error("output transaction does not match its destination")
     publication_name = f"{target_key}.publish"
     pending_name = f".{target_key}.publish-pending"
     descriptor: int | None = None
@@ -1900,6 +1956,7 @@ def _prepare_publication_stage(
             descriptor,
             identity,
             candidate.sha256,
+            owns_directory=False,
         )
         descriptor = None
         return staged
@@ -1912,12 +1969,6 @@ def _prepare_publication_stage(
                     "additional publication-stage handle cleanup failure: "
                     f"{close_error}"
                 )
-        try:
-            publication_directory.close(error)
-        except BaseException as close_error:
-            error.add_note(
-                f"additional publication-directory cleanup failure: {close_error}"
-            )
         raise
 
 
@@ -1964,7 +2015,7 @@ def _prepare_durable_recovery(
     previous: _HeldPreviousOutput,
 ) -> _HeldRecoveryFile:
     """Create a bounded durable old-output recovery before destructive commit."""
-    target_key = hashlib.sha256(os.fsencode(str(destination.absolute()))).hexdigest()
+    target_key = _output_target_key(destination)
     recovery_name = f"{target_key}.recovery"
     shadow_name = f"{target_key}.recovery-shadow"
     pending_name = f".{target_key}.recovery-pending"
@@ -2310,7 +2361,7 @@ def _rollback_publication(
         raise _output_error("previous output has no durable precommit recovery")
 
     failures: list[str] = []
-    target_key = hashlib.sha256(os.fsencode(str(destination.absolute()))).hexdigest()
+    target_key = _output_target_key(destination)
     for attempt in range(_MAX_ROLLBACK_RESTORE_ATTEMPTS):
         staged: _HeldPublicationFile | None = None
         restored = False
@@ -2510,6 +2561,31 @@ def _close_recovery_file(
             cleanup_errors.append(error)
         failures.append(f"additional recovery-directory cleanup failure: {error}")
     for detail in failures:
+        if primary is not None:
+            primary.add_note(detail)
+        elif cleanup_notes is not None:
+            cleanup_notes.append(detail)
+
+
+def _close_output_transaction(
+    transaction: _HeldOutputTransaction,
+    cleanup_notes: list[str] | None,
+    primary: BaseException | None,
+    cleanup_errors: list[BaseException] | None = None,
+) -> None:
+    failures: list[BaseException] = []
+    try:
+        transaction.directory.close(primary)
+    except BaseException as error:
+        failures.append(error)
+    try:
+        transaction.lock.close(primary)
+    except BaseException as error:
+        failures.append(error)
+    for failure in failures:
+        if cleanup_errors is not None:
+            cleanup_errors.append(failure)
+        detail = f"additional output-transaction cleanup failure: {failure}"
         if primary is not None:
             primary.add_note(detail)
         elif cleanup_notes is not None:

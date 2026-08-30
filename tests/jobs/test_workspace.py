@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import errno
 import gc
 import json
+import multiprocessing
 import os
 import threading
 import time
@@ -661,6 +663,172 @@ def test_windows_existing_recovery_remains_shareable_while_read_write_fd_is_held
     finally:
         sharing_api.release_file(descriptor)
         recovery.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="exercises the POSIX lock adapter")
+def test_private_output_lock_is_process_exclusive_and_stale_name_is_reusable(
+    tmp_path: Path,
+) -> None:
+    private_path = tmp_path / ".rembggui-publish"
+    private_path.mkdir(mode=0o700)
+    context = multiprocessing.get_context("fork")
+    ready = context.Event()
+    terminate = context.Event()
+
+    def acquire_then_exit() -> None:
+        directory = RecoveryDirectory.open(tmp_path, private_path.name)
+        directory.acquire_advisory_lock("target.transaction.lock")
+        ready.set()
+        if not terminate.wait(10):
+            raise RuntimeError("test did not terminate lock owner")
+        os._exit(0)
+
+    process = context.Process(target=acquire_then_exit)
+    process.start()
+    assert ready.wait(5)
+
+    contender = RecoveryDirectory.open(tmp_path, private_path.name)
+    try:
+        with pytest.raises(BlockingIOError):
+            contender.acquire_advisory_lock("target.transaction.lock")
+    finally:
+        contender.close()
+
+    terminate.set()
+    process.join(5)
+    assert process.exitcode == 0
+    assert (private_path / "target.transaction.lock").is_file()
+
+    reused_directory = RecoveryDirectory.open(tmp_path, private_path.name)
+    reused = reused_directory.acquire_advisory_lock("target.transaction.lock")
+    reused.close()
+    reused_directory.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="exercises the POSIX lock adapter")
+def test_private_output_locks_for_different_targets_do_not_serialize(
+    tmp_path: Path,
+) -> None:
+    private_path = tmp_path / ".rembggui-publish"
+    private_path.mkdir(mode=0o700)
+    directory = RecoveryDirectory.open(tmp_path, private_path.name)
+    first = directory.acquire_advisory_lock("first.transaction.lock")
+    second = directory.acquire_advisory_lock("second.transaction.lock")
+    try:
+        assert first.name != second.name
+    finally:
+        second.close()
+        first.close()
+        directory.close()
+
+
+def test_private_output_lock_serializes_threads_even_if_platform_lock_reenters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_path = tmp_path / ".rembggui-publish"
+    private_path.mkdir(mode=0o700)
+    monkeypatch.setattr(
+        workspace_module._SystemAdvisoryFileLock,
+        "acquire_nonblocking",
+        lambda _self, _descriptor: True,
+    )
+    monkeypatch.setattr(
+        workspace_module._SystemAdvisoryFileLock,
+        "release",
+        lambda _self, _descriptor: None,
+    )
+    first_directory = RecoveryDirectory.open(tmp_path, private_path.name)
+    second_directory = RecoveryDirectory.open(tmp_path, private_path.name)
+    first = first_directory.acquire_advisory_lock("target.transaction.lock")
+    try:
+        with pytest.raises(BlockingIOError):
+            second_directory.acquire_advisory_lock("target.transaction.lock")
+    finally:
+        first.close()
+        second_directory.close()
+        first_directory.close()
+
+
+def test_contended_output_lock_retains_descriptor_when_close_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_path = tmp_path / ".rembggui-publish"
+    private_path.mkdir(mode=0o700)
+    blocked_descriptor: int | None = None
+    close_fails = True
+    actual_close = workspace_module.os.close
+
+    def report_platform_contention(_self, descriptor: int) -> bool:
+        nonlocal blocked_descriptor
+        blocked_descriptor = descriptor
+        return False
+
+    def fail_lock_descriptor_close(descriptor: int) -> None:
+        if close_fails and descriptor == blocked_descriptor:
+            raise OSError(errno.EIO, "synthetic lock-descriptor close failure")
+        actual_close(descriptor)
+
+    monkeypatch.setattr(
+        workspace_module._SystemAdvisoryFileLock,
+        "acquire_nonblocking",
+        report_platform_contention,
+    )
+    monkeypatch.setattr(workspace_module.os, "close", fail_lock_descriptor_close)
+    directory = RecoveryDirectory.open(tmp_path, private_path.name)
+    try:
+        with pytest.raises(BlockingIOError) as exc:
+            directory.acquire_advisory_lock("target.transaction.lock")
+
+        owners = getattr(
+            exc.value,
+            "_rembggui_bound_directory_close_owners",
+        )
+        assert len(owners) == 1
+        close_fails = False
+        assert workspace_module._drain_attached_bound_directory_closes(exc.value) == 1
+    finally:
+        directory.close()
+
+
+def test_windows_advisory_lock_adapter_uses_nonblocking_byte_range_contract(
+    tmp_path: Path,
+) -> None:
+    class FakeMsvcrt:
+        LK_NBLCK = 3
+        LK_UNLCK = 4
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[int, int, int]] = []
+            self.busy = False
+
+        def locking(self, descriptor: int, operation: int, size: int) -> None:
+            self.calls.append((descriptor, operation, size))
+            if self.busy and operation == self.LK_NBLCK:
+                raise OSError(errno.EACCES, "synthetic Windows lock contention")
+
+    lock_path = tmp_path / "output.transaction.lock"
+    lock_path.write_bytes(b"\0")
+    descriptor = os.open(lock_path, os.O_RDWR)
+    windows = FakeMsvcrt()
+    adapter = workspace_module._SystemAdvisoryFileLock(
+        platform="windows",
+        windows_module=windows,
+    )
+    try:
+        assert adapter.acquire_nonblocking(descriptor)
+        adapter.release(descriptor)
+        windows.busy = True
+        assert not adapter.acquire_nonblocking(descriptor)
+    finally:
+        os.close(descriptor)
+
+    assert windows.calls == [
+        (descriptor, windows.LK_NBLCK, 1),
+        (descriptor, windows.LK_UNLCK, 1),
+        (descriptor, windows.LK_NBLCK, 1),
+    ]
 
 
 def test_windows_recovery_directory_uses_bound_copy_replace_and_flush(

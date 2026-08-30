@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import ctypes
 import errno
-import fcntl
 import hashlib
+import importlib
 import json
 import os
 import re
@@ -1749,10 +1749,11 @@ def _try_reflink(
         errno.ENOSYS,
     }
     if sys.platform.startswith("linux"):
+        fcntl_module = importlib.import_module("fcntl")
         destination_fd = destination.open_new_fd(filename)
         try:
             try:
-                fcntl.ioctl(destination_fd, 0x40049409, source_fd)
+                fcntl_module.ioctl(destination_fd, 0x40049409, source_fd)
             except OSError as error:
                 if error.errno not in unsupported:
                     raise
@@ -2533,6 +2534,153 @@ class PublicationDirectory:
         return RecoveryDirectory.open_from(self, name, purpose)
 
 
+class _SystemAdvisoryFileLock:
+    """Non-blocking process lock adapter over one held regular-file fd."""
+
+    __slots__ = ("_platform", "_posix", "_windows")
+
+    def __init__(
+        self,
+        *,
+        platform: str | None = None,
+        posix_module: Any | None = None,
+        windows_module: Any | None = None,
+    ) -> None:
+        selected = (
+            ("windows" if os.name == "nt" else "posix")
+            if platform is None
+            else platform
+        )
+        if selected not in {"posix", "windows"}:
+            raise ValueError("advisory-lock platform must be posix or windows")
+        if selected == "posix" and windows_module is not None:
+            raise ValueError("POSIX advisory locks do not accept a Windows module")
+        if selected == "windows" and posix_module is not None:
+            raise ValueError("Windows advisory locks do not accept a POSIX module")
+        self._platform = selected
+        self._posix = (
+            importlib.import_module("fcntl")
+            if selected == "posix" and posix_module is None
+            else posix_module
+        )
+        self._windows = (
+            importlib.import_module("msvcrt")
+            if selected == "windows" and windows_module is None
+            else windows_module
+        )
+
+    def acquire_nonblocking(self, descriptor: int) -> bool:
+        if type(descriptor) is not int or descriptor < 0:
+            raise ValueError("advisory-lock descriptor must be a non-negative int")
+        if self._platform == "posix":
+            posix = self._posix
+            if posix is None:
+                raise RuntimeError("POSIX advisory-lock adapter is unavailable")
+            try:
+                posix.flock(descriptor, posix.LOCK_EX | posix.LOCK_NB)
+            except OSError as error:
+                if error.errno in {errno.EACCES, errno.EAGAIN}:
+                    return False
+                raise
+            return True
+        windows = self._windows
+        if windows is None:
+            raise RuntimeError("Windows advisory-lock adapter is unavailable")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        try:
+            windows.locking(descriptor, windows.LK_NBLCK, 1)
+        except OSError as error:
+            if error.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK} or getattr(
+                error, "winerror", None
+            ) in {33, 36}:
+                return False
+            raise
+        return True
+
+    def release(self, descriptor: int) -> None:
+        if type(descriptor) is not int or descriptor < 0:
+            raise ValueError("advisory-lock descriptor must be a non-negative int")
+        if self._platform == "posix":
+            posix = self._posix
+            if posix is None:
+                raise RuntimeError("POSIX advisory-lock adapter is unavailable")
+            posix.flock(descriptor, posix.LOCK_UN)
+            return
+        windows = self._windows
+        if windows is None:
+            raise RuntimeError("Windows advisory-lock adapter is unavailable")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        windows.locking(descriptor, windows.LK_UNLCK, 1)
+
+
+class AdvisoryFileLock:
+    """Owned advisory lock; its fixed namespace entry is intentionally retained."""
+
+    __slots__ = (
+        "_adapter",
+        "_descriptor",
+        "_local_key",
+        "_local_lock",
+        "_locked",
+        "name",
+    )
+
+    def __init__(
+        self,
+        name: str,
+        descriptor: int,
+        adapter: _SystemAdvisoryFileLock,
+        local_key: str,
+        local_lock: Lock,
+        *,
+        locked: bool = True,
+    ) -> None:
+        self.name = name
+        self._descriptor: int | None = descriptor
+        self._adapter = adapter
+        self._locked = locked
+        self._local_key = local_key
+        self._local_lock: Lock | None = local_lock
+
+    def close(self, primary: BaseException | None = None) -> None:
+        descriptor = self._descriptor
+        if descriptor is None:
+            return
+        failures: list[BaseException] = []
+        if self._locked:
+            try:
+                self._adapter.release(descriptor)
+            except BaseException as error:
+                failures.append(error)
+            else:
+                self._locked = False
+        try:
+            os.close(descriptor)
+        except BaseException as error:
+            failures.append(error)
+        else:
+            self._descriptor = None
+        if not self._locked or self._descriptor is None:
+            local_lock = self._local_lock
+            if local_lock is not None:
+                _release_local_advisory_lock(self._local_key, local_lock)
+                self._local_lock = None
+        if not failures:
+            return
+        detail = "; ".join(str(error) for error in failures)
+        if primary is not None:
+            primary.add_note(
+                f"additional output-transaction lock cleanup failure: {detail}"
+            )
+            if self._descriptor is not None:
+                _attach_close_owner(primary, self)
+            return
+        failure = _unsafe_error(f"cannot close output-transaction lock: {detail}")
+        if self._descriptor is not None:
+            _attach_close_owner(failure, self)
+        raise failure from failures[0]
+
+
 class RecoveryDirectory:
     """A private child resolved from one already-bound publication parent.
 
@@ -2682,6 +2830,100 @@ class RecoveryDirectory:
             self._directory.unlink(name)
             self._directory.fsync()
             return self._directory.open_new_publication_fd(name)
+
+    def acquire_advisory_lock(self, name: str) -> AdvisoryFileLock:
+        """Acquire a fixed, never-unlinked process lock in this bound directory."""
+        _validate_component(name)
+        descriptor: int | None = None
+        held: AdvisoryFileLock | None = None
+        local_key = os.path.normcase(os.path.abspath(self.path_for(name)))
+        local_lock = _acquire_local_advisory_lock(local_key)
+        if local_lock is None:
+            raise BlockingIOError(
+                errno.EWOULDBLOCK,
+                "output transaction is already active",
+            )
+        created = False
+        try:
+            try:
+                descriptor = self._directory.open_new_publication_fd(name)
+                created = True
+            except FileExistsError:
+                before = self._directory.publication_lstat(name)
+                if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+                    raise _unsafe_error("output transaction lock is redirected")
+                descriptor = self._directory.open_publication_read_write(name)
+                opened = os.fstat(descriptor)
+                after_open = self._directory.publication_lstat(name)
+                if not (
+                    _directory_identity(before)
+                    == _directory_identity(opened)
+                    == _directory_identity(after_open)
+                ):
+                    raise _unsafe_error("output transaction lock changed while opened")
+
+            adapter = _SystemAdvisoryFileLock()
+            if not adapter.acquire_nonblocking(descriptor):
+                held = AdvisoryFileLock(
+                    name,
+                    descriptor,
+                    adapter,
+                    local_key,
+                    local_lock,
+                    locked=False,
+                )
+                descriptor = None
+                raise BlockingIOError(
+                    errno.EWOULDBLOCK,
+                    "output transaction is already active",
+                )
+            held = AdvisoryFileLock(
+                name,
+                descriptor,
+                adapter,
+                local_key,
+                local_lock,
+            )
+            descriptor = None
+            locked_descriptor = held._descriptor
+            if locked_descriptor is None:
+                raise RuntimeError(
+                    "acquired output-transaction lock lost its descriptor"
+                )
+            locked_info = os.fstat(locked_descriptor)
+            if locked_info.st_size == 0:
+                os.ftruncate(locked_descriptor, 1)
+                os.fsync(locked_descriptor)
+            current = self._directory.publication_lstat(name)
+            if (
+                stat.S_ISLNK(current.st_mode)
+                or not stat.S_ISREG(current.st_mode)
+                or _directory_identity(current)
+                != _directory_identity(os.fstat(locked_descriptor))
+            ):
+                raise _unsafe_error("output transaction lock changed while acquired")
+            if created:
+                self._directory.fsync()
+            self.assert_still_bound()
+            return held
+        except BaseException as error:
+            if held is not None:
+                held.close(error)
+            elif descriptor is not None:
+                cleanup = AdvisoryFileLock(
+                    name,
+                    descriptor,
+                    _SystemAdvisoryFileLock(),
+                    local_key,
+                    local_lock,
+                    locked=False,
+                )
+                descriptor = None
+                cleanup.close(error)
+                held = cleanup
+            if held is None:
+                _release_local_advisory_lock(local_key, local_lock)
+            raise
 
     def link_parent_file(self, source: str, destination: str) -> bool:
         _validate_component(source)
@@ -3865,9 +4107,33 @@ def _same_lexical_path(left: Path, right: Path) -> bool:
 
 _promotion_locks_guard = Lock()
 _promotion_locks: dict[str, RLock] = {}
+_advisory_locks_guard = Lock()
+_advisory_locks: dict[str, Lock] = {}
 _deferred_bound_directory_closes_guard = RLock()
 _deferred_bound_directory_closes: list[_BoundDirectory] = []
 _ATTACHED_BOUND_DIRECTORY_CLOSES = "_rembggui_bound_directory_close_owners"
+
+
+def _acquire_local_advisory_lock(key: str) -> Lock | None:
+    with _advisory_locks_guard:
+        lock = _advisory_locks.setdefault(key, Lock())
+        if not lock.acquire(blocking=False):
+            return None
+        return lock
+
+
+def _release_local_advisory_lock(key: str, lock: Lock) -> None:
+    with _advisory_locks_guard:
+        lock.release()
+        if _advisory_locks.get(key) is lock:
+            del _advisory_locks[key]
+
+
+def _attach_close_owner(primary: BaseException, owner: Any) -> None:
+    attached = list(getattr(primary, _ATTACHED_BOUND_DIRECTORY_CLOSES, ()))
+    if owner not in attached:
+        attached.append(owner)
+        setattr(primary, _ATTACHED_BOUND_DIRECTORY_CLOSES, tuple(attached))
 
 
 def _promotion_lock(key: str) -> RLock:

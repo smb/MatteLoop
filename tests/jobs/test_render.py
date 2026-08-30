@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import gc
+import multiprocessing
 import os
 import stat
 from dataclasses import replace
@@ -71,6 +72,248 @@ def test_candidate_path_is_owned_by_the_explicit_private_work_directory(
     assert not tuple(output.parent.glob("*.candidate"))
     with pytest.raises(ValueError, match="job-owned"):
         publisher.candidate_path(output, "different-job", work_dir)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses fork to exercise process locking")
+@pytest.mark.parametrize(
+    "policy", [CollisionPolicy.REPLACE, CollisionPolicy.CHOOSE_ANOTHER_NAME]
+)
+def test_same_target_process_cannot_replace_live_publication_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    policy: CollisionPolicy,
+) -> None:
+    publisher = AtomicOutputPublisher()
+    target = tmp_path / "output.webp"
+    if policy is CollisionPolicy.REPLACE:
+        target.write_bytes(b"old-output")
+    candidate_a = _validated_candidate(publisher, target, tmp_path, "process-a")
+    candidate_b = _validated_candidate(publisher, target, tmp_path, "process-b")
+    candidate_a_bytes = candidate_a.path.read_bytes()
+    context = multiprocessing.get_context("fork")
+    stage_ready = context.Event()
+    release_stage = context.Event()
+    result = context.Queue()
+    test_process = os.getpid()
+    actual_prepare = render_module._prepare_publication_stage
+
+    def pause_process_a_after_stage(candidate, publication, destination, transaction):
+        staged = actual_prepare(candidate, publication, destination, transaction)
+        if os.getpid() != test_process:
+            stage_ready.set()
+            if not release_stage.wait(10):
+                raise RuntimeError("test did not release publication stage")
+        return staged
+
+    monkeypatch.setattr(
+        render_module,
+        "_prepare_publication_stage",
+        pause_process_a_after_stage,
+    )
+
+    def publish_a() -> None:
+        try:
+            publisher.publish(candidate_a, target, policy)
+        except BaseException as error:
+            result.put((type(error).__name__, str(error)))
+        else:
+            result.put(("ok", ""))
+        finally:
+            candidate_a.close()
+
+    process = context.Process(target=publish_a)
+    process.start()
+    try:
+        assert stage_ready.wait(10)
+        private_stages = tuple(
+            path
+            for path in (tmp_path / ".rembggui-publish").glob("*.publish")
+            if not path.name.startswith(".")
+        )
+        assert len(private_stages) == 1
+        live_stage = private_stages[0]
+        live_identity = live_stage.stat().st_dev, live_stage.stat().st_ino
+
+        with pytest.raises(AppError) as exc:
+            publisher.publish(candidate_b, target, policy)
+
+        assert exc.value.code is ErrorCode.INVALID_OUTPUT
+        assert exc.value.stage == "output"
+        assert exc.value.retry_action == "retry-output"
+        assert (live_stage.stat().st_dev, live_stage.stat().st_ino) == live_identity
+        assert live_stage.read_bytes() == candidate_a_bytes
+    finally:
+        release_stage.set()
+        process.join(15)
+        candidate_a.close()
+        candidate_b.close()
+
+    assert process.exitcode == 0
+    assert result.get(timeout=2) == ("ok", "")
+    assert target.read_bytes() == candidate_a_bytes
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses fork to exercise process locking")
+def test_same_target_process_cannot_replace_live_recovery_shadow_pending(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publisher = AtomicOutputPublisher()
+    target = tmp_path / "output.webp"
+    old_bytes = b"old-output"
+    target.write_bytes(old_bytes)
+    candidate_a = _validated_candidate(publisher, target, tmp_path, "shadow-a")
+    candidate_b = _validated_candidate(publisher, target, tmp_path, "shadow-b")
+    candidate_a_bytes = candidate_a.path.read_bytes()
+    context = multiprocessing.get_context("fork")
+    pending_ready = context.Event()
+    release_pending = context.Event()
+    result = context.Queue()
+    test_process = os.getpid()
+    actual_replace = render_module.RecoveryDirectory.replace
+
+    def pause_process_a_shadow_pending(self, source, destination):
+        if os.getpid() != test_process and destination.endswith(".recovery-shadow"):
+            pending_ready.set()
+            if not release_pending.wait(10):
+                raise RuntimeError("test did not release recovery shadow")
+        return actual_replace(self, source, destination)
+
+    monkeypatch.setattr(
+        render_module.RecoveryDirectory,
+        "replace",
+        pause_process_a_shadow_pending,
+    )
+
+    def publish_a() -> None:
+        try:
+            publisher.publish(candidate_a, target, CollisionPolicy.REPLACE)
+        except BaseException as error:
+            result.put((type(error).__name__, str(error)))
+        else:
+            result.put(("ok", ""))
+        finally:
+            candidate_a.close()
+
+    process = context.Process(target=publish_a)
+    process.start()
+    try:
+        assert pending_ready.wait(10)
+        pending_files = tuple(
+            (tmp_path / ".rembggui-recovery").glob(".*.recovery-shadow-pending")
+        )
+        assert len(pending_files) == 1
+        pending = pending_files[0]
+        pending_identity = pending.stat().st_dev, pending.stat().st_ino
+
+        with pytest.raises(AppError) as exc:
+            publisher.publish(candidate_b, target, CollisionPolicy.REPLACE)
+
+        assert exc.value.code is ErrorCode.INVALID_OUTPUT
+        assert exc.value.stage == "output"
+        assert exc.value.retry_action == "retry-output"
+        assert (pending.stat().st_dev, pending.stat().st_ino) == pending_identity
+        assert pending.read_bytes() == old_bytes
+    finally:
+        release_pending.set()
+        process.join(15)
+        candidate_a.close()
+        candidate_b.close()
+
+    assert process.exitcode == 0
+    assert result.get(timeout=2) == ("ok", "")
+    assert target.read_bytes() == candidate_a_bytes
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses fork to exercise process locking")
+def test_same_target_process_cannot_replace_live_rollback_restore_pending(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publisher = AtomicOutputPublisher()
+    target = tmp_path / "output.webp"
+    old_bytes = b"old-output"
+    target.write_bytes(old_bytes)
+    candidate_a = _validated_candidate(publisher, target, tmp_path, "rollback-a")
+    candidate_b = _validated_candidate(publisher, target, tmp_path, "rollback-b")
+    context = multiprocessing.get_context("fork")
+    pending_ready = context.Event()
+    release_pending = context.Event()
+    result = context.Queue()
+    test_process = os.getpid()
+    child_verifications = 0
+    actual_published_matches = render_module._published_file_matches
+    actual_stage_copy = render_module._stage_bound_recovery_copy
+
+    def fail_process_a_commit_verification_once(*args, **kwargs):
+        nonlocal child_verifications
+        if os.getpid() != test_process and child_verifications == 0:
+            child_verifications += 1
+            return False
+        return actual_published_matches(*args, **kwargs)
+
+    def pause_process_a_restore_pending(
+        directory, name, source, expected_size, expected_sha256
+    ):
+        staged = actual_stage_copy(
+            directory, name, source, expected_size, expected_sha256
+        )
+        if os.getpid() != test_process and ".restore-" in name:
+            pending_ready.set()
+            if not release_pending.wait(10):
+                raise RuntimeError("test did not release rollback restore")
+        return staged
+
+    monkeypatch.setattr(
+        render_module,
+        "_published_file_matches",
+        fail_process_a_commit_verification_once,
+    )
+    monkeypatch.setattr(
+        render_module,
+        "_stage_bound_recovery_copy",
+        pause_process_a_restore_pending,
+    )
+
+    def publish_a() -> None:
+        try:
+            publisher.publish(candidate_a, target, CollisionPolicy.REPLACE)
+        except AppError as error:
+            result.put(("app-error", error.code.value, error.stage))
+        except BaseException as error:
+            result.put((type(error).__name__, str(error), ""))
+        else:
+            result.put(("ok", "", ""))
+        finally:
+            candidate_a.close()
+
+    process = context.Process(target=publish_a)
+    process.start()
+    try:
+        assert pending_ready.wait(10)
+        restore_files = tuple((tmp_path / ".rembggui-recovery").glob(".*.restore-0"))
+        assert len(restore_files) == 1
+        restore = restore_files[0]
+        restore_identity = restore.stat().st_dev, restore.stat().st_ino
+
+        with pytest.raises(AppError) as exc:
+            publisher.publish(candidate_b, target, CollisionPolicy.REPLACE)
+
+        assert exc.value.code is ErrorCode.INVALID_OUTPUT
+        assert exc.value.stage == "output"
+        assert exc.value.retry_action == "retry-output"
+        assert (restore.stat().st_dev, restore.stat().st_ino) == restore_identity
+        assert restore.read_bytes() == old_bytes
+    finally:
+        release_pending.set()
+        process.join(15)
+        candidate_a.close()
+        candidate_b.close()
+
+    assert process.exitcode == 0
+    child_result = result.get(timeout=2)
+    assert child_result[0] == "app-error"
+    assert target.read_bytes() == old_bytes
 
 
 def test_render_samples_half_open_range_and_uses_private_encoder_inputs(
@@ -177,6 +420,46 @@ def test_publisher_maps_native_workspace_errors_to_output_boundary(
     assert exc.value.code is ErrorCode.INVALID_OUTPUT
     assert exc.value.stage == "output"
     assert target.read_bytes() == old_bytes
+
+
+def test_busy_output_transaction_transfers_retryable_lock_close_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RetryOwner:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    owner = RetryOwner()
+    busy = BlockingIOError(errno.EWOULDBLOCK, "synthetic output contention")
+    setattr(busy, "_rembggui_bound_directory_close_owners", (owner,))
+    publisher = AtomicOutputPublisher()
+    target = tmp_path / "output.webp"
+    candidate = _validated_candidate(publisher, target, tmp_path, "busy-owner")
+
+    def fail_lock(_self, _name: str):
+        raise busy
+
+    monkeypatch.setattr(
+        render_module.RecoveryDirectory,
+        "acquire_advisory_lock",
+        fail_lock,
+    )
+
+    try:
+        with pytest.raises(AppError) as exc:
+            publisher.publish(candidate, target, CollisionPolicy.REPLACE)
+    finally:
+        candidate.close()
+
+    assert exc.value.code is ErrorCode.INVALID_OUTPUT
+    assert exc.value.stage == "output"
+    assert getattr(exc.value, "_rembggui_bound_directory_close_owners") == (owner,)
+    assert not owner.closed
+    assert workspace_module._drain_attached_bound_directory_closes(exc.value) == 1
+    assert owner.closed
 
 
 def test_successful_commit_surfaces_retryable_publication_close_owner(

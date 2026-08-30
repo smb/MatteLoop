@@ -291,6 +291,39 @@ rollback then restores the original directory without touching the foreign
 replacement. Unsafe private-output namespaces are translated at the public
 publisher boundary to `INVALID_OUTPUT` / `output` with `retry-output`.
 
+A release-hardening follow-up reproduced a cooperative cross-process race that
+the descriptor binding alone did not serialize. Publication, recovery,
+recovery-shadow, and rollback-restore files deliberately use fixed bounded
+names; without a transaction lock, a second render for the same destination
+could enter `open_fixed_pending()`, unlink the first render's still-live pending
+inode, and replace its installed publication stage. The final target's identity
+checks prevented false success, but the second job still mutated another live
+transaction and could force it to fail.
+
+The publisher now acquires one destination-scoped lock before the first private
+stage or durable-recovery mutation and releases it only after publication,
+rollback, staged-file inspection, and recovery cleanup. The lock is a fixed
+`<target-key>.transaction.lock` regular file inside the handle-bound, mode-0700
+`.rembggui-publish` directory. It is opened no-follow and identity-checked,
+locked non-blockingly with `flock(LOCK_EX|LOCK_NB)` on POSIX or the Windows CRT
+one-byte non-blocking file-lock contract, and never unlinked. Process death
+therefore releases ownership in the kernel while leaving only one harmless,
+reusable bounded name. A short-lived per-target in-process guard also covers a
+platform whose native byte-range lock permits same-process re-entry; its map
+entry is removed on release. Different destination names use different lock
+entries and do not serialize globally. Contention is returned before snapshot,
+recovery, publication-stage, shadow, or restore mutation as structured
+`INVALID_OUTPUT` / `output` with `retry-output`.
+
+The regression tests pause an actual forked publisher with a live fixed entry,
+then run an independent contender against the same target. They cover REPLACE,
+native no-clobber, recovery-shadow pending, and rollback-restore pending. In
+each case the contender fails busy without changing the held inode or bytes and
+the owning transaction subsequently completes or restores the old output. The
+workspace tests additionally prove stale-name reuse after abrupt owner exit,
+independent target locks, the in-process guard under a deliberately re-entrant
+platform adapter, and the Windows non-blocking lock/unlock call contract.
+
 ## Architecture and safety decisions
 
 - `cut_cache_key_inputs()` is the only authoritative cut-input mapping. The
@@ -331,11 +364,15 @@ publisher boundary to `INVALID_OUTPUT` / `output` with `retry-output`.
 
 ## Verification
 
-- `.venv/bin/pytest -q` — **967 passed in 49.70s** outside the restricted
-  shared-memory sandbox.
+- `.venv/bin/pytest -q` — **977 passed in 50.34s** outside the restricted
+  shared-memory sandbox. The five warnings are Python 3.13's macOS warning for
+  the deliberately forked cross-process lock repros in an already
+  multi-threaded pytest process; no test failed or hung.
 - Focused WebP, render, Rebuild, workspace, and native Windows cache-filesystem
-  contract gate — **288 passed in 37.06s**, including parent-namespace swaps, durable sync
-  ordering, retry-owner retention, and bidirectional Windows-sharing fakes.
+  contract gate — **298 passed in 37.32s**, including same-target process
+  serialization, crash-released stale-lock reuse, parent-namespace swaps,
+  durable sync ordering, retry-owner retention, and bidirectional
+  Windows-sharing fakes.
 - `ruff check .` — passed.
 - `ruff format --check` over all 7 changed Python files — passed.
 - `mypy src` — passed for 29 source files.
