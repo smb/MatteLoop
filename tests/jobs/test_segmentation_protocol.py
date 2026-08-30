@@ -14,6 +14,7 @@ import pytest
 import rembggui.app as app_module
 import rembggui.jobs.segmentation_host as segmentation_host_module
 from rembggui.core.errors import AppError, ErrorCode
+from rembggui.core.specs import MAX_ALPHA_MATTING_ERODE_SIZE
 from rembggui.jobs.protocol import (
     CONTROL_JOB_ID,
     MAX_PROTOCOL_MESSAGE_BYTES,
@@ -143,6 +144,8 @@ def test_protocol_dataclasses_are_frozen_and_round_trip_through_byte_codec() -> 
         b'{"type":"segment_request","protocol_version":2,"job_id":"j1","request_id":"r1","slot":{"name":"s","shape":[1,1,3],"dtype":"uint8","byte_length":3},"options":{"edge_mode":"provider","alpha_matting_foreground_threshold":240,"alpha_matting_background_threshold":10,"alpha_matting_erode_size":10}}',
         b'{"type":"segment_request","protocol_version":2,"job_id":"j1","request_id":"r1","slot":{"name":"s","shape":[1,1,3],"dtype":"uint8","byte_length":3},"options":{"edge_mode":"alpha_matting","alpha_matting_foreground_threshold":10,"alpha_matting_background_threshold":10,"alpha_matting_erode_size":10}}',
         b'{"type":"segment_request","protocol_version":2,"job_id":"j1","request_id":"r1","slot":{"name":"s","shape":[1,1,3],"dtype":"uint8","byte_length":3},"options":{"edge_mode":"alpha_matting","alpha_matting_foreground_threshold":240,"alpha_matting_background_threshold":10,"alpha_matting_erode_size":true}}',
+        b'{"type":"segment_request","protocol_version":2,"job_id":"j1","request_id":"r1","slot":{"name":"s","shape":[1,1,3],"dtype":"uint8","byte_length":3},"options":{"edge_mode":"alpha_matting","alpha_matting_foreground_threshold":240,"alpha_matting_background_threshold":10,"alpha_matting_erode_size":256}}',
+        b'{"type":"segment_request","protocol_version":2,"job_id":"j1","request_id":"r1","slot":{"name":"s","shape":[1,1,3],"dtype":"uint8","byte_length":3},"options":{"edge_mode":"alpha_matting","alpha_matting_foreground_threshold":240,"alpha_matting_background_threshold":10,"alpha_matting_erode_size":9223372036854775808}}',
     ],
 )
 def test_segment_options_reject_unknown_modes_and_invalid_matting_at_wire_boundary(
@@ -150,6 +153,48 @@ def test_segment_options_reject_unknown_modes_and_invalid_matting_at_wire_bounda
 ) -> None:
     with pytest.raises(ProtocolCodecError):
         decode_parent_message(payload)
+
+
+@pytest.mark.parametrize("erode_size", [0, 10, MAX_ALPHA_MATTING_ERODE_SIZE])
+def test_segment_options_accept_bounded_erosion(erode_size: int) -> None:
+    assert (
+        SegmentOptions(alpha_matting_erode_size=erode_size).alpha_matting_erode_size
+        == erode_size
+    )
+
+
+@pytest.mark.parametrize(
+    "erode_size",
+    [MAX_ALPHA_MATTING_ERODE_SIZE + 1, 2**63, True],
+)
+def test_segment_options_constructor_rejects_unsafe_erosion(
+    erode_size: object,
+) -> None:
+    with pytest.raises(ProtocolCodecError):
+        SegmentOptions(alpha_matting_erode_size=erode_size)  # type: ignore[arg-type]
+
+
+def test_child_rejects_forged_unsafe_erosion_before_rembg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remove_called = False
+
+    def remove(*_args: object, **_kwargs: object) -> np.ndarray:
+        nonlocal remove_called
+        remove_called = True
+        raise AssertionError("unsafe erosion reached rembg")
+
+    forged = object.__new__(SegmentOptions)
+    object.__setattr__(forged, "edge_mode", "alpha_matting")
+    object.__setattr__(forged, "alpha_matting_foreground_threshold", 240)
+    object.__setattr__(forged, "alpha_matting_background_threshold", 10)
+    object.__setattr__(forged, "alpha_matting_erode_size", 2**63)
+    monkeypatch.setitem(sys.modules, "rembg", SimpleNamespace(remove=remove))
+
+    with pytest.raises(ProtocolCodecError):
+        _run_rembg(red_frame(), object(), forged)
+
+    assert not remove_called
 
 
 @pytest.mark.parametrize(

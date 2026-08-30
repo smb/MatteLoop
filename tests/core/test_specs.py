@@ -11,6 +11,7 @@ import pytest
 import rembggui.core.specs as core_specs
 from rembggui.core.errors import ErrorCode, ValidationError
 from rembggui.core.specs import (
+    MAX_ALPHA_MATTING_ERODE_SIZE,
     AlphaMattingSpec,
     CollisionPolicy,
     CropSpec,
@@ -166,6 +167,11 @@ def test_alpha_matting_defaults_match_the_pinned_rembg_api() -> None:
         matting.foreground_threshold = 200  # type: ignore[misc]
 
 
+@pytest.mark.parametrize("erode_size", [0, 10, MAX_ALPHA_MATTING_ERODE_SIZE])
+def test_alpha_matting_accepts_bounded_erosion(erode_size: int) -> None:
+    assert AlphaMattingSpec(erode_size=erode_size).erode_size == erode_size
+
+
 @pytest.mark.parametrize(
     "values",
     [
@@ -175,6 +181,8 @@ def test_alpha_matting_defaults_match_the_pinned_rembg_api() -> None:
         (240, 256, 10),
         (10, 10, 10),
         (240, 10, -1),
+        (240, 10, MAX_ALPHA_MATTING_ERODE_SIZE + 1),
+        (240, 10, 2**63),
         (240, 10, True),
     ],
 )

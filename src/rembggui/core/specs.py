@@ -21,6 +21,10 @@ _MIB_BYTES = Decimal(1024 * 1024)
 _SUPPORTED_SOURCE_SUFFIXES = frozenset({".mp4", ".mov", ".webm", ".mkv"})
 _URI_PATH_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*):[\\/]")
 
+# rembg forwards this value to OpenCV morphology. Bound its kernel input at
+# every public/process boundary before allocating or entering native code.
+MAX_ALPHA_MATTING_ERODE_SIZE = 255
+
 
 class EdgeMode(StrEnum):
     STANDARD = "standard"
@@ -171,13 +175,14 @@ class AlphaMattingSpec:
             not 1 <= self.foreground_threshold <= 255
             or not 0 <= self.background_threshold <= 255
             or self.background_threshold >= self.foreground_threshold
-            or self.erode_size < 0
+            or not 0 <= self.erode_size <= MAX_ALPHA_MATTING_ERODE_SIZE
         ):
             raise ValidationError(
                 ErrorCode.INVALID_SEGMENTATION,
                 "segmentation",
                 "alpha matting requires 0 <= background < foreground <= 255 "
-                "and non-negative erosion",
+                "and erosion between 0 and "
+                f"{MAX_ALPHA_MATTING_ERODE_SIZE}",
             )
 
 

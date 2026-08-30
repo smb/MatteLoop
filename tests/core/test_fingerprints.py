@@ -18,10 +18,12 @@ from rembggui.core.fingerprints import (
     complete_source_sha256,
     cut_cache_key,
     cut_cache_key_inputs,
-    preview_fingerprint,
     provisional_source_fingerprint,
     render_fingerprint,
     union_fingerprint,
+)
+from rembggui.core.fingerprints import (
+    preview_fingerprint as _preview_fingerprint,
 )
 from rembggui.core.specs import (
     AlphaMattingSpec,
@@ -37,6 +39,20 @@ from rembggui.core.specs import (
 
 SOURCE_SHA = "01" * 32
 MODEL_SHA = "ab" * 32
+
+
+def preview_fingerprint(
+    request: RenderRequest,
+    playhead: Fraction,
+    **identities: object,
+) -> str:
+    """Call the public preview identity with one explicit prepared binding."""
+    identities.setdefault("model_weight_sha256", MODEL_SHA)
+    return _preview_fingerprint(
+        request,
+        playhead,
+        **identities,  # type: ignore[arg-type]
+    )
 
 
 def request_a(tmp_path: Path) -> RenderRequest:
@@ -573,6 +589,82 @@ def test_preview_identity_tracks_playhead_and_matting_values(tmp_path: Path) -> 
     assert baseline != preview_fingerprint(
         changed_matting, Fraction(1, 5), source_fingerprint=source_identity
     )
+
+
+def test_preview_identity_tracks_weight_runtime_and_pipeline_versions(
+    tmp_path: Path,
+) -> None:
+    request = request_a(tmp_path)
+    baseline = preview_fingerprint(
+        request,
+        Fraction(1, 5),
+        source_fingerprint=SOURCE_SHA,
+        model_weight_sha256=MODEL_SHA,
+        rembg_version="2.0.72",
+        pipeline_schema_version="pipeline-v1",
+    )
+
+    assert baseline == preview_fingerprint(
+        request,
+        Fraction(1, 5),
+        source_fingerprint=SOURCE_SHA,
+        model_weight_sha256=MODEL_SHA,
+        rembg_version="2.0.72",
+        pipeline_schema_version="pipeline-v1",
+    )
+    assert baseline != preview_fingerprint(
+        request,
+        Fraction(1, 5),
+        source_fingerprint=SOURCE_SHA,
+        model_weight_sha256="ac" * 32,
+        rembg_version="2.0.72",
+        pipeline_schema_version="pipeline-v1",
+    )
+    assert baseline != preview_fingerprint(
+        request,
+        Fraction(1, 5),
+        source_fingerprint=SOURCE_SHA,
+        model_weight_sha256=MODEL_SHA,
+        rembg_version="2.0.73",
+        pipeline_schema_version="pipeline-v1",
+    )
+    assert baseline != preview_fingerprint(
+        request,
+        Fraction(1, 5),
+        source_fingerprint=SOURCE_SHA,
+        model_weight_sha256=MODEL_SHA,
+        rembg_version="2.0.72",
+        pipeline_schema_version="pipeline-v2",
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("model_weight_sha256", "not-a-sha"),
+        ("rembg_version", ""),
+        ("pipeline_schema_version", 1),
+    ],
+)
+def test_preview_identity_rejects_malformed_prepared_identities(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    identities: dict[str, object] = {
+        "model_weight_sha256": MODEL_SHA,
+        "rembg_version": "2.0.72",
+        "pipeline_schema_version": "pipeline-v1",
+    }
+    identities[field] = value
+
+    with pytest.raises(ValidationError) as exc:
+        preview_fingerprint(
+            request_a(tmp_path),
+            Fraction(1, 5),
+            source_fingerprint=SOURCE_SHA,
+            **identities,  # type: ignore[arg-type]
+        )
+
+    assert exc.value.code is ErrorCode.INVALID_RENDER_REQUEST
 
 
 def test_cut_key_is_built_from_the_public_frozen_inputs(tmp_path: Path) -> None:

@@ -62,6 +62,37 @@ notes, while the second is attached to the primary exception. The primary
 publication/write outcome is never replaced. Final service GREEN was 40 passed;
 the subsequent full suite was 888 passed.
 
+An independent boundary review then drove a second strict RED/GREEN hardening
+round. Six deterministic public reproductions established the gaps before any
+implementation change:
+
+- identical Preview fingerprints for distinct prepared model-weight SHA/runtime
+  bindings;
+- cross-output Rebuild snapshots leaked under the cut workspace's scratch root;
+- a candidate-path swap after WebP validation could publish attacker bytes under
+  both replace and no-clobber policies;
+- auto-fit snapshot/resize loops copied all frames after cancellation was
+  requested on the first frame;
+- unbounded alpha-matting erosion reached the native/provider boundary; and
+- Rebuild falsely reported requested sample times as decoded VFR PTS.
+
+The corresponding GREEN contracts now bind Preview to every content-affecting
+prepared identity, track and deduplicate every actual scratch owner, acknowledge
+cancellation per auto-fit frame/copy/resize, enforce a public 255 erosion maximum
+at domain/wire/child boundaries, and report Rebuild `actual_pts=None` honestly.
+The encoder now returns an immutable, non-publicly-constructible
+`ValidatedCandidate`: WebP validation runs through a private hard link proven to
+name a held file descriptor, with stable file identity, byte size, and SHA-256.
+Publication rechecks that descriptor immediately before commit and verifies the
+final entry afterward. Replace publication keeps an fsynced sibling rollback
+copy and atomically restores it on identity/content mismatch; no-clobber removes
+the link it created on mismatch. Candidate handles remain held through the
+commit decision and are closed before failure cleanup, including Windows handles
+opened with read/write/delete sharing.
+
+The hardened changed-contract batch is **493 passed**; the final repository-wide
+suite is **913 passed**.
+
 ## Architecture and safety decisions
 
 - `cut_cache_key_inputs()` is the only authoritative cut-input mapping. The
@@ -86,11 +117,12 @@ the subsequent full suite was 888 passed.
 - At most one private cut and one framed image are live during the second pass.
   The ownership tracker also follows encoder validation and auto-fit resizes;
   production integration records peak at most three and current zero.
-- The encoder never receives the final path. `REPLACE` uses atomic replacement;
-  `CHOOSE_ANOTHER_NAME` and `CANCEL` use atomic hard-link no-clobber publication
-  or fail structurally where that portable primitive is unavailable. Actual
-  disk-full, quota, permission, read-only, and publication failures preserve the
-  prior output byte-for-byte.
+- The encoder never receives the final path. It returns only a descriptor-bound,
+  SHA-verified `ValidatedCandidate`. `REPLACE` uses atomic replacement followed
+  by descriptor/byte verification and atomic rollback; `CHOOSE_ANOTHER_NAME`
+  and `CANCEL` use atomic hard-link no-clobber publication followed by the same
+  verification. Actual disk-full, quota, permission, read-only, candidate-swap,
+  collision, and publication failures preserve the prior output byte-for-byte.
 - `JobContext.commit_if_not_cancelled()` serializes cancellation against the
   one final publish linearization. Artifact identity and cleanup complete before
   that commit, and there is no cancellation checkpoint afterward. Cleanup errors
@@ -98,12 +130,12 @@ the subsequent full suite was 888 passed.
 
 ## Verification
 
-- `uv run pytest -q` — **888 passed in 45.95s** outside the restricted
+- `uv run pytest -q` — **913 passed in 48.25s** outside the restricted
   shared-memory sandbox.
-- All changed contract and orchestration suites before the final audit —
-  **439 passed in 43.09s**; final orchestration suite — **40 passed in 1.06s**.
+- Hardened changed contract and orchestration suites — **493 passed in 44.85s**;
+  focused Publisher and service gates — **10 passed** and **45 passed**.
 - `uv run ruff check .` — passed.
-- `uv run ruff format --check` over all 22 changed Python files — passed.
+- `uv run ruff format --check` over all 14 fix-round Python files — passed.
 - `uv run mypy src` — passed for 29 source files.
 - `git diff --check` — passed.
 

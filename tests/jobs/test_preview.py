@@ -72,6 +72,47 @@ def test_preview_matches_render_cut_before_global_framing(tmp_path) -> None:
         assert preview.pre_global_trim_rgba.tobytes() == cut.tobytes()
 
 
+def test_preview_fingerprint_tracks_the_prepared_model_weight(tmp_path) -> None:
+    request_with_same_user_settings = request(tmp_path)
+    source = FakeSource()
+
+    first = PreviewService(
+        source=source,
+        segmentation=PreparedSegmentation(
+            FakeSegmenter(),
+            "birefnet-portrait",
+            "ab" * 32,
+            "2.0.72",
+            frozenset({"standard"}),
+        ),
+        workspace=FilesystemWorkspacePort(),
+        clock=FakeClock(),
+    ).preview(
+        request_with_same_user_settings,
+        Fraction(0),
+        job(tmp_path, "weight-a", JobKind.PREVIEW),
+    )
+    second = PreviewService(
+        source=source,
+        segmentation=PreparedSegmentation(
+            FakeSegmenter(),
+            "birefnet-portrait",
+            "cd" * 32,
+            "2.0.72",
+            frozenset({"standard"}),
+        ),
+        workspace=FilesystemWorkspacePort(),
+        clock=FakeClock(),
+    ).preview(
+        request_with_same_user_settings,
+        Fraction(0),
+        job(tmp_path, "weight-b", JobKind.PREVIEW),
+    )
+
+    assert first.pre_global_trim_rgba == second.pre_global_trim_rgba
+    assert first.fingerprint != second.fingerprint
+
+
 def test_preview_reports_requested_and_vfr_actual_pts_outside_export_range(
     tmp_path,
 ) -> None:

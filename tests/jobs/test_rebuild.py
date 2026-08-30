@@ -71,6 +71,8 @@ def test_rebuild_never_probes_hashes_decodes_or_segments_source(tmp_path) -> Non
 
     assert len(segmenter.calls) == calls_before
     assert artifact.frame_count == original.frame_count
+    assert original.actual_pts == original.requested_timestamps
+    assert artifact.actual_pts is None
     assert all(
         "scratch/rebuild-only" in path.as_posix()
         for path in rebuild_encoder.calls[0][0]
@@ -284,3 +286,81 @@ def test_rebuild_low_disk_estimate_is_advisory(tmp_path) -> None:
     )
 
     assert any("advisory disk estimate" in note for note in artifact.notes)
+
+
+def test_cross_output_rebuild_cleans_the_actual_snapshot_owner(tmp_path) -> None:
+    cuts_output = tmp_path / "cuts-output"
+    rebuilt_output = tmp_path / "rebuilt-output"
+    cuts_output.mkdir()
+    rebuilt_output.mkdir()
+    original_request = request(cuts_output)
+    original = render_service().render(
+        original_request, job(tmp_path, "seed-cross-output", JobKind.RENDER)
+    )
+    rebuild_request = replace(
+        original_request,
+        rebuild=True,
+        output=replace(original_request.output, directory=rebuilt_output),
+    )
+
+    artifact = render_service(source=ExplodingSource()).rebuild(
+        rebuild_request,
+        original.cut_workspace,
+        job(tmp_path, "cross-output-success", JobKind.REBUILD),
+    )
+
+    assert artifact.output_path.parent == rebuilt_output
+    assert original.cut_workspace.path.is_dir()
+    assert not (
+        cuts_output / ".rembggui-work" / "scratch" / "cross-output-success"
+    ).exists()
+    assert not (
+        rebuilt_output / ".rembggui-work" / "scratch" / "cross-output-success"
+    ).exists()
+
+
+def test_cross_output_rebuild_failure_cleans_snapshot_and_preserves_state(
+    tmp_path,
+) -> None:
+    cuts_output = tmp_path / "cuts-output"
+    rebuilt_output = tmp_path / "rebuilt-output"
+    cuts_output.mkdir()
+    rebuilt_output.mkdir()
+    original_request = request(cuts_output)
+    original = render_service().render(
+        original_request, job(tmp_path, "seed-cross-failure", JobKind.RENDER)
+    )
+    rebuild_request = replace(
+        original_request,
+        rebuild=True,
+        output=replace(original_request.output, directory=rebuilt_output),
+    )
+    rebuild_request.output.path.write_bytes(b"old-output")
+
+    class FailingEncoder(FakeEncoder):
+        def encode(self, frame_paths, delays_ms, destination, **kwargs):
+            del frame_paths, delays_ms, kwargs
+            destination.write_bytes(b"unpublished")
+            raise AppError(
+                ErrorCode.INVALID_OUTPUT,
+                "encode",
+                "error.output.failed",
+                "synthetic cross-output encode failure",
+                "retry-output",
+            )
+
+    with pytest.raises(AppError):
+        render_service(source=ExplodingSource(), encoder=FailingEncoder()).rebuild(
+            rebuild_request,
+            original.cut_workspace,
+            job(tmp_path, "cross-output-failure", JobKind.REBUILD),
+        )
+
+    assert rebuild_request.output.path.read_bytes() == b"old-output"
+    assert original.cut_workspace.path.is_dir()
+    assert not (
+        cuts_output / ".rembggui-work" / "scratch" / "cross-output-failure"
+    ).exists()
+    assert not (
+        rebuilt_output / ".rembggui-work" / "scratch" / "cross-output-failure"
+    ).exists()

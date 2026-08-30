@@ -6,6 +6,8 @@ import json
 from dataclasses import dataclass, field
 from typing import NoReturn
 
+from rembggui.core.specs import MAX_ALPHA_MATTING_ERODE_SIZE
+
 PROTOCOL_VERSION = 2
 CONTROL_JOB_ID = "__control__"
 MAX_PROTOCOL_MESSAGE_BYTES = 64 * 1024
@@ -33,6 +35,14 @@ class SegmentOptions:
     alpha_matting_foreground_threshold: int = 240
     alpha_matting_background_threshold: int = 10
     alpha_matting_erode_size: int = 10
+
+    def __post_init__(self) -> None:
+        _validate_segment_options_values(
+            self.edge_mode,
+            self.alpha_matting_foreground_threshold,
+            self.alpha_matting_background_threshold,
+            self.alpha_matting_erode_size,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,8 +274,7 @@ def _slot_payload(slot: SharedFrame) -> dict[str, object]:
 
 
 def _segment_options_payload(options: SegmentOptions) -> dict[str, object]:
-    if type(options) is not SegmentOptions:
-        _fail("segment options must be an exact SegmentOptions")
+    validate_segment_options(options)
     payload = {
         "edge_mode": options.edge_mode,
         "alpha_matting_foreground_threshold": (
@@ -295,10 +304,49 @@ def _decode_segment_options(payload: dict[str, object]) -> SegmentOptions:
         _fail("edge mode is not supported by the protocol")
     foreground = _strict_int(payload, "alpha_matting_foreground_threshold", minimum=1)
     background = _strict_int(payload, "alpha_matting_background_threshold", minimum=0)
-    erosion = _strict_int(payload, "alpha_matting_erode_size", minimum=0)
-    if foreground > 255 or background > 255 or background >= foreground:
-        _fail("alpha-matting thresholds are invalid")
+    erosion = _strict_int(
+        payload,
+        "alpha_matting_erode_size",
+        minimum=0,
+        maximum=MAX_ALPHA_MATTING_ERODE_SIZE,
+    )
     return SegmentOptions(edge_mode, foreground, background, erosion)
+
+
+def validate_segment_options(options: SegmentOptions) -> SegmentOptions:
+    """Reject forged or mutated options before entering provider/native code."""
+    if type(options) is not SegmentOptions:
+        _fail("segment options must be an exact SegmentOptions")
+    _validate_segment_options_values(
+        options.edge_mode,
+        options.alpha_matting_foreground_threshold,
+        options.alpha_matting_background_threshold,
+        options.alpha_matting_erode_size,
+    )
+    return options
+
+
+def _validate_segment_options_values(
+    edge_mode: object,
+    foreground: object,
+    background: object,
+    erosion: object,
+) -> None:
+    if type(edge_mode) is not str or edge_mode not in {
+        "standard",
+        "decontaminate",
+        "alpha_matting",
+    }:
+        _fail("edge mode is not supported by the protocol")
+    if (
+        type(foreground) is not int
+        or type(background) is not int
+        or type(erosion) is not int
+        or not 1 <= foreground <= 255
+        or not 0 <= background < foreground
+        or not 0 <= erosion <= MAX_ALPHA_MATTING_ERODE_SIZE
+    ):
+        _fail("alpha-matting thresholds or erosion are invalid")
 
 
 def _decode_slot(payload: dict[str, object]) -> SharedFrame:
@@ -421,10 +469,21 @@ def _exact_string(payload: dict[str, object], key: str, maximum: int) -> str:
     return value
 
 
-def _strict_int(payload: dict[str, object], key: str, *, minimum: int) -> int:
+def _strict_int(
+    payload: dict[str, object],
+    key: str,
+    *,
+    minimum: int,
+    maximum: int | None = None,
+) -> int:
     value = payload.get(key)
-    if type(value) is not int or value < minimum:
-        _fail(f"{key} must be an integer greater than or equal to {minimum}")
+    if (
+        type(value) is not int
+        or value < minimum
+        or (maximum is not None and value > maximum)
+    ):
+        suffix = f" and at most {maximum}" if maximum is not None else ""
+        _fail(f"{key} must be an integer greater than or equal to {minimum}{suffix}")
     return value
 
 

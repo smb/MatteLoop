@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import errno
 import gc
+import hashlib
+import importlib
 import os
 import shutil
 import stat
@@ -25,17 +27,18 @@ import tempfile
 import time
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 import numpy as np
 from PIL import Image
 
 from rembggui.core.errors import AppError, ErrorCode, ValidationError
 from rembggui.core.fingerprints import (
+    PIPELINE_SCHEMA_VERSION,
     REMBG_VERSION,
     complete_source_sha256,
     cut_cache_key_from_inputs,
@@ -62,6 +65,7 @@ from rembggui.core.specs import (
 from rembggui.core.timebase import sample_times, webp_delays
 from rembggui.core.webp import (
     EncodeSummary,
+    WebPInfo,
     encode_lossless_webp,
     fit_webp_to_size,
     validate_webp,
@@ -164,7 +168,7 @@ class EncoderPort(Protocol):
         max_bytes: int | None,
         context: JobContext,
         ownership: RgbaOwnershipTracker,
-    ) -> EncodeSummary: ...
+    ) -> ValidatedCandidate: ...
 
 
 class DiskProbe(Protocol):
@@ -180,7 +184,7 @@ class OutputPublisher(Protocol):
 
     def publish(
         self,
-        candidate: Path,
+        candidate: ValidatedCandidate,
         destination: Path,
         policy: CollisionPolicy,
         *,
@@ -285,12 +289,118 @@ class RenderArtifact:
     file_size: int
     duration_ms: int
     requested_timestamps: tuple[Fraction, ...]
-    actual_pts: tuple[Fraction, ...]
+    actual_pts: tuple[Fraction, ...] | None
     delays_ms: tuple[int, ...]
     ownership_peak: int
     ownership_current: int
     rebuilt: bool
     notes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateFileIdentity:
+    """Stable filesystem identity recorded while a candidate handle is held."""
+
+    device: int
+    inode: int
+    size: int
+    modified_ns: int
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class ValidatedCandidate:
+    """A WebP whose validated bytes stay bound to an open file description.
+
+    The publisher compares the final directory entry with this held descriptor
+    after its atomic commit.  A pathname swap therefore cannot substitute bytes
+    between WebP validation and publication.
+    """
+
+    path: Path
+    summary: EncodeSummary
+    identity: CandidateFileIdentity
+    sha256: str
+    _descriptor: int = field(repr=False, compare=False)
+
+    @classmethod
+    def validate(
+        cls,
+        path: Path,
+        summary: EncodeSummary,
+        *,
+        ownership: RgbaOwnershipTracker | None = None,
+    ) -> ValidatedCandidate:
+        if not isinstance(path, Path) or not isinstance(summary, EncodeSummary):
+            raise TypeError("candidate path and encode summary are required")
+        if summary.destination != path:
+            raise _output_error("encode summary does not identify its candidate")
+        descriptor = _open_held_file(path)
+        try:
+            before = _candidate_identity(os.fstat(descriptor))
+            _require_regular_nonempty(before)
+            if _path_identity(path) != before:
+                raise _output_error("candidate path changed before WebP validation")
+            digest = _sha256_descriptor(descriptor)
+            info = _validate_held_candidate_webp(
+                path,
+                descriptor,
+                before,
+                summary,
+                ownership,
+            )
+            after = _candidate_identity(os.fstat(descriptor))
+            if (
+                after != before
+                or _path_identity(path) != before
+                or _sha256_descriptor(descriptor) != digest
+            ):
+                raise _output_error("candidate changed during WebP validation")
+            expected = (
+                summary.width,
+                summary.height,
+                summary.frames,
+                summary.duration_ms,
+                summary.file_size,
+            )
+            actual = (
+                info.width,
+                info.height,
+                info.frames,
+                info.duration_ms,
+                info.file_size,
+            )
+            if actual != expected or before.size != summary.file_size:
+                raise _output_error("encode summary does not match the validated WebP")
+            candidate = object.__new__(cls)
+            object.__setattr__(candidate, "path", path)
+            object.__setattr__(candidate, "summary", summary)
+            object.__setattr__(candidate, "identity", before)
+            object.__setattr__(candidate, "sha256", digest)
+            object.__setattr__(candidate, "_descriptor", descriptor)
+            return candidate
+        except BaseException as error:
+            close_error: OSError | None = None
+            try:
+                os.close(descriptor)
+            except OSError as caught:
+                close_error = caught
+            if isinstance(error, OSError):
+                wrapped = _map_output_os_error(
+                    error, "cannot bind validated output candidate"
+                )
+                if close_error is not None:
+                    wrapped.add_note(
+                        f"additional candidate-handle cleanup failure: {close_error}"
+                    )
+                raise wrapped from error
+            if close_error is not None:
+                error.add_note(
+                    f"additional candidate-handle cleanup failure: {close_error}"
+                )
+            raise
+
+    def close(self) -> None:
+        os.close(self._descriptor)
 
 
 class LocalSourcePort:
@@ -429,42 +539,48 @@ class PillowWebPEncoder:
         max_bytes: int | None,
         context: JobContext,
         ownership: RgbaOwnershipTracker,
-    ) -> EncodeSummary:
+    ) -> ValidatedCandidate:
         context.checkpoint("encode")
         if max_bytes is None:
-            return encode_lossless_webp(
+            summary = encode_lossless_webp(
                 frame_paths,
                 delays_ms,
                 destination,
                 rgba_ownership_tracker=ownership,
             )
-        try:
-            fit_webp_to_size(
-                frame_paths,
-                delays_ms,
-                max_bytes,
-                work_dir,
+        else:
+            try:
+                fit_webp_to_size(
+                    frame_paths,
+                    delays_ms,
+                    max_bytes,
+                    work_dir,
+                    destination,
+                    is_cancelled=lambda: context.cancellation.requested,
+                    rgba_ownership_tracker=ownership,
+                )
+            except AppError as error:
+                if error.code is ErrorCode.JOB_CANCELLED:
+                    context.checkpoint("auto-fit")
+                raise
+            info = validate_webp(
                 destination,
-                is_cancelled=lambda: context.cancellation.requested,
+                len(frame_paths),
+                sum(delays_ms) if len(frame_paths) > 1 else 0,
                 rgba_ownership_tracker=ownership,
             )
-        except AppError as error:
-            if error.code is ErrorCode.JOB_CANCELLED:
-                context.checkpoint("auto-fit")
-            raise
-        info = validate_webp(
+            summary = EncodeSummary(
+                destination,
+                info.width,
+                info.height,
+                info.frames,
+                info.duration_ms,
+                info.file_size,
+            )
+        return ValidatedCandidate.validate(
             destination,
-            len(frame_paths),
-            sum(delays_ms) if len(frame_paths) > 1 else 0,
-            rgba_ownership_tracker=ownership,
-        )
-        return EncodeSummary(
-            destination,
-            info.width,
-            info.height,
-            info.frames,
-            info.duration_ms,
-            info.file_size,
+            summary,
+            ownership=ownership,
         )
 
 
@@ -492,32 +608,40 @@ class AtomicOutputPublisher:
 
     def publish(
         self,
-        candidate: Path,
+        candidate: ValidatedCandidate,
         destination: Path,
         policy: CollisionPolicy,
         *,
         cleanup_notes: list[str] | None = None,
     ) -> Path:
         if (
-            not isinstance(candidate, Path)
+            not isinstance(candidate, ValidatedCandidate)
             or not isinstance(destination, Path)
-            or candidate.parent != destination.parent
-            or candidate == destination
+            or candidate.path.parent != destination.parent
+            or candidate.path == destination
             or not isinstance(policy, CollisionPolicy)
             or (cleanup_notes is not None and not isinstance(cleanup_notes, list))
         ):
             raise _output_error("candidate must be a sibling and policy must be valid")
+        backup: _RollbackBackup | None = None
+        primary: BaseException | None = None
         try:
-            candidate_info = candidate.lstat()
-            if not stat.S_ISREG(candidate_info.st_mode) or not candidate_info.st_size:
-                raise _output_error(
-                    "validated output candidate must be a non-empty regular file"
-                )
+            _require_candidate_current(candidate)
             if policy is CollisionPolicy.REPLACE:
-                os.replace(candidate, destination)
+                backup = _snapshot_existing_output(destination)
+                if backup is not None:
+                    _require_existing_output_current(destination, backup)
+                _require_candidate_current(candidate)
+                os.replace(candidate.path, destination)
+                try:
+                    _require_published_candidate(candidate, destination)
+                except BaseException as error:
+                    _rollback_publication(destination, backup, error)
+                    backup = None
+                    raise
             else:
                 try:
-                    os.link(candidate, destination)
+                    os.link(candidate.path, destination, follow_symlinks=False)
                 except FileExistsError as error:
                     action = (
                         "choose-another-name"
@@ -532,18 +656,30 @@ class AtomicOutputPublisher:
                         action,
                     ) from error
                 try:
-                    candidate.unlink()
+                    _require_published_candidate(candidate, destination)
+                except BaseException as error:
+                    _remove_failed_no_clobber_output(destination, error)
+                    raise
+                try:
+                    candidate.path.unlink()
                 except OSError as error:
                     if cleanup_notes is not None:
                         cleanup_notes.append(
                             f"additional output-candidate cleanup failure: {error}"
                         )
-        except AppError:
+        except AppError as error:
+            primary = error
             raise
         except OSError as error:
-            raise _map_output_os_error(
-                error, "atomic output publication failed"
-            ) from error
+            wrapped = _map_output_os_error(error, "atomic output publication failed")
+            primary = wrapped
+            raise wrapped from error
+        except BaseException as error:
+            primary = error
+            raise
+        finally:
+            if backup is not None:
+                _cleanup_publication_backup(backup.path, cleanup_notes, primary)
         return destination
 
 
@@ -584,7 +720,12 @@ class PreviewService:
                 )
             identity = self._source.provisional_fingerprint(request.source, context)
             fingerprint = preview_fingerprint(
-                request, playhead, source_fingerprint=identity
+                request,
+                playhead,
+                source_fingerprint=identity,
+                model_weight_sha256=self._segmentation.model_weight_sha256,
+                rembg_version=self._segmentation.rembg_version,
+                pipeline_schema_version=PIPELINE_SCHEMA_VERSION,
             )
             tracker = RgbaOwnershipTracker((request.crop.width, request.crop.height))
             cut, actual_pts = _produce_cut_frame(
@@ -705,7 +846,7 @@ class RenderService:
 
     def render(self, request: RenderRequest, context: JobContext) -> RenderArtifact:
         staged: CutWorkspace | None = None
-        scratch_allocated = False
+        scratch_owners: list[Path] = []
         primary: BaseException | None = None
         notes: list[str] = []
         try:
@@ -790,11 +931,11 @@ class RenderService:
                 now_ns=self._clock.time_ns(),
             )
             scratch = staged.scratch_root / context.job_id
+            scratch_owners.append(staged.output_directory)
             durable, private, promoted_manifest = self._workspace.promote_render(
                 staged, manifest, scratch, context
             )
             staged = None
-            scratch_allocated = True
             context.checkpoint("cut-promotion")
             artifact = self._encode_snapshot(
                 request,
@@ -808,9 +949,10 @@ class RenderService:
                 tracker,
                 union,
                 notes,
+                tuple(scratch_owners),
                 rebuilt=False,
             )
-            scratch_allocated = False
+            scratch_owners.clear()
             return artifact
         except BaseException as error:
             primary = error
@@ -819,10 +961,10 @@ class RenderService:
         finally:
             if staged is not None:
                 _cleanup_stage(self._workspace, staged, primary)
-            if scratch_allocated:
-                _cleanup_job(
+            if scratch_owners:
+                _cleanup_scratch_owners(
                     self._workspace,
-                    request.output.directory,
+                    scratch_owners,
                     context.job_id,
                     primary,
                     notes,
@@ -834,7 +976,7 @@ class RenderService:
         cut_workspace: CutWorkspace,
         context: JobContext,
     ) -> RenderArtifact:
-        scratch_allocated = False
+        scratch_owners: list[Path] = []
         primary: BaseException | None = None
         notes: list[str] = []
         try:
@@ -898,8 +1040,8 @@ class RenderService:
                 )
             self._advisory_disk_check(request, len(timestamps), notes, rebuild=True)
             scratch = cut_workspace.scratch_root / context.job_id
+            scratch_owners.append(cut_workspace.output_directory)
             private = self._workspace.snapshot_rebuild(cut_workspace, scratch, context)
-            scratch_allocated = True
             snapshot_manifest = self._workspace.validate(private)
             tracker = RgbaOwnershipTracker(
                 (snapshot_manifest.width, snapshot_manifest.height)
@@ -920,24 +1062,25 @@ class RenderService:
                 private,
                 snapshot_manifest,
                 timestamps,
-                timestamps,
+                None,
                 delays,
                 tracker,
                 union,
                 notes,
+                tuple(scratch_owners),
                 rebuilt=True,
             )
-            scratch_allocated = False
+            scratch_owners.clear()
             return artifact
         except BaseException as error:
             primary = error
             _finish_failed_context(context)
             raise
         finally:
-            if scratch_allocated:
-                _cleanup_job(
+            if scratch_owners:
+                _cleanup_scratch_owners(
                     self._workspace,
-                    request.output.directory,
+                    scratch_owners,
                     context.job_id,
                     primary,
                     notes,
@@ -1000,11 +1143,12 @@ class RenderService:
         private: CutWorkspace,
         manifest: CutManifest,
         timestamps: tuple[Fraction, ...],
-        actual_pts: tuple[Fraction, ...],
+        actual_pts: tuple[Fraction, ...] | None,
         delays: tuple[int, ...],
         tracker: RgbaOwnershipTracker,
         union: PixelBounds | None,
         notes: list[str],
+        scratch_owners: tuple[Path, ...],
         *,
         rebuilt: bool,
     ) -> RenderArtifact:
@@ -1052,10 +1196,11 @@ class RenderService:
         )
         artifact_fingerprint = render_fingerprint(request, cut_key=manifest.cache_key)
         summary: EncodeSummary | None = None
+        validated: ValidatedCandidate | None = None
         published = False
         publish_error: BaseException | None = None
         try:
-            summary = self._encoder.encode(
+            validated = self._encoder.encode(
                 tuple(framed_paths),
                 delays,
                 candidate,
@@ -1064,32 +1209,35 @@ class RenderService:
                 context=context,
                 ownership=tracker,
             )
-            if summary.destination != candidate:
+            summary = validated.summary
+            if validated.path != candidate or summary.destination != candidate:
                 raise _output_error("encoder did not return its private candidate")
             context.checkpoint("encode")
-            _cleanup_job(
-                self._workspace,
-                request.output.directory,
-                context.job_id,
-                None,
-                notes,
-            )
             gc.collect()
             ownership_peak = tracker.peak
             ownership_current = tracker.current
             output_path = context.commit_if_not_cancelled(
                 lambda: self._output_publisher.publish(
-                    candidate,
+                    validated,
                     request.output.path,
                     request.output.collision_policy,
                     cleanup_notes=notes,
                 )
             )
             published = True
+            _cleanup_scratch_owners(
+                self._workspace,
+                scratch_owners,
+                context.job_id,
+                None,
+                notes,
+            )
         except BaseException as error:
             publish_error = error
             raise
         finally:
+            if validated is not None:
+                _close_validated_candidate(validated, publish_error, notes)
             if not published:
                 _cleanup_candidate(candidate, publish_error, notes)
         assert summary is not None
@@ -1344,6 +1492,299 @@ def _cleanup_job(
             notes.append(detail)
 
 
+def _cleanup_scratch_owners(
+    workspace: WorkspacePort,
+    output_directories: Sequence[Path],
+    job_id: str,
+    primary: BaseException | None,
+    notes: list[str],
+) -> None:
+    seen: set[Path] = set()
+    for output_directory in output_directories:
+        if output_directory in seen:
+            continue
+        seen.add(output_directory)
+        _cleanup_job(workspace, output_directory, job_id, primary, notes)
+
+
+@dataclass(frozen=True, slots=True)
+class _RollbackBackup:
+    path: Path
+    source_identity: CandidateFileIdentity
+    sha256: str
+
+
+def _open_held_file(path: Path) -> int:
+    """Open *path* without following a final symlink and allow rename on Windows."""
+    if os.name != "nt":
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        return os.open(path, flags)
+
+    ctypes = importlib.import_module("ctypes")
+    msvcrt = importlib.import_module("msvcrt")
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    ]
+    create_file.restype = ctypes.c_void_p
+    handle = create_file(
+        str(path),
+        0x80000000,  # GENERIC_READ
+        0x00000001 | 0x00000002 | 0x00000004,  # share read/write/delete
+        None,
+        3,  # OPEN_EXISTING
+        0x00200000,  # FILE_FLAG_OPEN_REPARSE_POINT
+        None,
+    )
+    invalid_handle = ctypes.c_void_p(-1).value
+    if handle in {None, invalid_handle}:
+        error_number = ctypes.get_last_error()
+        raise OSError(error_number, os.strerror(error_number), path)
+    try:
+        return cast(
+            int,
+            msvcrt.open_osfhandle(
+                handle,
+                os.O_RDONLY | getattr(os, "O_BINARY", 0),
+            ),
+        )
+    except BaseException:
+        kernel32.CloseHandle(handle)
+        raise
+
+
+def _candidate_identity(info: os.stat_result) -> CandidateFileIdentity:
+    return CandidateFileIdentity(
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mtime_ns,
+    )
+
+
+def _path_identity(path: Path) -> CandidateFileIdentity:
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode):
+        raise _output_error("output path must be a regular file")
+    return _candidate_identity(info)
+
+
+def _require_regular_nonempty(identity: CandidateFileIdentity) -> None:
+    if identity.size < 1:
+        raise _output_error("validated output candidate must be non-empty")
+
+
+def _sha256_descriptor(descriptor: int) -> str:
+    position = os.lseek(descriptor, 0, os.SEEK_CUR)
+    digest = hashlib.sha256()
+    try:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+    finally:
+        os.lseek(descriptor, position, os.SEEK_SET)
+    return digest.hexdigest()
+
+
+def _require_candidate_current(candidate: ValidatedCandidate) -> None:
+    descriptor_identity = _candidate_identity(os.fstat(candidate._descriptor))
+    if (
+        descriptor_identity != candidate.identity
+        or _path_identity(candidate.path) != candidate.identity
+        or _sha256_descriptor(candidate._descriptor) != candidate.sha256
+    ):
+        raise _output_error("validated output candidate changed before publication")
+
+
+def _validate_held_candidate_webp(
+    path: Path,
+    descriptor: int,
+    identity: CandidateFileIdentity,
+    summary: EncodeSummary,
+    ownership: RgbaOwnershipTracker | None,
+) -> WebPInfo:
+    """Validate a private hard link proven to name the held file description."""
+    validation_link = path.parent / f".rembggui-{uuid.uuid4().hex}.validation"
+    primary: BaseException | None = None
+    linked = False
+    try:
+        os.link(path, validation_link, follow_symlinks=False)
+        linked = True
+        if (
+            _path_identity(validation_link) != identity
+            or _candidate_identity(os.fstat(descriptor)) != identity
+        ):
+            raise _output_error("candidate changed while binding WebP validation")
+        return validate_webp(
+            validation_link,
+            summary.frames,
+            summary.duration_ms,
+            rgba_ownership_tracker=ownership,
+        )
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        if linked:
+            try:
+                validation_link.unlink()
+            except OSError as error:
+                detail = f"additional candidate-validation cleanup failure: {error}"
+                if primary is not None:
+                    primary.add_note(detail)
+                else:
+                    raise _map_output_os_error(error, detail) from error
+
+
+def _require_published_candidate(
+    candidate: ValidatedCandidate, destination: Path
+) -> None:
+    descriptor_identity = _candidate_identity(os.fstat(candidate._descriptor))
+    if (
+        descriptor_identity != candidate.identity
+        or _sha256_descriptor(candidate._descriptor) != candidate.sha256
+    ):
+        raise _output_error("validated candidate bytes changed during publication")
+    published_descriptor = _open_held_file(destination)
+    try:
+        published_identity = _candidate_identity(os.fstat(published_descriptor))
+        if (
+            published_identity != candidate.identity
+            or _path_identity(destination) != candidate.identity
+            or _sha256_descriptor(published_descriptor) != candidate.sha256
+        ):
+            raise _output_error("published output is not the validated candidate")
+    finally:
+        os.close(published_descriptor)
+
+
+def _copy_descriptor(source: int, destination: int) -> None:
+    source_position = os.lseek(source, 0, os.SEEK_CUR)
+    try:
+        os.lseek(source, 0, os.SEEK_SET)
+        while chunk := os.read(source, 1024 * 1024):
+            view = memoryview(chunk)
+            while view:
+                written = os.write(destination, view)
+                if written < 1:
+                    raise OSError(errno.EIO, "short rollback-backup write")
+                view = view[written:]
+    finally:
+        os.lseek(source, source_position, os.SEEK_SET)
+
+
+def _snapshot_existing_output(destination: Path) -> _RollbackBackup | None:
+    try:
+        source = _open_held_file(destination)
+    except FileNotFoundError:
+        return None
+    backup: Path | None = None
+    backup_descriptor: int | None = None
+    try:
+        identity = _candidate_identity(os.fstat(source))
+        if _path_identity(destination) != identity:
+            raise _output_error("existing output changed before publication")
+        digest = _sha256_descriptor(source)
+        backup_descriptor, raw_backup = tempfile.mkstemp(
+            prefix=f".{destination.name}.",
+            suffix=".rollback",
+            dir=destination.parent,
+        )
+        backup = Path(raw_backup)
+        _copy_descriptor(source, backup_descriptor)
+        os.fsync(backup_descriptor)
+        if (
+            _candidate_identity(os.fstat(source)) != identity
+            or _path_identity(destination) != identity
+            or _sha256_descriptor(source) != digest
+        ):
+            raise _output_error("existing output changed while preparing rollback")
+        return _RollbackBackup(backup, identity, digest)
+    except BaseException:
+        if backup is not None:
+            try:
+                backup.unlink()
+            except OSError:
+                pass
+        raise
+    finally:
+        if backup_descriptor is not None:
+            os.close(backup_descriptor)
+        os.close(source)
+
+
+def _require_existing_output_current(
+    destination: Path, backup: _RollbackBackup
+) -> None:
+    current = _open_held_file(destination)
+    try:
+        if (
+            _candidate_identity(os.fstat(current)) != backup.source_identity
+            or _path_identity(destination) != backup.source_identity
+            or _sha256_descriptor(current) != backup.sha256
+        ):
+            raise _output_error("existing output changed before atomic publication")
+    finally:
+        os.close(current)
+
+
+def _rollback_publication(
+    destination: Path,
+    backup: _RollbackBackup | None,
+    primary: BaseException,
+) -> None:
+    try:
+        if backup is None:
+            destination.unlink()
+            return
+        os.replace(backup.path, destination)
+        restored = _open_held_file(destination)
+        try:
+            if _sha256_descriptor(restored) != backup.sha256:
+                raise _output_error("rollback restored different output bytes")
+        finally:
+            os.close(restored)
+    except FileNotFoundError:
+        if backup is not None:
+            primary.add_note("additional output rollback failure: output disappeared")
+    except BaseException as error:
+        primary.add_note(f"additional output rollback failure: {error}")
+
+
+def _remove_failed_no_clobber_output(destination: Path, primary: BaseException) -> None:
+    try:
+        destination.unlink()
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        primary.add_note(f"additional failed-publication cleanup failure: {error}")
+
+
+def _cleanup_publication_backup(
+    backup: Path,
+    cleanup_notes: list[str] | None,
+    primary: BaseException | None,
+) -> None:
+    try:
+        backup.unlink()
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        detail = f"additional output rollback-backup cleanup failure: {error}"
+        if primary is not None:
+            primary.add_note(detail)
+        elif cleanup_notes is not None:
+            cleanup_notes.append(detail)
+
+
 def _cleanup_candidate(
     candidate: Path, primary: BaseException | None, notes: list[str]
 ) -> None:
@@ -1353,6 +1794,21 @@ def _cleanup_candidate(
         return
     except OSError as error:
         detail = f"additional output-candidate cleanup failure: {error}"
+        if primary is not None:
+            primary.add_note(detail)
+        else:
+            notes.append(detail)
+
+
+def _close_validated_candidate(
+    candidate: ValidatedCandidate,
+    primary: BaseException | None,
+    notes: list[str],
+) -> None:
+    try:
+        candidate.close()
+    except OSError as error:
+        detail = f"additional validated-candidate handle cleanup failure: {error}"
         if primary is not None:
             primary.add_note(detail)
         else:

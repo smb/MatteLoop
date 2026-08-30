@@ -116,8 +116,11 @@ def preview_fingerprint(
     request: RenderRequest,
     playhead: Fraction,
     *,
+    model_weight_sha256: str,
     source_fingerprint: str | None = None,
+    pipeline_schema_version: str = PIPELINE_SCHEMA_VERSION,
     orientation_color_version: str = ORIENTATION_COLOR_VERSION,
+    rembg_version: str = REMBG_VERSION,
 ) -> str:
     """Identify only inputs consumed by preview generation."""
     request = _validated_request(request)
@@ -130,9 +133,14 @@ def preview_fingerprint(
     if source_fingerprint is None:
         source_fingerprint = provisional_source_fingerprint(request.source)
     source_fingerprint = _validated_sha256(source_fingerprint, "source_fingerprint")
+    model_weight_sha256 = _validated_sha256(model_weight_sha256, "model_weight_sha256")
+    pipeline_schema_version = _validated_version(
+        pipeline_schema_version, "pipeline_schema_version"
+    )
     orientation_color_version = _validated_version(
         orientation_color_version, "orientation_color_version"
     )
+    rembg_version = _validated_version(rembg_version, "rembg_version")
     return _canonical_hash(
         {
             **_schema("preview"),
@@ -142,10 +150,13 @@ def preview_fingerprint(
             "crop": _crop(request.crop),
             "segmentation": {
                 "model_id": request.segmentation.model_id,
+                "model_weight_sha256": model_weight_sha256,
                 **_edge_settings(request),
             },
             "framing": _framing(request.framing),
+            "pipeline_schema_version": pipeline_schema_version,
             "orientation_color_version": orientation_color_version,
+            "rembg_version": rembg_version,
         }
     )
 

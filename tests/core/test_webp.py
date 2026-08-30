@@ -5,7 +5,7 @@ import gc
 import os
 import warnings
 import weakref
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -317,6 +317,95 @@ def test_fit_cancels_between_encode_attempts_and_preserves_destination(
     assert encode_count == 1
     assert output.read_bytes() == b"known-good"
     assert not tuple((tmp_path / "work").glob("webp-fit-*"))
+
+
+def test_fit_cancels_snapshot_after_first_frame_and_releases_ownership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sources = rgba_fixture_paths(tmp_path, count=3)
+    output = tmp_path / "out.webp"
+    output.write_bytes(b"known-good")
+    tracker = RgbaOwnershipTracker((128, 128))
+    actual_copy = webp_module.shutil.copyfileobj
+    copied_frames = 0
+
+    def count_snapshot_copy(input_file: Any, output_file: Any, length: int) -> None:
+        nonlocal copied_frames
+        actual_copy(input_file, output_file, length)
+        if Path(output_file.name).parent.name == "source-snapshot":
+            copied_frames += 1
+
+    monkeypatch.setattr(webp_module.shutil, "copyfileobj", count_snapshot_copy)
+
+    with pytest.raises(AppError) as exc:
+        fit_webp_to_size(
+            sources,
+            (100, 100, 100),
+            1_000_000,
+            tmp_path / "work",
+            output,
+            is_cancelled=lambda: copied_frames >= 1,
+            rgba_ownership_tracker=tracker,
+        )
+
+    gc.collect()
+    assert exc.value.code is ErrorCode.JOB_CANCELLED
+    assert copied_frames == 1
+    assert output.read_bytes() == b"known-good"
+    assert not tuple((tmp_path / "work").glob("webp-fit-*"))
+    assert tracker.current == 0
+
+
+def test_fit_cancels_resize_after_first_frame_and_releases_ownership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sources = tuple(noisy_rgba(tmp_path / f"source-{index}.png") for index in range(3))
+    for index, source_path in enumerate(sources):
+        with Image.open(source_path) as image:
+            image.load()
+            image.putpixel((0, 0), (index * 70, 20, 40, 255))
+            image.save(source_path)
+    output = tmp_path / "out.webp"
+    output.write_bytes(b"known-good")
+    tracker = RgbaOwnershipTracker((256, 256))
+    actual_encode = webp_module.encode_lossless_webp
+    actual_save = Image.Image.save
+    resized_frames = 0
+
+    def report_too_large(
+        paths: Sequence[Path], delays: Sequence[int], destination: Path, **kwargs: Any
+    ) -> EncodeSummary:
+        summary = actual_encode(paths, delays, destination, **kwargs)
+        return replace(summary, file_size=1_000_000)
+
+    def count_scaled_save(
+        image: Image.Image, destination: object, *args: Any, **kwargs: Any
+    ) -> None:
+        nonlocal resized_frames
+        actual_save(image, destination, *args, **kwargs)
+        if isinstance(destination, Path) and destination.parent.name == "scaled-01":
+            resized_frames += 1
+
+    monkeypatch.setattr(webp_module, "encode_lossless_webp", report_too_large)
+    monkeypatch.setattr(Image.Image, "save", count_scaled_save)
+
+    with pytest.raises(AppError) as exc:
+        fit_webp_to_size(
+            sources,
+            (100, 100, 100),
+            100_000,
+            tmp_path / "work",
+            output,
+            is_cancelled=lambda: resized_frames >= 1,
+            rgba_ownership_tracker=tracker,
+        )
+
+    gc.collect()
+    assert exc.value.code is ErrorCode.JOB_CANCELLED
+    assert resized_frames == 1
+    assert output.read_bytes() == b"known-good"
+    assert not tuple((tmp_path / "work").glob("webp-fit-*"))
+    assert tracker.current == 0
 
 
 def test_fit_tracks_rgba_ownership_and_releases_all_frames(tmp_path: Path) -> None:
@@ -890,13 +979,22 @@ def test_fit_resizes_from_immutable_sources_and_stops_after_twelve_encodes(
         return replace(summary, file_size=1000)
 
     def observe_resize(
-        paths: tuple[Path, ...], size: tuple[int, int], destination: Path
+        paths: tuple[Path, ...],
+        size: tuple[int, int],
+        destination: Path,
+        *,
+        is_cancelled: Callable[[], bool] | None = None,
     ) -> tuple[Path, ...]:
         resize_sources.append(paths)
         prior_scaled_directory_counts.append(
             len(tuple(destination.parent.glob("scaled-*")))
         )
-        return actual_resize(paths, size, destination)
+        return actual_resize(
+            paths,
+            size,
+            destination,
+            is_cancelled=is_cancelled,
+        )
 
     monkeypatch.setattr(webp_module, "encode_lossless_webp", always_too_large)
     monkeypatch.setattr(webp_module, "_resize_from_sources", observe_resize)

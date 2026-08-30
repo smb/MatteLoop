@@ -14,6 +14,7 @@ import rembggui.jobs.render as render_module
 from rembggui.core.errors import AppError, ErrorCode
 from rembggui.core.specs import CollisionPolicy, FramingSpec, SamplingSpec
 from rembggui.core.state import JobKind
+from rembggui.core.webp import encode_lossless_webp, validate_webp
 from rembggui.jobs.context import JobTerminalState
 from rembggui.jobs.render import (
     AtomicOutputPublisher,
@@ -21,6 +22,7 @@ from rembggui.jobs.render import (
     PillowWebPEncoder,
     PreparedSegmentation,
     RenderService,
+    ValidatedCandidate,
 )
 from tests.jobs.render_support import (
     FakeClock,
@@ -32,6 +34,20 @@ from tests.jobs.render_support import (
     render_service,
     request,
 )
+
+
+def _validated_candidate(
+    publisher: AtomicOutputPublisher,
+    target: Path,
+    directory: Path,
+    label: str,
+) -> ValidatedCandidate:
+    source = directory / f"source-{label}.png"
+    with Image.new("RGBA", (128, 128), (10, 20, 30, 40)) as image:
+        image.save(source)
+    path = publisher.candidate_path(target, f"job-{label}")
+    summary = encode_lossless_webp((source,), (100,), path)
+    return ValidatedCandidate.validate(path, summary)
 
 
 def test_render_samples_half_open_range_and_uses_private_encoder_inputs(
@@ -71,12 +87,10 @@ def test_render_samples_half_open_range_and_uses_private_encoder_inputs(
     )
     assert artifact.ownership_peak <= 3
     assert artifact.ownership_current == 0
-    assert artifact.output_path.read_bytes() == b"validated-webp-candidate"
+    assert validate_webp(artifact.output_path, 2, 1000).lossless
 
 
 def test_render_encodes_and_validates_a_real_lossless_webp(tmp_path) -> None:
-    from rembggui.core.webp import validate_webp
-
     artifact = render_service(encoder=PillowWebPEncoder()).render(
         request(tmp_path), job(tmp_path, "real-webp", JobKind.RENDER)
     )
@@ -364,9 +378,10 @@ def test_atomic_replace_maps_real_publish_failures_without_clobbering(
     error_number: int,
     retry_action: str,
 ) -> None:
-    candidate = tmp_path / ".candidate"
     target = tmp_path / "output.webp"
-    candidate.write_bytes(b"new")
+    publisher = AtomicOutputPublisher()
+    candidate = _validated_candidate(publisher, target, tmp_path, "errno")
+    candidate_bytes = candidate.path.read_bytes()
     target.write_bytes(b"old")
 
     def fail_replace(_source, _target):
@@ -374,12 +389,15 @@ def test_atomic_replace_maps_real_publish_failures_without_clobbering(
 
     monkeypatch.setattr(os, "replace", fail_replace)
 
-    with pytest.raises(AppError) as exc:
-        AtomicOutputPublisher().publish(candidate, target, CollisionPolicy.REPLACE)
+    try:
+        with pytest.raises(AppError) as exc:
+            publisher.publish(candidate, target, CollisionPolicy.REPLACE)
+    finally:
+        candidate.close()
 
     assert exc.value.retry_action == retry_action
     assert target.read_bytes() == b"old"
-    assert candidate.read_bytes() == b"new"
+    assert candidate.path.read_bytes() == candidate_bytes
 
 
 @pytest.mark.parametrize(
@@ -392,34 +410,106 @@ def test_no_clobber_policies_lose_atomic_collision_race_safely(
 ) -> None:
     publisher = AtomicOutputPublisher()
     target = tmp_path / "output.webp"
-    candidate = publisher.candidate_path(target, "job")
-    candidate.write_bytes(b"candidate")
+    candidate = _validated_candidate(publisher, target, tmp_path, policy.value)
+    candidate_bytes = candidate.path.read_bytes()
     actual_link = os.link
 
-    def create_racer_then_link(source, destination):
+    def create_racer_then_link(source, destination, **kwargs):
         Path(destination).write_bytes(b"racer")
-        actual_link(source, destination)
+        actual_link(source, destination, **kwargs)
 
     monkeypatch.setattr(os, "link", create_racer_then_link)
 
-    with pytest.raises(AppError) as exc:
-        publisher.publish(candidate, target, policy)
+    try:
+        with pytest.raises(AppError) as exc:
+            publisher.publish(candidate, target, policy)
+    finally:
+        candidate.close()
 
     assert exc.value.stage == "publish"
     assert target.read_bytes() == b"racer"
-    assert candidate.read_bytes() == b"candidate"
+    assert candidate.path.read_bytes() == candidate_bytes
 
 
 def test_replace_policy_commits_candidate_atomically(tmp_path) -> None:
     publisher = AtomicOutputPublisher()
     target = tmp_path / "output.webp"
-    candidate = publisher.candidate_path(target, "job")
+    candidate = _validated_candidate(publisher, target, tmp_path, "replace")
+    candidate_bytes = candidate.path.read_bytes()
     target.write_bytes(b"old")
-    candidate.write_bytes(b"new")
 
-    assert publisher.publish(candidate, target, CollisionPolicy.REPLACE) == target
-    assert target.read_bytes() == b"new"
-    assert not candidate.exists()
+    try:
+        assert publisher.publish(candidate, target, CollisionPolicy.REPLACE) == target
+    finally:
+        candidate.close()
+    assert target.read_bytes() == candidate_bytes
+    assert not candidate.path.exists()
+
+
+def test_replace_rolls_back_if_validated_candidate_is_swapped_at_commit(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publisher = AtomicOutputPublisher()
+    target = tmp_path / "output.webp"
+    target.write_bytes(b"old-output")
+    candidate = _validated_candidate(publisher, target, tmp_path, "swap-replace")
+    attacker = tmp_path / ".attacker"
+    attacker.write_bytes(b"attacker-not-webp")
+    actual_replace = os.replace
+    swapped = False
+
+    def swap_candidate_then_replace(source_path, destination_path):
+        nonlocal swapped
+        if Path(source_path) == candidate.path and Path(destination_path) == target:
+            actual_replace(attacker, candidate.path)
+            swapped = True
+        return actual_replace(source_path, destination_path)
+
+    monkeypatch.setattr(os, "replace", swap_candidate_then_replace)
+
+    try:
+        with pytest.raises(AppError) as exc:
+            publisher.publish(candidate, target, CollisionPolicy.REPLACE)
+    finally:
+        candidate.close()
+
+    assert swapped
+    assert exc.value.code is ErrorCode.INVALID_OUTPUT
+    assert target.read_bytes() == b"old-output"
+
+
+def test_no_clobber_removes_swapped_candidate_instead_of_publishing_it(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publisher = AtomicOutputPublisher()
+    target = tmp_path / "output.webp"
+    candidate = _validated_candidate(publisher, target, tmp_path, "swap-link")
+    attacker = tmp_path / ".attacker"
+    attacker.write_bytes(b"attacker-not-webp")
+    actual_link = os.link
+    swapped = False
+
+    def swap_candidate_then_link(source_path, destination_path, **kwargs):
+        nonlocal swapped
+        os.replace(attacker, candidate.path)
+        swapped = True
+        return actual_link(source_path, destination_path, **kwargs)
+
+    monkeypatch.setattr(os, "link", swap_candidate_then_link)
+
+    try:
+        with pytest.raises(AppError) as exc:
+            publisher.publish(
+                candidate,
+                target,
+                CollisionPolicy.CHOOSE_ANOTHER_NAME,
+            )
+    finally:
+        candidate.close()
+
+    assert swapped
+    assert exc.value.code is ErrorCode.INVALID_OUTPUT
+    assert not target.exists()
 
 
 def test_no_clobber_candidate_cleanup_failure_is_returned_as_a_note(
@@ -427,29 +517,32 @@ def test_no_clobber_candidate_cleanup_failure_is_returned_as_a_note(
 ) -> None:
     publisher = AtomicOutputPublisher()
     target = tmp_path / "output.webp"
-    candidate = publisher.candidate_path(target, "job")
-    candidate.write_bytes(b"new")
+    candidate = _validated_candidate(publisher, target, tmp_path, "cleanup")
+    candidate_bytes = candidate.path.read_bytes()
     notes: list[str] = []
     actual_unlink = Path.unlink
 
     def fail_candidate_unlink(path: Path, *args, **kwargs):
-        if path == candidate:
+        if path == candidate.path:
             raise OSError(errno.EACCES, "synthetic candidate cleanup failure")
         return actual_unlink(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "unlink", fail_candidate_unlink)
 
-    assert (
-        publisher.publish(
-            candidate,
-            target,
-            CollisionPolicy.CHOOSE_ANOTHER_NAME,
-            cleanup_notes=notes,
+    try:
+        assert (
+            publisher.publish(
+                candidate,
+                target,
+                CollisionPolicy.CHOOSE_ANOTHER_NAME,
+                cleanup_notes=notes,
+            )
+            == target
         )
-        == target
-    )
-    assert target.read_bytes() == b"new"
-    assert candidate.read_bytes() == b"new"
+    finally:
+        candidate.close()
+    assert target.read_bytes() == candidate_bytes
+    assert candidate.path.read_bytes() == candidate_bytes
     assert notes == [
         "additional output-candidate cleanup failure: "
         "[Errno 13] synthetic candidate cleanup failure"

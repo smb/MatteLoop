@@ -68,6 +68,7 @@ from rembggui.jobs.protocol import (
     decode_parent_message,
     encode_child_message,
     encode_parent_message,
+    validate_segment_options,
 )
 
 _JOIN_TIMEOUT_SECONDS = 1.0
@@ -1355,6 +1356,7 @@ def _model_cache_error(detail: str) -> AppError:
 def _run_rembg(
     source: Uint8Frame, session: object, options: SegmentOptions
 ) -> Uint8Frame:
+    options = validate_segment_options(options)
     from rembg import remove  # type: ignore[import-untyped]
 
     actual_session = session

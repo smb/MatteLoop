@@ -21,7 +21,7 @@ from rembggui.core.specs import (
     SegmentationSpec,
 )
 from rembggui.core.state import JobKind
-from rembggui.core.webp import EncodeSummary
+from rembggui.core.webp import encode_lossless_webp
 from rembggui.jobs.context import CancellationState, JobContext
 from rembggui.jobs.protocol import SegmentRequest
 from rembggui.jobs.render import (
@@ -29,6 +29,7 @@ from rembggui.jobs.render import (
     FilesystemWorkspacePort,
     PreparedSegmentation,
     RenderService,
+    ValidatedCandidate,
 )
 from rembggui.jobs.source import DecodedFrame, SourceRevision
 
@@ -135,21 +136,21 @@ class FakeEncoder:
         max_bytes: int | None,
         context: JobContext,
         ownership: RgbaOwnershipTracker,
-    ) -> EncodeSummary:
-        del work_dir, max_bytes, context, ownership
+    ) -> ValidatedCandidate:
+        del work_dir, max_bytes, context
         paths = tuple(frame_paths)
         delays = tuple(delays_ms)
         self.calls.append((paths, delays, destination))
-        destination.write_bytes(b"validated-webp-candidate")
-        with Image.open(paths[0]) as image:
-            width, height = image.size
-        return EncodeSummary(
+        summary = encode_lossless_webp(
+            paths,
+            delays,
             destination,
-            width,
-            height,
-            len(paths),
-            sum(delays) if len(paths) > 1 else 0,
-            destination.stat().st_size,
+            rgba_ownership_tracker=ownership,
+        )
+        return ValidatedCandidate.validate(
+            destination,
+            summary,
+            ownership=ownership,
         )
 
 

@@ -297,12 +297,15 @@ def fit_webp_to_size(
     """Fit a validated WebP to a byte target using at most twelve encodes."""
     _raise_if_fit_cancelled(is_cancelled)
     if rgba_ownership_tracker is None:
-        source = _validate_frame_inputs(source_frame_paths, delays_ms)
+        source = _validate_frame_inputs(
+            source_frame_paths, delays_ms, is_cancelled=is_cancelled
+        )
     else:
         source = _validate_frame_inputs(
             source_frame_paths,
             delays_ms,
             rgba_ownership_tracker,
+            is_cancelled=is_cancelled,
         )
     if (
         not isinstance(target_bytes, int)
@@ -327,6 +330,7 @@ def fit_webp_to_size(
             source,
             scratch / "source-snapshot",
             rgba_ownership_tracker,
+            is_cancelled=is_cancelled,
         )
         _raise_if_fit_cancelled(is_cancelled)
         cumulative_scale = Decimal(1)
@@ -401,7 +405,10 @@ def fit_webp_to_size(
             _raise_if_fit_cancelled(is_cancelled)
             if rgba_ownership_tracker is None:
                 current_paths = _resize_from_sources(
-                    source.paths, next_size, scaled_dir
+                    source.paths,
+                    next_size,
+                    scaled_dir,
+                    is_cancelled=is_cancelled,
                 )
             else:
                 current_paths = _resize_from_sources(
@@ -409,6 +416,7 @@ def fit_webp_to_size(
                     next_size,
                     scaled_dir,
                     rgba_ownership_tracker,
+                    is_cancelled=is_cancelled,
                 )
             _raise_if_fit_cancelled(is_cancelled)
             current_size = next_size
@@ -433,6 +441,8 @@ def _validate_frame_inputs(
     frame_paths: Sequence[Path],
     delays_ms: Sequence[int],
     rgba_ownership_tracker: RgbaOwnershipTracker | None = None,
+    *,
+    is_cancelled: Callable[[], bool] | None = None,
 ) -> _FrameSet:
     if not isinstance(frame_paths, Sequence) or isinstance(frame_paths, (str, bytes)):
         raise _invalid_output("frame_paths must be a finite path sequence")
@@ -459,6 +469,7 @@ def _validate_frame_inputs(
     identities: list[_FileIdentity] = []
     expected_size: tuple[int, int] | None = None
     for raw_path in frame_paths:
+        _raise_if_fit_cancelled(is_cancelled)
         path = _require_path(raw_path, "frame path")
         try:
             with _open_stable_binary(path) as (input_file, identity):
@@ -475,6 +486,7 @@ def _validate_frame_inputs(
                             "all input frames must have identical dimensions"
                         )
                     image.verify()
+                    _raise_if_fit_cancelled(is_cancelled)
         except AppError:
             raise
         except (OSError, EOFError, ValueError, SyntaxError) as error:
@@ -897,10 +909,14 @@ def _resize_from_sources(
     size: tuple[int, int],
     destination: Path,
     rgba_ownership_tracker: RgbaOwnershipTracker | None = None,
+    *,
+    is_cancelled: Callable[[], bool] | None = None,
 ) -> tuple[Path, ...]:
+    _raise_if_fit_cancelled(is_cancelled)
     destination.mkdir()
     output_paths: list[Path] = []
     for index, source_path in enumerate(source_paths):
+        _raise_if_fit_cancelled(is_cancelled)
         output = destination / f"frame-{index:06d}.png"
         with _open_stable_binary(source_path) as (
             input_file,
@@ -911,20 +927,28 @@ def _resize_from_sources(
                 if rgba_ownership_tracker is not None:
                     rgba_ownership_tracker.register(source)
                 premultiplied = source.convert("RGBa")
+            del source
         try:
+            _raise_if_fit_cancelled(is_cancelled)
             resized = premultiplied.resize(size, Image.Resampling.LANCZOS)
         finally:
             premultiplied.close()
+            del premultiplied
         try:
+            _raise_if_fit_cancelled(is_cancelled)
             rgba = resized.convert("RGBA")
             if rgba_ownership_tracker is not None:
                 rgba_ownership_tracker.register(rgba)
         finally:
             resized.close()
+            del resized
         try:
+            _raise_if_fit_cancelled(is_cancelled)
             rgba.save(output, format="PNG", optimize=False)
+            _raise_if_fit_cancelled(is_cancelled)
         finally:
             rgba.close()
+            del rgba
         output_paths.append(output)
     return tuple(output_paths)
 
@@ -933,12 +957,16 @@ def _snapshot_frame_set(
     source: _FrameSet,
     destination: Path,
     rgba_ownership_tracker: RgbaOwnershipTracker | None = None,
+    *,
+    is_cancelled: Callable[[], bool] | None = None,
 ) -> _FrameSet:
+    _raise_if_fit_cancelled(is_cancelled)
     destination.mkdir()
     snapshot_paths: list[Path] = []
     for index, (path, identity) in enumerate(
         zip(source.paths, source.identities, strict=True)
     ):
+        _raise_if_fit_cancelled(is_cancelled)
         snapshot = destination / f"frame-{index:06d}.png"
         with _open_stable_binary(path, identity) as (
             input_file,
@@ -948,11 +976,19 @@ def _snapshot_frame_set(
                 shutil.copyfileobj(input_file, output, length=1024 * 1024)
                 output.flush()
                 os.fsync(output.fileno())
+        _raise_if_fit_cancelled(is_cancelled)
         snapshot_paths.append(snapshot)
     if rgba_ownership_tracker is None:
-        return _validate_frame_inputs(tuple(snapshot_paths), source.delays_ms)
+        return _validate_frame_inputs(
+            tuple(snapshot_paths),
+            source.delays_ms,
+            is_cancelled=is_cancelled,
+        )
     return _validate_frame_inputs(
-        tuple(snapshot_paths), source.delays_ms, rgba_ownership_tracker
+        tuple(snapshot_paths),
+        source.delays_ms,
+        rgba_ownership_tracker,
+        is_cancelled=is_cancelled,
     )
 
 
