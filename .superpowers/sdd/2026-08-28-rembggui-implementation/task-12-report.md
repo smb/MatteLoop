@@ -430,6 +430,11 @@ guard acquisition, or advisory-adapter construction. Partial acquisition cleanup
 uses that owner and follows the same consume-on-attempt rule. An adapter-
 construction RED previously leaked the raw transaction fd because cleanup tried
 to construct a second adapter; the cleanup path no longer depends on an adapter.
+The same ownership audit found one recovery branch that reset an already-opened
+anchor owner when the post-open entry check reported `ENOENT`. That raced anchor
+is now consuming-closed before the branch resumes. A successful close cannot leak
+the abandoned fd; a post-close error is surfaced as a structured failure, leaves
+no ambiguous retry owner, and cannot later close a reused descriptor integer.
 
 The Windows adapter likewise no longer issues `LK_UNLCK` during normal owner
 cleanup. Its stateful contract fake releases the simulated range lock only from
@@ -479,12 +484,12 @@ release-test item rather than something the macOS fork suite can prove:
 
 ## Verification
 
-- `.venv/bin/pytest -q --tb=short` — **1001 passed in 51.16s** outside the
+- `.venv/bin/pytest -q --tb=short` — **1003 passed in 53.19s** outside the
   restricted shared-memory sandbox. The 15 warnings are Python 3.13's macOS warning for
   the deliberately forked cross-process lock repros in an already
   multi-threaded pytest process; no test failed or hung.
-- Focused native cache-filesystem, workspace, and render gate — **241 passed in
-  5.31s**. The slower WebP and Rebuild gate is separately **81 passed in
+- Focused native cache-filesystem, workspace, and render gate — **243 passed in
+  5.20s**. The slower WebP and Rebuild gate is separately **81 passed in
   33.03s**. Together they include canonical alias serialization,
   lock/private-directory/anchor replacement, fixed-slot inode ownership,
   crash-released stale-slot reuse, parent-namespace swaps, durable sync ordering,

@@ -3295,7 +3295,12 @@ class RecoveryDirectory:
                             "output transaction private directory does not match anchor"
                         )
                 except FileNotFoundError:
-                    anchor_owner = None
+                    if anchor_owner is not None:
+                        raced_anchor_owner = anchor_owner
+                        anchor_owner = None
+                        raced_anchor_owner.close(
+                            detail="raced output-transaction anchor handle"
+                        )
 
             try:
                 if expected_lock_identity is not None:

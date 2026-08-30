@@ -94,6 +94,49 @@ def _force_descriptor_reuse(
     return descriptor
 
 
+def _inject_post_open_anchor_disappearance(
+    publication: workspace_module.PublicationDirectory,
+    anchor_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[int]:
+    opened_anchor_descriptors: list[int] = []
+    anchor_lstat_calls = 0
+    actual_lstat = workspace_module.PublicationDirectory.lstat
+    actual_open_read = workspace_module.PublicationDirectory.open_read
+
+    def record_anchor_open(
+        bound: workspace_module.PublicationDirectory,
+        name: str,
+    ) -> int:
+        descriptor = actual_open_read(bound, name)
+        if bound is publication and name == anchor_name:
+            opened_anchor_descriptors.append(descriptor)
+        return descriptor
+
+    def disappear_after_anchor_open(
+        bound: workspace_module.PublicationDirectory,
+        name: str,
+    ) -> os.stat_result:
+        nonlocal anchor_lstat_calls
+        if bound is publication and name == anchor_name:
+            anchor_lstat_calls += 1
+            if anchor_lstat_calls == 2:
+                raise FileNotFoundError(errno.ENOENT, "synthetic anchor disappearance")
+        return actual_lstat(bound, name)
+
+    monkeypatch.setattr(
+        workspace_module.PublicationDirectory,
+        "open_read",
+        record_anchor_open,
+    )
+    monkeypatch.setattr(
+        workspace_module.PublicationDirectory,
+        "lstat",
+        disappear_after_anchor_open,
+    )
+    return opened_anchor_descriptors
+
+
 def _completed_staging(
     output: Path,
     *,
@@ -1002,6 +1045,107 @@ def test_parent_anchored_locks_for_distinct_targets_are_independent(
     finally:
         second.close()
         first.close()
+        private.close()
+        publication.close()
+
+
+def test_post_open_anchor_disappearance_closes_the_abandoned_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publication = workspace_module.PublicationDirectory.open(tmp_path)
+    private = publication.open_private_directory(
+        ".rembggui-publish",
+        "publication",
+    )
+    key = publication.target_key(tmp_path / "output.webp")
+    initial = publication.acquire_output_lock(private, key)
+    initial.close()
+    anchor_name = f".{key}.transaction-anchor"
+    actual_close = os.close
+    opened_anchor_descriptors = _inject_post_open_anchor_disappearance(
+        publication,
+        anchor_name,
+        monkeypatch,
+    )
+    try:
+        with pytest.raises(FileExistsError):
+            publication.acquire_output_lock(private, key)
+
+        assert len(opened_anchor_descriptors) == 1
+        opened_anchor_descriptor = opened_anchor_descriptors[0]
+        with pytest.raises(OSError) as closed:
+            os.fstat(opened_anchor_descriptor)
+        assert closed.value.errno == errno.EBADF
+    finally:
+        for opened_anchor_descriptor in opened_anchor_descriptors:
+            try:
+                actual_close(opened_anchor_descriptor)
+            except OSError:
+                pass
+        private.close()
+        publication.close()
+
+
+def test_post_open_anchor_disappearance_surfaces_ambiguous_close_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publication = workspace_module.PublicationDirectory.open(tmp_path)
+    private = publication.open_private_directory(
+        ".rembggui-publish",
+        "publication",
+    )
+    key = publication.target_key(tmp_path / "output.webp")
+    initial = publication.acquire_output_lock(private, key)
+    initial.close()
+    anchor_name = f".{key}.transaction-anchor"
+    close_failed = False
+    actual_close = os.close
+    opened_anchor_descriptors = _inject_post_open_anchor_disappearance(
+        publication,
+        anchor_name,
+        monkeypatch,
+    )
+
+    def close_anchor_then_raise(descriptor: int) -> None:
+        nonlocal close_failed
+        actual_close(descriptor)
+        if (
+            not close_failed
+            and opened_anchor_descriptors
+            and descriptor == opened_anchor_descriptors[0]
+        ):
+            close_failed = True
+            raise OSError(errno.EIO, "synthetic post-close raced anchor failure")
+
+    monkeypatch.setattr(workspace_module.os, "close", close_anchor_then_raise)
+    reused: int | None = None
+    try:
+        with pytest.raises(AppError, match="post-close raced anchor failure") as exc:
+            publication.acquire_output_lock(private, key)
+
+        assert close_failed
+        assert len(opened_anchor_descriptors) == 1
+        reused = _force_descriptor_reuse(
+            tmp_path / "raced-anchor-fd-reuse",
+            opened_anchor_descriptors[0],
+            actual_close,
+        )
+        assert workspace_module._drain_attached_bound_directory_closes(exc.value) == 0
+        os.fstat(reused)
+    finally:
+        if reused is not None:
+            try:
+                actual_close(reused)
+            except OSError:
+                pass
+        else:
+            for opened_anchor_descriptor in opened_anchor_descriptors:
+                try:
+                    actual_close(opened_anchor_descriptor)
+                except OSError:
+                    pass
         private.close()
         publication.close()
 
