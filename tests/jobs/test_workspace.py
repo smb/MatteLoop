@@ -11,7 +11,7 @@ from contextlib import ExitStack
 from dataclasses import FrozenInstanceError
 from decimal import Decimal
 from fractions import Fraction
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import psutil
 import pytest
@@ -705,6 +705,134 @@ def test_private_output_lock_is_process_exclusive_and_stale_name_is_reusable(
     reused_directory.close()
 
 
+def test_output_target_component_key_coalesces_windows_path_aliases() -> None:
+    direct = PureWindowsPath(r"C:\Exports\Output.WEBP")
+    aliased = PureWindowsPath(r"c:/Exports/../Exports/output.webp")
+
+    assert workspace_module._output_target_component_key(
+        direct.name,
+        platform="windows",
+    ) == workspace_module._output_target_component_key(
+        aliased.name,
+        platform="windows",
+    )
+
+
+def test_output_target_component_key_coalesces_macos_unicode_aliases() -> None:
+    composed = "caf\N{LATIN SMALL LETTER E WITH ACUTE}.webp"
+    decomposed = "cafe\N{COMBINING ACUTE ACCENT}.webp"
+
+    assert workspace_module._output_target_component_key(
+        composed,
+        platform="darwin",
+    ) == workspace_module._output_target_component_key(
+        decomposed,
+        platform="darwin",
+    )
+
+
+def test_output_target_component_key_keeps_distinct_posix_targets_independent() -> None:
+    assert workspace_module._output_target_component_key(
+        "first.webp",
+        platform="posix",
+    ) != workspace_module._output_target_component_key(
+        "second.webp",
+        platform="posix",
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="exercises POSIX descriptor identities")
+def test_output_lock_anchor_is_parent_bound_and_stale_pending_reuses_exact_inode(
+    tmp_path: Path,
+) -> None:
+    publication = workspace_module.PublicationDirectory.open(tmp_path)
+    private = publication.open_private_directory(
+        ".rembggui-publish",
+        "publication",
+    )
+    key = publication.target_key(tmp_path / "output.webp")
+    lock = publication.acquire_output_lock(private, key)
+    pending_name = f".{key}.publish-pending"
+    first = private.open_fixed_pending(pending_name)
+    os.write(first, b"stale")
+    first_identity = os.fstat(first).st_dev, os.fstat(first).st_ino
+    os.close(first)
+    try:
+        anchors = tuple(tmp_path.glob(".*.transaction-anchor"))
+        assert len(anchors) == 1
+        assert anchors[0].parent == tmp_path
+        assert not tuple(private.path.glob(".*.transaction-anchor"))
+
+        recycled = private.open_fixed_pending(pending_name, lock)
+        try:
+            assert (os.fstat(recycled).st_dev, os.fstat(recycled).st_ino) == (
+                first_identity
+            )
+            assert os.fstat(recycled).st_size == 0
+        finally:
+            os.close(recycled)
+    finally:
+        lock.close()
+        private.close()
+        publication.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses fork to simulate owner death")
+def test_parent_anchored_output_lock_is_reusable_after_process_death(
+    tmp_path: Path,
+) -> None:
+    context = multiprocessing.get_context("fork")
+    ready = context.Event()
+
+    def acquire_then_die() -> None:
+        publication = workspace_module.PublicationDirectory.open(tmp_path)
+        private = publication.open_private_directory(
+            ".rembggui-publish",
+            "publication",
+        )
+        key = publication.target_key(tmp_path / "output.webp")
+        publication.acquire_output_lock(private, key)
+        ready.set()
+        os._exit(0)
+
+    process = context.Process(target=acquire_then_die)
+    process.start()
+    assert ready.wait(5)
+    process.join(5)
+    assert process.exitcode == 0
+
+    publication = workspace_module.PublicationDirectory.open(tmp_path)
+    private = publication.open_private_directory(
+        ".rembggui-publish",
+        "publication",
+    )
+    key = publication.target_key(tmp_path / "output.webp")
+    reused = publication.acquire_output_lock(private, key)
+    reused.close()
+    private.close()
+    publication.close()
+
+
+def test_existing_private_pending_without_anchored_owner_is_never_unlinked(
+    tmp_path: Path,
+) -> None:
+    private_path = tmp_path / ".rembggui-publish"
+    private_path.mkdir(mode=0o700)
+    pending = private_path / ".pending"
+    pending.write_bytes(b"foreign-pending")
+    identity = pending.stat().st_dev, pending.stat().st_ino
+    directory = RecoveryDirectory.open(tmp_path, private_path.name)
+    try:
+        with pytest.raises(AppError, match="no transaction owner") as exc:
+            directory.open_fixed_pending(pending.name)
+    finally:
+        directory.close()
+
+    assert (pending.stat().st_dev, pending.stat().st_ino) == identity
+    assert pending.read_bytes() == b"foreign-pending"
+    assert exc.value.code is ErrorCode.CUT_WORKSPACE_UNSAFE
+
+
 @pytest.mark.skipif(os.name == "nt", reason="exercises the POSIX lock adapter")
 def test_private_output_locks_for_different_targets_do_not_serialize(
     tmp_path: Path,
@@ -720,6 +848,105 @@ def test_private_output_locks_for_different_targets_do_not_serialize(
         second.close()
         first.close()
         directory.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="exercises the POSIX lock adapter")
+def test_parent_anchored_locks_for_distinct_targets_are_independent(
+    tmp_path: Path,
+) -> None:
+    publication = workspace_module.PublicationDirectory.open(tmp_path)
+    private = publication.open_private_directory(
+        ".rembggui-publish",
+        "publication",
+    )
+    first = publication.acquire_output_lock(
+        private,
+        publication.target_key(tmp_path / "first.webp"),
+    )
+    second = publication.acquire_output_lock(
+        private,
+        publication.target_key(tmp_path / "second.webp"),
+    )
+    try:
+        first.assert_owned()
+        second.assert_owned()
+    finally:
+        second.close()
+        first.close()
+        private.close()
+        publication.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="exercises POSIX descriptor cleanup")
+def test_parent_anchor_close_failure_retains_exact_retry_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publication = workspace_module.PublicationDirectory.open(tmp_path)
+    private = publication.open_private_directory(
+        ".rembggui-publish",
+        "publication",
+    )
+    key = publication.target_key(tmp_path / "output.webp")
+    lock = publication.acquire_output_lock(private, key)
+    anchor_descriptor = lock._anchor_descriptor
+    assert anchor_descriptor is not None
+    actual_close = os.close
+    fail_anchor = True
+
+    def fail_anchor_once(descriptor: int) -> None:
+        if fail_anchor and descriptor == anchor_descriptor:
+            raise OSError(errno.EIO, "synthetic anchor close failure")
+        actual_close(descriptor)
+
+    monkeypatch.setattr(workspace_module.os, "close", fail_anchor_once)
+    with pytest.raises(AppError) as exc:
+        lock.close()
+
+    assert lock._descriptor is None
+    assert lock._anchor_descriptor == anchor_descriptor
+    fail_anchor = False
+    assert workspace_module._drain_attached_bound_directory_closes(exc.value) == 1
+    assert lock._anchor_descriptor is None
+    private.close()
+    publication.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="exercises POSIX descriptor cleanup")
+def test_unlock_error_with_successful_close_releases_local_and_kernel_ownership(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publication = workspace_module.PublicationDirectory.open(tmp_path)
+    private = publication.open_private_directory(
+        ".rembggui-publish",
+        "publication",
+    )
+    key = publication.target_key(tmp_path / "output.webp")
+    lock = publication.acquire_output_lock(private, key)
+    fail_release = True
+    actual_release = workspace_module._SystemAdvisoryFileLock.release
+
+    def injected_release(self, descriptor: int) -> None:
+        if fail_release:
+            raise OSError(errno.EIO, "synthetic unlock failure")
+        actual_release(self, descriptor)
+
+    monkeypatch.setattr(
+        workspace_module._SystemAdvisoryFileLock,
+        "release",
+        injected_release,
+    )
+    with pytest.raises(AppError, match="synthetic unlock failure"):
+        lock.close()
+
+    assert lock._descriptor is None
+    assert lock._anchor_descriptor is None
+    reused = publication.acquire_output_lock(private, key)
+    fail_release = False
+    reused.close()
+    private.close()
+    publication.close()
 
 
 def test_private_output_lock_serializes_threads_even_if_platform_lock_reenters(

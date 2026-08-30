@@ -646,14 +646,15 @@ class AtomicOutputPublisher:
             ):
                 raise _output_error("validated output candidate changed")
             transaction = _acquire_output_transaction(publication, destination)
+            transaction.assert_owned()
             if policy is CollisionPolicy.REPLACE:
                 previous = _snapshot_existing_output(publication, destination_name)
                 if previous is not None:
                     recovery = _prepare_durable_recovery(
                         publication,
-                        destination,
                         destination_name,
                         previous,
+                        transaction,
                     )
                     _require_existing_output_current(
                         publication,
@@ -672,6 +673,7 @@ class AtomicOutputPublisher:
                     transaction,
                 )
                 try:
+                    transaction.assert_owned()
                     publication.replace_from(
                         staged.directory, staged.name, destination_name
                     )
@@ -686,6 +688,7 @@ class AtomicOutputPublisher:
                         raise _output_error(
                             "published output is not the validated candidate"
                         )
+                    transaction.assert_owned()
                     publication.assert_still_bound()
                 except BaseException as error:
                     _rollback_publication(
@@ -694,6 +697,7 @@ class AtomicOutputPublisher:
                         destination_name,
                         previous,
                         recovery,
+                        transaction,
                         error,
                     )
                     raise
@@ -706,6 +710,7 @@ class AtomicOutputPublisher:
                 )
                 publication.assert_still_bound()
                 try:
+                    transaction.assert_owned()
                     _rename_no_replace(
                         staged.directory,
                         staged.name,
@@ -743,6 +748,7 @@ class AtomicOutputPublisher:
                     # writer. Never unlink it by pathname.
                     raise
                 publication.assert_still_bound()
+                transaction.assert_owned()
         except AppError as error:
             if error.code is ErrorCode.CUT_WORKSPACE_UNSAFE:
                 wrapped = _output_error(
@@ -1665,15 +1671,15 @@ class _HeldOutputTransaction:
     directory: RecoveryDirectory = field(repr=False, compare=False)
     lock: AdvisoryFileLock = field(repr=False, compare=False)
     target_key: str
+    destination_name: str
+
+    def assert_owned(self) -> None:
+        self.lock.assert_owned()
 
 
 _MAX_ROLLBACK_RESTORE_ATTEMPTS = 4
 _RECOVERY_DIRECTORY_NAME = ".rembggui-recovery"
 _PUBLICATION_DIRECTORY_NAME = ".rembggui-publish"
-
-
-def _output_target_key(destination: Path) -> str:
-    return hashlib.sha256(os.fsencode(str(destination.absolute()))).hexdigest()
 
 
 def _acquire_output_transaction(
@@ -1684,10 +1690,11 @@ def _acquire_output_transaction(
         _PUBLICATION_DIRECTORY_NAME,
         "publication",
     )
-    target_key = _output_target_key(destination)
+    destination_name = publication.name_for(destination)
+    target_key = publication.target_key(destination)
     try:
-        lock = directory.acquire_advisory_lock(f"{target_key}.transaction.lock")
-        return _HeldOutputTransaction(directory, lock, target_key)
+        lock = publication.acquire_output_lock(directory, target_key)
+        return _HeldOutputTransaction(directory, lock, target_key, destination_name)
     except BlockingIOError as error:
         wrapped = _output_error("output transaction is already active")
         transfer_deferred_bound_directory_closes(error, wrapped)
@@ -1915,7 +1922,7 @@ def _prepare_publication_stage(
     publication_directory = transaction.directory
     publication_directory.assert_still_bound()
     target_key = transaction.target_key
-    if target_key != _output_target_key(destination):
+    if transaction.destination_name != publication.name_for(destination):
         raise _output_error("output transaction does not match its destination")
     publication_name = f"{target_key}.publish"
     pending_name = f".{target_key}.publish-pending"
@@ -1928,9 +1935,15 @@ def _prepare_publication_stage(
             candidate._descriptor,
             candidate.identity.size,
             candidate.sha256,
+            transaction,
         )
         _fsync_directory(publication_directory)
-        publication_directory.replace(pending_name, publication_name)
+        publication_directory.replace_owned(
+            pending_name,
+            publication_name,
+            descriptor,
+            transaction.lock,
+        )
         if not _descriptor_bound_entry_matches(
             publication_directory,
             publication_name,
@@ -2010,12 +2023,13 @@ def _fsync_directory(directory: RecoveryDirectory) -> None:
 
 def _prepare_durable_recovery(
     publication: PublicationDirectory,
-    destination: Path,
     destination_name: str,
     previous: _HeldPreviousOutput,
+    transaction: _HeldOutputTransaction,
 ) -> _HeldRecoveryFile:
     """Create a bounded durable old-output recovery before destructive commit."""
-    target_key = _output_target_key(destination)
+    transaction.assert_owned()
+    target_key = transaction.target_key
     recovery_name = f"{target_key}.recovery"
     shadow_name = f"{target_key}.recovery-shadow"
     pending_name = f".{target_key}.recovery-pending"
@@ -2054,7 +2068,7 @@ def _prepare_durable_recovery(
                     previous.identity,
                     previous.sha256,
                 )
-                _prepare_recovery_shadow(recovery)
+                _prepare_recovery_shadow(recovery, transaction)
                 recovery_directory.assert_still_bound()
                 existing_descriptor = None
                 return recovery
@@ -2065,6 +2079,7 @@ def _prepare_durable_recovery(
             linked = recovery_directory.link_parent_file(
                 destination_name,
                 pending_name,
+                transaction.lock,
             )
         except OSError:
             linked = False
@@ -2082,13 +2097,41 @@ def _prepare_durable_recovery(
                     "hard-linked output recovery changed while prepared"
                 )
         else:
-            descriptor, identity = _stage_bound_recovery_copy(
+            try:
+                existing_pending = recovery_directory.open_read_write(pending_name)
+            except FileNotFoundError:
+                existing_pending = None
+            if existing_pending is not None and _descriptor_bound_entry_matches(
                 recovery_directory,
                 pending_name,
-                previous.descriptor,
-                previous.identity.size,
+                existing_pending,
+                previous.identity,
                 previous.sha256,
-            )
+            ):
+                descriptor = existing_pending
+                identity = previous.identity
+            else:
+                if existing_pending is not None:
+                    same_source_inode = (
+                        _candidate_identity(os.fstat(existing_pending)).device,
+                        _candidate_identity(os.fstat(existing_pending)).inode,
+                    ) == (
+                        previous.identity.device,
+                        previous.identity.inode,
+                    )
+                    os.close(existing_pending)
+                    if same_source_inode:
+                        raise _output_error(
+                            "stale recovery pending aliases the held previous output"
+                        )
+                descriptor, identity = _stage_bound_recovery_copy(
+                    recovery_directory,
+                    pending_name,
+                    previous.descriptor,
+                    previous.identity.size,
+                    previous.sha256,
+                    transaction,
+                )
         os.fsync(descriptor)
         recovery_directory.assert_still_bound()
         _require_existing_output_current(
@@ -2097,7 +2140,12 @@ def _prepare_durable_recovery(
             previous,
         )
         _fsync_directory(recovery_directory)
-        recovery_directory.replace(pending_name, recovery_name)
+        recovery_directory.replace_owned(
+            pending_name,
+            recovery_name,
+            descriptor,
+            transaction.lock,
+        )
         if not _descriptor_bound_entry_matches(
             recovery_directory,
             recovery_name,
@@ -2123,7 +2171,7 @@ def _prepare_durable_recovery(
             identity,
             previous.sha256,
         )
-        _prepare_recovery_shadow(recovery)
+        _prepare_recovery_shadow(recovery, transaction)
         recovery_directory.assert_still_bound()
         descriptor = None
         return recovery
@@ -2148,8 +2196,10 @@ def _prepare_durable_recovery(
 
 def _prepare_recovery_shadow(
     recovery: _HeldRecoveryFile,
+    transaction: _HeldOutputTransaction,
 ) -> Path:
     """Keep a second bounded durable name for recovery-path interference."""
+    transaction.assert_owned()
     recovery_directory = recovery.directory
     if _held_bound_entry_matches(
         recovery_directory,
@@ -2184,7 +2234,11 @@ def _prepare_recovery_shadow(
     primary: BaseException | None = None
     try:
         try:
-            linked = recovery_directory.link_file(recovery.name, pending_name)
+            linked = recovery_directory.link_file(
+                recovery.name,
+                pending_name,
+                transaction.lock,
+            )
         except OSError:
             linked = False
         if linked:
@@ -2205,11 +2259,17 @@ def _prepare_recovery_shadow(
                 recovery.descriptor,
                 recovery.identity.size,
                 recovery.sha256,
+                transaction,
             )
         os.fsync(descriptor)
         recovery_directory.assert_still_bound()
         _fsync_directory(recovery_directory)
-        recovery_directory.replace(pending_name, recovery.shadow_name)
+        recovery_directory.replace_owned(
+            pending_name,
+            recovery.shadow_name,
+            descriptor,
+            transaction.lock,
+        )
         if not _descriptor_bound_entry_matches(
             recovery_directory,
             recovery.shadow_name,
@@ -2254,8 +2314,10 @@ def _stage_bound_recovery_copy(
     source: int,
     expected_size: int,
     expected_sha256: str,
+    transaction: _HeldOutputTransaction,
 ) -> tuple[int, CandidateFileIdentity]:
-    descriptor = directory.open_fixed_pending(name)
+    transaction.assert_owned()
+    descriptor = directory.open_fixed_pending(name, transaction.lock)
     try:
         _copy_descriptor(source, descriptor)
         os.fsync(descriptor)
@@ -2268,6 +2330,7 @@ def _stage_bound_recovery_copy(
             expected_sha256,
         ):
             raise _output_error("bound recovery copy changed while written")
+        transaction.assert_owned()
         return descriptor, identity
     except BaseException as error:
         try:
@@ -2349,8 +2412,10 @@ def _rollback_publication(
     destination_name: str,
     previous: _HeldPreviousOutput | None,
     recovery: _HeldRecoveryFile | None,
+    transaction: _HeldOutputTransaction,
     primary: BaseException,
 ) -> None:
+    transaction.assert_owned()
     if previous is None:
         primary.add_note(
             "commit verification failed with no previous output; the current "
@@ -2361,7 +2426,9 @@ def _rollback_publication(
         raise _output_error("previous output has no durable precommit recovery")
 
     failures: list[str] = []
-    target_key = _output_target_key(destination)
+    if transaction.destination_name != publication.name_for(destination):
+        raise _output_error("rollback transaction does not match its destination")
+    target_key = transaction.target_key
     for attempt in range(_MAX_ROLLBACK_RESTORE_ATTEMPTS):
         staged: _HeldPublicationFile | None = None
         restored = False
@@ -2373,6 +2440,7 @@ def _rollback_publication(
                 recovery.descriptor,
                 recovery.identity.size,
                 recovery.sha256,
+                transaction,
             )
             staged = _HeldPublicationFile(
                 recovery.directory,
@@ -2383,6 +2451,7 @@ def _rollback_publication(
                 owns_directory=False,
             )
             _fsync_directory(recovery.directory)
+            transaction.assert_owned()
             publication.replace_from(
                 staged.directory,
                 staged.name,

@@ -307,8 +307,8 @@ rollback, staged-file inspection, and recovery cleanup. The lock is a fixed
 `.rembggui-publish` directory. It is opened no-follow and identity-checked,
 locked non-blockingly with `flock(LOCK_EX|LOCK_NB)` on POSIX or the Windows CRT
 one-byte non-blocking file-lock contract, and never unlinked. Process death
-therefore releases ownership in the kernel while leaving only one harmless,
-reusable bounded name. A short-lived per-target in-process guard also covers a
+therefore releases ownership in the kernel while leaving a harmless, reusable
+bounded name. A short-lived per-target in-process guard also covers a
 platform whose native byte-range lock permits same-process re-entry; its map
 entry is removed on release. Different destination names use different lock
 entries and do not serialize globally. Contention is returned before snapshot,
@@ -323,6 +323,43 @@ the owning transaction subsequently completes or restores the old output. The
 workspace tests additionally prove stale-name reuse after abrupt owner exit,
 independent target locks, the in-process guard under a deliberately re-entrant
 platform adapter, and the Windows non-blocking lock/unlock call contract.
+
+A final adversarial review showed that the first target-lock key still depended
+on the caller's path spelling and that the lock entry itself was not continuously
+bound. A real fork using `exports/../exports/output.webp` entered beside the
+canonical spelling. Replacing the live lock inode let a second process lock the
+replacement, and renaming/recreating `.rembggui-publish` let it create a new lock
+and overwrite the first process's fixed stage. The same bypass reached recovery
+shadow and rollback-restore pending slots. Each case was captured as a RED fork
+test that pauses the first publisher with a live inode before starting the second.
+
+The corrected transaction derives one key from the validated destination
+component in the already-bound `PublicationDirectory`; it never hashes the raw
+caller path. Windows and macOS name domains normalize to NFC and case-fold, while
+POSIX retains case distinctions. A fixed per-target anchor is created directly,
+handle-relatively, in the bound output parent—not inside either replaceable
+private directory. Its exact held descriptor binds the expected publication
+directory identity and lock-file identity. Acquisition opens and validates that
+anchor before opening an existing lock, so a replaced lock or private directory
+fails closed before the contender creates, truncates, links, replaces, or unlinks
+any private entry.
+
+The anchor, publication directory, and lock identities are revalidated from held
+descriptors before and after every publication, recovery, shadow, and restore
+stage mutation. Fixed pending files are created with `O_EXCL`; a pre-existing
+slot is reused only while the unchanged parent anchor and exclusive kernel lock
+prove that no other transaction owns it. Reuse truncates the exact held stale
+inode rather than unlinking its pathname. Ambiguous or unanchored entries fail
+closed and remain byte-for-byte untouched. Fixed-slot replace also verifies the
+held source inode around the handle-relative rename. The parent anchor and lock
+are never deleted, so storage remains bounded at two coordination entries per
+destination and process death remains reusable through kernel lock release.
+
+These ownership rules preserve the earlier parent-namespace guarantee: the
+critical section validates and operates on the originally held handles. If the
+outer parent name is exchanged, rollback can restore the original bound parent
+without touching the foreign replacement; the lexical binding check still makes
+the overall publication fail rather than falsely reporting success.
 
 ## Architecture and safety decisions
 
@@ -364,15 +401,15 @@ platform adapter, and the Windows non-blocking lock/unlock call contract.
 
 ## Verification
 
-- `.venv/bin/pytest -q` — **977 passed in 50.34s** outside the restricted
-  shared-memory sandbox. The five warnings are Python 3.13's macOS warning for
+- `.venv/bin/pytest -q` — **989 passed in 50.59s** outside the restricted
+  shared-memory sandbox. The nine warnings are Python 3.13's macOS warning for
   the deliberately forked cross-process lock repros in an already
   multi-threaded pytest process; no test failed or hung.
 - Focused WebP, render, Rebuild, workspace, and native Windows cache-filesystem
-  contract gate — **298 passed in 37.32s**, including same-target process
-  serialization, crash-released stale-lock reuse, parent-namespace swaps,
-  durable sync ordering, retry-owner retention, and bidirectional
-  Windows-sharing fakes.
+  contract gate — **332 passed in 37.82s**, including canonical alias
+  serialization, lock/private-directory replacement, fixed-slot ownership,
+  crash-released stale-lock reuse, parent-namespace swaps, durable sync ordering,
+  retry-owner retention, and bidirectional Windows-sharing fakes.
 - `ruff check .` — passed.
 - `ruff format --check` over all 7 changed Python files — passed.
 - `mypy src` — passed for 29 source files.

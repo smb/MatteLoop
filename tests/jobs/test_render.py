@@ -76,15 +76,28 @@ def test_candidate_path_is_owned_by_the_explicit_private_work_directory(
 
 @pytest.mark.skipif(os.name == "nt", reason="uses fork to exercise process locking")
 @pytest.mark.parametrize(
-    "policy", [CollisionPolicy.REPLACE, CollisionPolicy.CHOOSE_ANOTHER_NAME]
+    ("policy", "dotdot_alias"),
+    [
+        (CollisionPolicy.REPLACE, False),
+        (CollisionPolicy.CHOOSE_ANOTHER_NAME, False),
+        (CollisionPolicy.REPLACE, True),
+    ],
 )
 def test_same_target_process_cannot_replace_live_publication_stage(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     policy: CollisionPolicy,
+    dotdot_alias: bool,
 ) -> None:
     publisher = AtomicOutputPublisher()
-    target = tmp_path / "output.webp"
+    output_directory = tmp_path / "exports"
+    output_directory.mkdir()
+    target = output_directory / "output.webp"
+    contender_target = (
+        output_directory / ".." / output_directory.name / target.name
+        if dotdot_alias
+        else target
+    )
     if policy is CollisionPolicy.REPLACE:
         target.write_bytes(b"old-output")
     candidate_a = _validated_candidate(publisher, target, tmp_path, "process-a")
@@ -127,7 +140,7 @@ def test_same_target_process_cannot_replace_live_publication_stage(
         assert stage_ready.wait(10)
         private_stages = tuple(
             path
-            for path in (tmp_path / ".rembggui-publish").glob("*.publish")
+            for path in (output_directory / ".rembggui-publish").glob("*.publish")
             if not path.name.startswith(".")
         )
         assert len(private_stages) == 1
@@ -135,14 +148,197 @@ def test_same_target_process_cannot_replace_live_publication_stage(
         live_identity = live_stage.stat().st_dev, live_stage.stat().st_ino
 
         with pytest.raises(AppError) as exc:
-            publisher.publish(candidate_b, target, policy)
+            publisher.publish(candidate_b, contender_target, policy)
+
+        assert exc.value.code is ErrorCode.INVALID_OUTPUT
+        assert exc.value.stage == "output"
+        assert exc.value.retry_action == "retry-output"
+        assert exc.value.technical_detail == "output transaction is already active"
+        assert (live_stage.stat().st_dev, live_stage.stat().st_ino) == live_identity
+        assert live_stage.read_bytes() == candidate_a_bytes
+    finally:
+        release_stage.set()
+        process.join(15)
+        candidate_a.close()
+        candidate_b.close()
+
+    assert process.exitcode == 0
+    assert result.get(timeout=2) == ("ok", "")
+    assert target.read_bytes() == candidate_a_bytes
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses fork to exercise process locking")
+def test_replaced_lock_entry_cannot_bypass_live_publication_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publisher = AtomicOutputPublisher()
+    target = tmp_path / "output.webp"
+    target.write_bytes(b"old-output")
+    candidate_a = _validated_candidate(publisher, target, tmp_path, "lock-swap-a")
+    candidate_b = _validated_candidate(publisher, target, tmp_path, "lock-swap-b")
+    candidate_a_bytes = candidate_a.path.read_bytes()
+    context = multiprocessing.get_context("fork")
+    stage_ready = context.Event()
+    release_stage = context.Event()
+    result = context.Queue()
+    test_process = os.getpid()
+    actual_prepare = render_module._prepare_publication_stage
+
+    def pause_process_a_after_stage(candidate, publication, destination, transaction):
+        staged = actual_prepare(candidate, publication, destination, transaction)
+        if os.getpid() != test_process:
+            stage_ready.set()
+            if not release_stage.wait(10):
+                raise RuntimeError("test did not release publication stage")
+        return staged
+
+    monkeypatch.setattr(
+        render_module,
+        "_prepare_publication_stage",
+        pause_process_a_after_stage,
+    )
+
+    def publish_a() -> None:
+        try:
+            publisher.publish(candidate_a, target, CollisionPolicy.REPLACE)
+        except BaseException as error:
+            result.put((type(error).__name__, str(error)))
+        else:
+            result.put(("ok", ""))
+        finally:
+            candidate_a.close()
+
+    process = context.Process(target=publish_a)
+    process.start()
+    saved_lock: Path | None = None
+    replacement_lock: Path | None = None
+    try:
+        assert stage_ready.wait(10)
+        publish_directory = tmp_path / ".rembggui-publish"
+        live_stage = next(
+            path
+            for path in publish_directory.glob("*.publish")
+            if not path.name.startswith(".")
+        )
+        live_identity = live_stage.stat().st_dev, live_stage.stat().st_ino
+        live_bytes = live_stage.read_bytes()
+        lock_path = next(publish_directory.glob("*.transaction.lock"))
+        saved_lock = publish_directory / ".held-original-lock"
+        replacement_lock = publish_directory / ".foreign-replacement-lock"
+        os.replace(lock_path, saved_lock)
+        lock_path.write_bytes(b"foreign-lock")
+        foreign_identity = lock_path.stat().st_dev, lock_path.stat().st_ino
+
+        with pytest.raises(AppError) as exc:
+            publisher.publish(candidate_b, target, CollisionPolicy.REPLACE)
 
         assert exc.value.code is ErrorCode.INVALID_OUTPUT
         assert exc.value.stage == "output"
         assert exc.value.retry_action == "retry-output"
         assert (live_stage.stat().st_dev, live_stage.stat().st_ino) == live_identity
-        assert live_stage.read_bytes() == candidate_a_bytes
+        assert live_stage.read_bytes() == live_bytes
+        assert (lock_path.stat().st_dev, lock_path.stat().st_ino) == foreign_identity
+        assert lock_path.read_bytes() == b"foreign-lock"
     finally:
+        publish_directory = tmp_path / ".rembggui-publish"
+        lock_paths = tuple(publish_directory.glob("*.transaction.lock"))
+        if saved_lock is not None and saved_lock.exists() and lock_paths:
+            os.replace(lock_paths[0], replacement_lock)
+            os.replace(saved_lock, lock_paths[0])
+        release_stage.set()
+        process.join(15)
+        candidate_a.close()
+        candidate_b.close()
+
+    assert process.exitcode == 0
+    assert result.get(timeout=2) == ("ok", "")
+    assert target.read_bytes() == candidate_a_bytes
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses fork to exercise process locking")
+def test_replaced_publish_directory_cannot_bypass_live_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publisher = AtomicOutputPublisher()
+    target = tmp_path / "output.webp"
+    target.write_bytes(b"old-output")
+    candidate_a = _validated_candidate(publisher, target, tmp_path, "dir-swap-a")
+    candidate_b = _validated_candidate(publisher, target, tmp_path, "dir-swap-b")
+    candidate_a_bytes = candidate_a.path.read_bytes()
+    context = multiprocessing.get_context("fork")
+    stage_ready = context.Event()
+    release_stage = context.Event()
+    result = context.Queue()
+    test_process = os.getpid()
+    actual_prepare = render_module._prepare_publication_stage
+
+    def pause_process_a_after_stage(candidate, publication, destination, transaction):
+        staged = actual_prepare(candidate, publication, destination, transaction)
+        if os.getpid() != test_process:
+            stage_ready.set()
+            if not release_stage.wait(10):
+                raise RuntimeError("test did not release publication stage")
+        return staged
+
+    monkeypatch.setattr(
+        render_module,
+        "_prepare_publication_stage",
+        pause_process_a_after_stage,
+    )
+
+    def publish_a() -> None:
+        try:
+            publisher.publish(candidate_a, target, CollisionPolicy.REPLACE)
+        except BaseException as error:
+            result.put((type(error).__name__, str(error)))
+        else:
+            result.put(("ok", ""))
+        finally:
+            candidate_a.close()
+
+    process = context.Process(target=publish_a)
+    process.start()
+    displaced = tmp_path / ".rembggui-publish-held"
+    foreign = tmp_path / ".rembggui-publish-foreign"
+    try:
+        assert stage_ready.wait(10)
+        publish_directory = tmp_path / ".rembggui-publish"
+        live_stage = next(
+            path
+            for path in publish_directory.glob("*.publish")
+            if not path.name.startswith(".")
+        )
+        live_identity = live_stage.stat().st_dev, live_stage.stat().st_ino
+        live_bytes = live_stage.read_bytes()
+        os.replace(publish_directory, displaced)
+        displaced_stage = displaced / live_stage.name
+        publish_directory.mkdir(mode=0o700)
+        marker = publish_directory / "foreign-marker"
+        marker.write_bytes(b"foreign-directory")
+
+        with pytest.raises(AppError) as exc:
+            publisher.publish(candidate_b, target, CollisionPolicy.REPLACE)
+
+        assert exc.value.code is ErrorCode.INVALID_OUTPUT
+        assert exc.value.stage == "output"
+        assert exc.value.retry_action == "retry-output"
+        assert (
+            displaced_stage.stat().st_dev,
+            displaced_stage.stat().st_ino,
+        ) == live_identity
+        assert displaced_stage.read_bytes() == live_bytes
+        assert tuple(path.name for path in publish_directory.iterdir()) == (
+            "foreign-marker",
+        )
+        assert marker.read_bytes() == b"foreign-directory"
+    finally:
+        publish_directory = tmp_path / ".rembggui-publish"
+        if displaced.exists():
+            if publish_directory.exists():
+                os.replace(publish_directory, foreign)
+            os.replace(displaced, publish_directory)
         release_stage.set()
         process.join(15)
         candidate_a.close()
@@ -170,18 +366,20 @@ def test_same_target_process_cannot_replace_live_recovery_shadow_pending(
     release_pending = context.Event()
     result = context.Queue()
     test_process = os.getpid()
-    actual_replace = render_module.RecoveryDirectory.replace
+    actual_replace = render_module.RecoveryDirectory.replace_owned
 
-    def pause_process_a_shadow_pending(self, source, destination):
+    def pause_process_a_shadow_pending(
+        self, source, destination, source_descriptor, owner
+    ):
         if os.getpid() != test_process and destination.endswith(".recovery-shadow"):
             pending_ready.set()
             if not release_pending.wait(10):
                 raise RuntimeError("test did not release recovery shadow")
-        return actual_replace(self, source, destination)
+        return actual_replace(self, source, destination, source_descriptor, owner)
 
     monkeypatch.setattr(
         render_module.RecoveryDirectory,
-        "replace",
+        "replace_owned",
         pause_process_a_shadow_pending,
     )
 
@@ -197,6 +395,8 @@ def test_same_target_process_cannot_replace_live_recovery_shadow_pending(
 
     process = context.Process(target=publish_a)
     process.start()
+    saved_lock: Path | None = None
+    replacement_lock: Path | None = None
     try:
         assert pending_ready.wait(10)
         pending_files = tuple(
@@ -205,6 +405,12 @@ def test_same_target_process_cannot_replace_live_recovery_shadow_pending(
         assert len(pending_files) == 1
         pending = pending_files[0]
         pending_identity = pending.stat().st_dev, pending.stat().st_ino
+        publish_directory = tmp_path / ".rembggui-publish"
+        lock_path = next(publish_directory.glob("*.transaction.lock"))
+        saved_lock = publish_directory / ".held-shadow-lock"
+        replacement_lock = publish_directory / ".foreign-shadow-lock"
+        os.replace(lock_path, saved_lock)
+        lock_path.write_bytes(b"foreign-shadow-lock")
 
         with pytest.raises(AppError) as exc:
             publisher.publish(candidate_b, target, CollisionPolicy.REPLACE)
@@ -215,6 +421,11 @@ def test_same_target_process_cannot_replace_live_recovery_shadow_pending(
         assert (pending.stat().st_dev, pending.stat().st_ino) == pending_identity
         assert pending.read_bytes() == old_bytes
     finally:
+        publish_directory = tmp_path / ".rembggui-publish"
+        lock_paths = tuple(publish_directory.glob("*.transaction.lock"))
+        if saved_lock is not None and saved_lock.exists() and lock_paths:
+            os.replace(lock_paths[0], replacement_lock)
+            os.replace(saved_lock, lock_paths[0])
         release_pending.set()
         process.join(15)
         candidate_a.close()
@@ -253,10 +464,15 @@ def test_same_target_process_cannot_replace_live_rollback_restore_pending(
         return actual_published_matches(*args, **kwargs)
 
     def pause_process_a_restore_pending(
-        directory, name, source, expected_size, expected_sha256
+        directory, name, source, expected_size, expected_sha256, transaction
     ):
         staged = actual_stage_copy(
-            directory, name, source, expected_size, expected_sha256
+            directory,
+            name,
+            source,
+            expected_size,
+            expected_sha256,
+            transaction,
         )
         if os.getpid() != test_process and ".restore-" in name:
             pending_ready.set()
@@ -289,12 +505,20 @@ def test_same_target_process_cannot_replace_live_rollback_restore_pending(
 
     process = context.Process(target=publish_a)
     process.start()
+    saved_lock: Path | None = None
+    replacement_lock: Path | None = None
     try:
         assert pending_ready.wait(10)
         restore_files = tuple((tmp_path / ".rembggui-recovery").glob(".*.restore-0"))
         assert len(restore_files) == 1
         restore = restore_files[0]
         restore_identity = restore.stat().st_dev, restore.stat().st_ino
+        publish_directory = tmp_path / ".rembggui-publish"
+        lock_path = next(publish_directory.glob("*.transaction.lock"))
+        saved_lock = publish_directory / ".held-restore-lock"
+        replacement_lock = publish_directory / ".foreign-restore-lock"
+        os.replace(lock_path, saved_lock)
+        lock_path.write_bytes(b"foreign-restore-lock")
 
         with pytest.raises(AppError) as exc:
             publisher.publish(candidate_b, target, CollisionPolicy.REPLACE)
@@ -305,6 +529,11 @@ def test_same_target_process_cannot_replace_live_rollback_restore_pending(
         assert (restore.stat().st_dev, restore.stat().st_ino) == restore_identity
         assert restore.read_bytes() == old_bytes
     finally:
+        publish_directory = tmp_path / ".rembggui-publish"
+        lock_paths = tuple(publish_directory.glob("*.transaction.lock"))
+        if saved_lock is not None and saved_lock.exists() and lock_paths:
+            os.replace(lock_paths[0], replacement_lock)
+            os.replace(saved_lock, lock_paths[0])
         release_pending.set()
         process.join(15)
         candidate_a.close()
@@ -439,12 +668,12 @@ def test_busy_output_transaction_transfers_retryable_lock_close_owner(
     target = tmp_path / "output.webp"
     candidate = _validated_candidate(publisher, target, tmp_path, "busy-owner")
 
-    def fail_lock(_self, _name: str):
+    def fail_lock(_self, _directory, _target_key: str):
         raise busy
 
     monkeypatch.setattr(
-        render_module.RecoveryDirectory,
-        "acquire_advisory_lock",
+        render_module.PublicationDirectory,
+        "acquire_output_lock",
         fail_lock,
     )
 
@@ -1718,7 +1947,7 @@ def test_recovery_descriptor_closes_when_shadow_preparation_fails(
     candidate = _validated_candidate(publisher, target, tmp_path, "shadow-failure")
     recovery_descriptors: list[int] = []
 
-    def fail_shadow(recovery) -> None:
+    def fail_shadow(recovery, _transaction) -> None:
         recovery_descriptors.append(recovery.descriptor)
         raise RuntimeError("synthetic shadow preparation failure")
 

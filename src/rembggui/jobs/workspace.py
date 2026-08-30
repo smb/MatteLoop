@@ -25,6 +25,7 @@ import re
 import stat
 import sys
 import time
+import unicodedata
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack
@@ -2070,9 +2071,8 @@ class _BoundDirectory:
         _forget_deferred_bound_directory_close(self)
 
     def assert_still_named(self) -> None:
+        self.assert_handle_safe()
         if self._windows_handles:
-            for handle in self._windows_handles:
-                self._windows_api.assert_directory_handle(handle)
             return
         if self.descriptor is not None:
             opened = os.fstat(self.descriptor)
@@ -2082,6 +2082,17 @@ class _BoundDirectory:
                 raise _unsafe_error("bound workspace directory was renamed") from error
             if _directory_identity(opened) != _directory_identity(named):
                 raise _unsafe_error("bound workspace directory was redirected")
+
+    def assert_handle_safe(self) -> None:
+        """Validate held handles without relying on their lexical namespace."""
+        if self._windows_handles:
+            for handle in self._windows_handles:
+                self._windows_api.assert_directory_handle(handle)
+            return
+        if self.descriptor is not None and not stat.S_ISDIR(
+            os.fstat(self.descriptor).st_mode
+        ):
+            raise _unsafe_error("bound workspace handle is not a directory")
 
     def lstat(self, name: str) -> os.stat_result:
         _validate_component(name)
@@ -2478,6 +2489,9 @@ class PublicationDirectory:
     def assert_still_bound(self) -> None:
         self._directory.assert_still_named()
 
+    def assert_handle_bound(self) -> None:
+        self._directory.assert_handle_safe()
+
     def name_for(self, path: Path) -> str:
         _validate_path_value(path)
         parent = Path(os.path.abspath(path.parent))
@@ -2485,6 +2499,17 @@ class PublicationDirectory:
             raise _unsafe_error("output entry is outside the bound publication parent")
         _validate_component(path.name)
         return path.name
+
+    def target_key(self, path: Path) -> str:
+        name = self.name_for(path)
+        platform = (
+            "windows"
+            if os.name == "nt"
+            else "darwin"
+            if sys.platform == "darwin"
+            else "posix"
+        )
+        return _output_target_component_key(name, platform=platform)
 
     def path_for(self, name: str) -> Path:
         _validate_component(name)
@@ -2495,6 +2520,12 @@ class PublicationDirectory:
 
     def open_read(self, name: str) -> int:
         return self._directory.open_publication_read(name)
+
+    def open_read_write(self, name: str) -> int:
+        return self._directory.open_publication_read_write(name)
+
+    def open_new(self, name: str) -> int:
+        return self._directory.open_new_publication_fd(name)
 
     def replace(self, source: str, destination: str) -> None:
         self._directory.replace_publication(source, destination)
@@ -2532,6 +2563,26 @@ class PublicationDirectory:
 
     def open_private_directory(self, name: str, purpose: str) -> RecoveryDirectory:
         return RecoveryDirectory.open_from(self, name, purpose)
+
+    def acquire_output_lock(
+        self,
+        directory: RecoveryDirectory,
+        target_key: str,
+    ) -> AdvisoryFileLock:
+        """Bind a target lock and its private directory to this parent handle."""
+        if not isinstance(directory, RecoveryDirectory):
+            raise TypeError("output lock requires a private publication directory")
+        if (
+            not isinstance(target_key, str)
+            or len(target_key) != 64
+            or any(character not in "0123456789abcdef" for character in target_key)
+        ):
+            raise ValueError("output target key must be lowercase SHA-256")
+        return directory._acquire_advisory_lock(
+            f"{target_key}.transaction.lock",
+            publication=self,
+            anchor_name=f".{target_key}.transaction-anchor",
+        )
 
 
 class _SystemAdvisoryFileLock:
@@ -2614,14 +2665,21 @@ class _SystemAdvisoryFileLock:
 
 
 class AdvisoryFileLock:
-    """Owned advisory lock; its fixed namespace entry is intentionally retained."""
+    """Owned advisory lock, optionally bound to an output-parent anchor."""
 
     __slots__ = (
         "_adapter",
+        "_anchor_descriptor",
+        "_anchor_identity",
+        "_anchor_name",
         "_descriptor",
+        "_directory",
+        "_directory_identity",
         "_local_key",
         "_local_lock",
         "_locked",
+        "_publication",
+        "_lock_identity",
         "name",
     )
 
@@ -2634,6 +2692,13 @@ class AdvisoryFileLock:
         local_lock: Lock,
         *,
         locked: bool = True,
+        directory: RecoveryDirectory | None = None,
+        lock_identity: tuple[int, int] | None = None,
+        publication: PublicationDirectory | None = None,
+        anchor_name: str | None = None,
+        anchor_descriptor: int | None = None,
+        anchor_identity: tuple[int, int] | None = None,
+        directory_identity: tuple[int, int] | None = None,
     ) -> None:
         self.name = name
         self._descriptor: int | None = descriptor
@@ -2641,25 +2706,101 @@ class AdvisoryFileLock:
         self._locked = locked
         self._local_key = local_key
         self._local_lock: Lock | None = local_lock
+        self._directory = directory
+        self._lock_identity = lock_identity
+        self._publication = publication
+        self._anchor_name = anchor_name
+        self._anchor_descriptor = anchor_descriptor
+        self._anchor_identity = anchor_identity
+        self._directory_identity = directory_identity
+
+    @property
+    def anchored(self) -> bool:
+        return self._publication is not None
+
+    def assert_owned(self) -> None:
+        """Fail closed if the parent, private directory, anchor, or lock changed."""
+        descriptor = self._descriptor
+        directory = self._directory
+        lock_identity = self._lock_identity
+        if descriptor is None or directory is None or lock_identity is None:
+            raise _unsafe_error("output transaction lock is no longer owned")
+        directory.assert_handle_owned()
+        current_lock = directory.lstat(self.name)
+        if (
+            stat.S_ISLNK(current_lock.st_mode)
+            or not stat.S_ISREG(current_lock.st_mode)
+            or _directory_identity(current_lock) != lock_identity
+            or _directory_identity(os.fstat(descriptor)) != lock_identity
+        ):
+            raise _unsafe_error("output transaction lock ownership changed")
+
+        publication = self._publication
+        if publication is None:
+            return
+        anchor_name = self._anchor_name
+        anchor_descriptor = self._anchor_descriptor
+        anchor_identity = self._anchor_identity
+        directory_identity = self._directory_identity
+        if (
+            anchor_name is None
+            or anchor_descriptor is None
+            or anchor_identity is None
+            or directory_identity is None
+        ):
+            raise _unsafe_error("output transaction anchor is incomplete")
+        publication.assert_handle_bound()
+        if directory.identity != directory_identity:
+            raise _unsafe_error("output private directory ownership changed")
+        before = publication.lstat(anchor_name)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or _directory_identity(before) != anchor_identity
+            or _directory_identity(os.fstat(anchor_descriptor)) != anchor_identity
+        ):
+            raise _unsafe_error("output transaction anchor ownership changed")
+        payload = _read_small_descriptor(anchor_descriptor)
+        after = publication.lstat(anchor_name)
+        if _directory_identity(after) != anchor_identity:
+            raise _unsafe_error("output transaction anchor changed while checked")
+        if _parse_output_lock_anchor(payload) != (directory_identity, lock_identity):
+            raise _unsafe_error("output transaction anchor content changed")
+        after_lock = directory.lstat(self.name)
+        if _directory_identity(after_lock) != lock_identity:
+            raise _unsafe_error("output transaction lock changed while checked")
 
     def close(self, primary: BaseException | None = None) -> None:
         descriptor = self._descriptor
-        if descriptor is None:
+        if descriptor is None and self._anchor_descriptor is None:
             return
         failures: list[BaseException] = []
         if self._locked:
+            if descriptor is None:
+                failures.append(
+                    _unsafe_error("output transaction lost its locked descriptor")
+                )
+            else:
+                try:
+                    self._adapter.release(descriptor)
+                except BaseException as error:
+                    failures.append(error)
+                else:
+                    self._locked = False
+        for attribute in ("_descriptor", "_anchor_descriptor"):
+            owned_descriptor = getattr(self, attribute)
+            if owned_descriptor is None:
+                continue
             try:
-                self._adapter.release(descriptor)
+                os.close(owned_descriptor)
             except BaseException as error:
                 failures.append(error)
             else:
-                self._locked = False
-        try:
-            os.close(descriptor)
-        except BaseException as error:
-            failures.append(error)
-        else:
-            self._descriptor = None
+                setattr(self, attribute, None)
+                if attribute == "_descriptor":
+                    # Closing the OS handle releases any kernel lock even when
+                    # the explicit unlock call itself reported an error.
+                    self._locked = False
         if not self._locked or self._descriptor is None:
             local_lock = self._local_lock
             if local_lock is not None:
@@ -2672,11 +2813,11 @@ class AdvisoryFileLock:
             primary.add_note(
                 f"additional output-transaction lock cleanup failure: {detail}"
             )
-            if self._descriptor is not None:
+            if self._descriptor is not None or self._anchor_descriptor is not None:
                 _attach_close_owner(primary, self)
             return
         failure = _unsafe_error(f"cannot close output-transaction lock: {detail}")
-        if self._descriptor is not None:
+        if self._descriptor is not None or self._anchor_descriptor is not None:
             _attach_close_owner(failure, self)
         raise failure from failures[0]
 
@@ -2689,6 +2830,7 @@ class RecoveryDirectory:
 
     __slots__ = (
         "_directory",
+        "_identity",
         "_owned_parent",
         "_parent",
         "_stack",
@@ -2702,6 +2844,7 @@ class RecoveryDirectory:
         name: str,
         parent: PublicationDirectory,
         directory: _BoundDirectory,
+        identity: tuple[int, int],
         stack: ExitStack,
         owned_parent: PublicationDirectory | None,
     ) -> None:
@@ -2709,6 +2852,7 @@ class RecoveryDirectory:
         self.name = name
         self._parent = parent
         self._directory = directory
+        self._identity = identity
         self._stack = stack
         self._owned_parent = owned_parent
 
@@ -2760,6 +2904,7 @@ class RecoveryDirectory:
                 name,
                 parent,
                 directory,
+                _directory_identity(parent.lstat(name)),
                 stack,
                 None,
             )
@@ -2805,6 +2950,26 @@ class RecoveryDirectory:
     def assert_still_bound(self) -> None:
         self._parent.assert_still_bound()
         self._directory.assert_still_named()
+        current = self._parent.lstat(self.name)
+        if (
+            not stat.S_ISDIR(current.st_mode)
+            or _directory_identity(current) != self._identity
+        ):
+            raise _unsafe_error("output private directory ownership changed")
+
+    def assert_handle_owned(self) -> None:
+        self._parent.assert_handle_bound()
+        self._directory.assert_handle_safe()
+        current = self._parent.lstat(self.name)
+        if (
+            not stat.S_ISDIR(current.st_mode)
+            or _directory_identity(current) != self._identity
+        ):
+            raise _unsafe_error("output private directory ownership changed")
+
+    @property
+    def identity(self) -> tuple[int, int]:
+        return self._identity
 
     def path_for(self, name: str) -> Path:
         _validate_component(name)
@@ -2819,24 +2984,78 @@ class RecoveryDirectory:
     def open_read_write(self, name: str) -> int:
         return self._directory.open_publication_read_write(name)
 
-    def open_fixed_pending(self, name: str) -> int:
-        """Create or handle-relatively replace one bounded pending file."""
+    def open_fixed_pending(
+        self,
+        name: str,
+        owner: AdvisoryFileLock | None = None,
+    ) -> int:
+        """Open a bounded pending inode without ever unlinking an unknown entry."""
+        if owner is not None:
+            owner.assert_owned()
         try:
-            return self._directory.open_new_publication_fd(name)
+            descriptor = self._directory.open_new_publication_fd(name)
         except FileExistsError:
+            if owner is None or not owner.anchored:
+                raise _unsafe_error(
+                    "existing output private pending entry has no transaction owner"
+                )
             info = self._directory.publication_lstat(name)
             if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
                 raise _unsafe_error("output private pending entry is redirected")
-            self._directory.unlink(name)
-            self._directory.fsync()
-            return self._directory.open_new_publication_fd(name)
+            descriptor = self._directory.open_publication_read_write(name)
+            opened = os.fstat(descriptor)
+            current = self._directory.publication_lstat(name)
+            if not (
+                _directory_identity(info)
+                == _directory_identity(opened)
+                == _directory_identity(current)
+            ):
+                os.close(descriptor)
+                raise _unsafe_error("output private pending entry changed while opened")
+            owner.assert_owned()
+            # Recycle only the exact held stale inode. If its name is swapped now,
+            # the foreign replacement is untouched and later identity checks fail.
+            os.ftruncate(descriptor, 0)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+        if owner is not None:
+            try:
+                owner.assert_owned()
+            except BaseException:
+                os.close(descriptor)
+                raise
+        return descriptor
 
     def acquire_advisory_lock(self, name: str) -> AdvisoryFileLock:
         """Acquire a fixed, never-unlinked process lock in this bound directory."""
+        return self._acquire_advisory_lock(name)
+
+    def _acquire_advisory_lock(
+        self,
+        name: str,
+        *,
+        publication: PublicationDirectory | None = None,
+        anchor_name: str | None = None,
+    ) -> AdvisoryFileLock:
         _validate_component(name)
+        if (publication is None) != (anchor_name is None):
+            raise ValueError("publication and output-lock anchor must be paired")
+        if publication is not None:
+            if publication is not self._parent:
+                raise _unsafe_error("output lock parent does not own private directory")
+            if anchor_name is None:
+                raise AssertionError("validated output-lock anchor is missing")
+            _validate_component(anchor_name)
         descriptor: int | None = None
+        anchor_descriptor: int | None = None
         held: AdvisoryFileLock | None = None
-        local_key = os.path.normcase(os.path.abspath(self.path_for(name)))
+        local_path = (
+            publication.path_for(anchor_name)
+            if publication is not None and anchor_name is not None
+            else self.path_for(name)
+        )
+        local_key = os.path.normcase(os.path.abspath(local_path))
+        if os.name == "nt" or sys.platform == "darwin":
+            local_key = unicodedata.normalize("NFC", local_key).casefold()
         local_lock = _acquire_local_advisory_lock(local_key)
         if local_lock is None:
             raise BlockingIOError(
@@ -2845,9 +3064,60 @@ class RecoveryDirectory:
             )
         created = False
         try:
+            expected_directory_identity: tuple[int, int] | None = None
+            expected_lock_identity: tuple[int, int] | None = None
+            anchor_identity: tuple[int, int] | None = None
+            if publication is not None and anchor_name is not None:
+                try:
+                    before_anchor = publication.lstat(anchor_name)
+                    if stat.S_ISLNK(before_anchor.st_mode) or not stat.S_ISREG(
+                        before_anchor.st_mode
+                    ):
+                        raise _unsafe_error("output transaction anchor is redirected")
+                    anchor_descriptor = publication.open_read(anchor_name)
+                    opened_anchor = os.fstat(anchor_descriptor)
+                    payload = _read_small_descriptor(anchor_descriptor)
+                    after_anchor = publication.lstat(anchor_name)
+                    if not (
+                        _directory_identity(before_anchor)
+                        == _directory_identity(opened_anchor)
+                        == _directory_identity(after_anchor)
+                    ):
+                        raise _unsafe_error(
+                            "output transaction anchor changed while opened"
+                        )
+                    anchor_identity = _directory_identity(opened_anchor)
+                    (
+                        expected_directory_identity,
+                        expected_lock_identity,
+                    ) = _parse_output_lock_anchor(payload)
+                    if expected_directory_identity != self.identity:
+                        raise _unsafe_error(
+                            "output transaction private directory does not match anchor"
+                        )
+                except FileNotFoundError:
+                    anchor_descriptor = None
+
             try:
-                descriptor = self._directory.open_new_publication_fd(name)
-                created = True
+                if expected_lock_identity is not None:
+                    before = self._directory.publication_lstat(name)
+                    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+                        raise _unsafe_error("output transaction lock is redirected")
+                    descriptor = self._directory.open_publication_read_write(name)
+                    opened = os.fstat(descriptor)
+                    after_open = self._directory.publication_lstat(name)
+                    if not (
+                        _directory_identity(before)
+                        == _directory_identity(opened)
+                        == _directory_identity(after_open)
+                        == expected_lock_identity
+                    ):
+                        raise _unsafe_error(
+                            "output transaction lock does not match anchor"
+                        )
+                else:
+                    descriptor = self._directory.open_new_publication_fd(name)
+                    created = True
             except FileExistsError:
                 before = self._directory.publication_lstat(name)
                 if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
@@ -2883,8 +3153,16 @@ class RecoveryDirectory:
                 adapter,
                 local_key,
                 local_lock,
+                directory=self,
+                lock_identity=_directory_identity(os.fstat(descriptor)),
+                publication=publication,
+                anchor_name=anchor_name,
+                anchor_descriptor=anchor_descriptor,
+                anchor_identity=anchor_identity,
+                directory_identity=self.identity if publication is not None else None,
             )
             descriptor = None
+            anchor_descriptor = None
             locked_descriptor = held._descriptor
             if locked_descriptor is None:
                 raise RuntimeError(
@@ -2904,7 +3182,35 @@ class RecoveryDirectory:
                 raise _unsafe_error("output transaction lock changed while acquired")
             if created:
                 self._directory.fsync()
-            self.assert_still_bound()
+            if publication is not None and anchor_name is not None:
+                if held._anchor_descriptor is None:
+                    payload = _output_lock_anchor_payload(
+                        self.identity,
+                        _directory_identity(os.fstat(locked_descriptor)),
+                    )
+                    new_anchor = publication.open_new(anchor_name)
+                    try:
+                        _write_all(new_anchor, payload)
+                        os.fsync(new_anchor)
+                        new_anchor_info = os.fstat(new_anchor)
+                        current_anchor = publication.lstat(anchor_name)
+                        if not stat.S_ISREG(
+                            current_anchor.st_mode
+                        ) or _directory_identity(current_anchor) != _directory_identity(
+                            new_anchor_info
+                        ):
+                            raise _unsafe_error(
+                                "output transaction anchor changed while created"
+                            )
+                        publication.fsync()
+                    except BaseException:
+                        os.close(new_anchor)
+                        raise
+                    held._anchor_descriptor = new_anchor
+                    held._anchor_identity = _directory_identity(new_anchor_info)
+                held.assert_owned()
+            else:
+                self.assert_still_bound()
             return held
         except BaseException as error:
             if held is not None:
@@ -2917,20 +3223,37 @@ class RecoveryDirectory:
                     local_key,
                     local_lock,
                     locked=False,
+                    directory=self,
+                    lock_identity=_directory_identity(os.fstat(descriptor)),
                 )
                 descriptor = None
                 cleanup.close(error)
                 held = cleanup
+            if anchor_descriptor is not None:
+                try:
+                    os.close(anchor_descriptor)
+                except BaseException as close_error:
+                    error.add_note(
+                        "additional output-transaction anchor cleanup failure: "
+                        f"{close_error}"
+                    )
             if held is None:
                 _release_local_advisory_lock(local_key, local_lock)
             raise
 
-    def link_parent_file(self, source: str, destination: str) -> bool:
+    def link_parent_file(
+        self,
+        source: str,
+        destination: str,
+        owner: AdvisoryFileLock | None = None,
+    ) -> bool:
         _validate_component(source)
         _validate_component(destination)
         parent_descriptor = self._parent._directory.descriptor
         if parent_descriptor is None or self._directory.descriptor is None:
             return False
+        if owner is not None:
+            owner.assert_owned()
         os.link(
             source,
             destination,
@@ -2938,13 +3261,22 @@ class RecoveryDirectory:
             dst_dir_fd=self._directory.descriptor,
             follow_symlinks=False,
         )
+        if owner is not None:
+            owner.assert_owned()
         return True
 
-    def link_file(self, source: str, destination: str) -> bool:
+    def link_file(
+        self,
+        source: str,
+        destination: str,
+        owner: AdvisoryFileLock | None = None,
+    ) -> bool:
         _validate_component(source)
         _validate_component(destination)
         if self._directory.descriptor is None:
             return False
+        if owner is not None:
+            owner.assert_owned()
         os.link(
             source,
             destination,
@@ -2952,10 +3284,40 @@ class RecoveryDirectory:
             dst_dir_fd=self._directory.descriptor,
             follow_symlinks=False,
         )
+        if owner is not None:
+            owner.assert_owned()
         return True
 
     def replace(self, source: str, destination: str) -> None:
         self._directory.replace_publication(source, destination)
+
+    def replace_owned(
+        self,
+        source: str,
+        destination: str,
+        source_descriptor: int,
+        owner: AdvisoryFileLock,
+    ) -> None:
+        """Replace a fixed slot only while its exact source inode is still held."""
+        _validate_component(source)
+        _validate_component(destination)
+        owner.assert_owned()
+        self.assert_handle_owned()
+        expected = _directory_identity(os.fstat(source_descriptor))
+        before = self.lstat(source)
+        if not stat.S_ISREG(before.st_mode) or _directory_identity(before) != expected:
+            raise _unsafe_error("owned output private source changed before replace")
+        owner.assert_owned()
+        current = self.lstat(source)
+        if _directory_identity(current) != expected:
+            raise _unsafe_error("owned output private source changed during replace")
+        self._directory.replace_publication(source, destination)
+        owner.assert_owned()
+        installed = self.lstat(destination)
+        if _directory_identity(installed) != expected:
+            raise _unsafe_error(
+                "owned output private destination changed after replace"
+            )
 
     def fsync(self) -> None:
         self._directory.fsync()
@@ -4058,6 +4420,73 @@ def _stat_identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
 
 def _directory_identity(info: os.stat_result) -> tuple[int, int]:
     return info.st_dev, info.st_ino
+
+
+_OUTPUT_LOCK_ANCHOR_SCHEMA = "rembggui-output-lock-anchor-v1"
+
+
+def _output_lock_anchor_payload(
+    directory_identity: tuple[int, int],
+    lock_identity: tuple[int, int],
+) -> bytes:
+    values = (*directory_identity, *lock_identity)
+    if any(type(value) is not int or value < 0 for value in values):
+        raise ValueError("output lock anchor identities must be non-negative integers")
+    return (
+        f"{_OUTPUT_LOCK_ANCHOR_SCHEMA}\n"
+        f"{directory_identity[0]}:{directory_identity[1]}\n"
+        f"{lock_identity[0]}:{lock_identity[1]}\n"
+    ).encode("ascii")
+
+
+def _parse_output_lock_anchor(
+    payload: bytes,
+) -> tuple[tuple[int, int], tuple[int, int]]:
+    if not isinstance(payload, bytes) or len(payload) > 256:
+        raise _unsafe_error("output transaction anchor has invalid size")
+    try:
+        schema, directory, lock, terminator = payload.decode("ascii").split("\n")
+        directory_parts = directory.split(":")
+        lock_parts = lock.split(":")
+        if (
+            schema != _OUTPUT_LOCK_ANCHOR_SCHEMA
+            or terminator
+            or len(directory_parts) != 2
+            or len(lock_parts) != 2
+            or any(
+                not part or not part.isdecimal()
+                for part in (*directory_parts, *lock_parts)
+            )
+        ):
+            raise ValueError
+        values = tuple(int(part) for part in (*directory_parts, *lock_parts))
+    except (UnicodeDecodeError, ValueError) as error:
+        raise _unsafe_error("output transaction anchor is malformed") from error
+    return (values[0], values[1]), (values[2], values[3])
+
+
+def _read_small_descriptor(descriptor: int) -> bytes:
+    position = os.lseek(descriptor, 0, os.SEEK_CUR)
+    try:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        payload = os.read(descriptor, 257)
+        if len(payload) > 256:
+            raise _unsafe_error("output transaction anchor exceeds its size bound")
+        return payload
+    finally:
+        os.lseek(descriptor, position, os.SEEK_SET)
+
+
+def _output_target_component_key(name: str, *, platform: str) -> str:
+    """Hash only a validated entry component in its filesystem name domain."""
+    _validate_component(name)
+    if platform not in {"windows", "darwin", "posix"}:
+        raise ValueError("output target platform is invalid")
+    canonical = unicodedata.normalize("NFC", name)
+    if platform in {"windows", "darwin"}:
+        canonical = canonical.casefold()
+    encoded = f"rembggui-output-target-v1\0{platform}\0{canonical}".encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _entry_exists_no_follow(path: Path) -> bool:
