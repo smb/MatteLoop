@@ -131,6 +131,41 @@ ok: true (spawn/shared-memory roundtrip, video decode, WebP alpha)
 Native platform builds were not executed. No SAM, cloud, remote, or
 `withoutBg` scope was introduced.
 
+## Task 13 literal state-matrix follow-up
+
+The final review-only follow-up expands the independent literal presentation
+matrix to all 22 approved reducer-valid rows. It now includes fresh previewing,
+failed re-preview with the model still available, failed re-preview with the
+model unavailable, preflight, rebuild-running, cancelling, edited cuts with
+and without a preview, and edited-cut recovery. Each row asserts literal
+result copy/marker/status/checkerboard, source surface/error copy, action
+enablement and visibility, success/recovery/Workspace visibility, primary
+action, requested focus, editor lock versus actual Inspector enablement, and
+the relevant accessible description. The older matrix also now asserts its
+literal editor-lock expectation against the Replace control.
+
+### Matrix verification
+
+```text
+QT_QPA_PLATFORM=offscreen .venv/bin/pytest -q tests/ui/test_task13_review_fixes.py
+81 passed
+
+QT_QPA_PLATFORM=offscreen .venv/bin/pytest -q tests/ui
+115 passed
+
+.venv/bin/ruff check tests/ui/test_task13_review_fixes.py
+All checks passed
+
+.venv/bin/ruff format --check tests/ui/test_task13_review_fixes.py
+1 file already formatted
+
+.venv/bin/mypy src
+Success: no issues found in 38 source files
+```
+
+No production files changed in this matrix-only follow-up. Native platform
+builds remain unexecuted.
+
 ## Task 13 application-shell re-review follow-up
 
 The second Sol re-review follow-up keeps failed re-previews with an existing
