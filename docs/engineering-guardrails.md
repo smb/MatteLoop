@@ -87,35 +87,36 @@ touching the same file**, stop. Do not write it. Report to the user what you
 were about to harden and why, and ask whether it is worth it. Three in a row is
 the documented entry point into the spiral above.
 
-### G1a — Commit messages carry a real body
+### G1a — Commit messages carry a compact body
 
-**Rule.** A short conventional summary line, a blank line, then a body that says
-what actually changed. One-line commits are not acceptable.
+**Rule.** A short conventional summary line, a blank line, then **one to two
+lines per changed point**. A commit touching four things has roughly four short
+paragraphs.
 
-The body records the reworked behaviour, the modules touched, the decisions
-folded in, and the defects addressed — prose or bullets, either is fine.
+A one-line commit is not acceptable. Neither is an essay — no narrative, no
+background, no restating a point twice. The body is a scannable list of what
+changed, readable in fifteen seconds.
 
 **Never put verification status in the body.** No "all tests pass", no pass
-counts, no ruff/mypy/CI status. Git history is the durable record of *what
-changed and why*; verification is ephemeral and belongs in the report to the
-user, not in the log.
+counts, no ruff/mypy/CI status. Git history records *what changed*; verification
+is ephemeral and belongs in the report to the user.
 
 ```
 fix: accept untagged SDR colour metadata
 
-Untagged MP4 containers report AVCOL_*_UNSPECIFIED for primaries, transfer
-and matrix, and an unspecified colour range. _color_profile treated each of
-those as fatal, so ordinary phone and screen recordings were rejected as
-"HDR unsupported" despite being 8-bit SDR.
+Untagged containers report AVCOL_*_UNSPECIFIED (2) and an unspecified range,
+which _color_profile treated as fatal — ordinary 8-bit SDR clips were rejected
+as SOURCE_HDR_UNSUPPORTED.
 
-Unspecified values now resolve to the standard SDR defaults: BT.709, or
-BT.601 below 720p, with limited range for YUV input. The resolved profile
-records which values were assumed rather than declared. Genuine HDR
-signalling — PQ, HLG, BT.2020 primaries and matrices — is still rejected,
-as are the existing HDR side-data and >8-bit pixel-format cases.
+Unspecified values now resolve to SDR defaults before validation: BT.709, or
+BT.601 below 720p, with limited range for YUV. The profile records what it
+assumed.
 
-Trigger: repro — dropping an untagged 1280x720 H.264 clip failed with
-ErrorCode.SOURCE_HDR_UNSUPPORTED.
+Genuine HDR is still rejected and now named: PQ and HLG transfers, BT.2020
+primaries and matrices.
+
+Trigger: repro — an untagged 1280x720 H.264 clip that PyAV decodes cleanly
+failed with "color primaries 2 cannot be proven as BT.709/sRGB".
 ```
 
 ### G2 — Vertical slice before depth
