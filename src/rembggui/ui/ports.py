@@ -1,0 +1,78 @@
+"""Small ports joining the reducer store to the Qt shell."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Protocol
+
+from rembggui.core.state import AppState, Event
+
+
+class StateStore(Protocol):
+    """Reducer-backed state source consumed by the window."""
+
+    @property
+    def state(self) -> AppState: ...
+
+    def dispatch(self, event: Event) -> None: ...
+
+    def subscribe(self, listener: Callable[[AppState], None]) -> Callable[[], None]: ...
+
+
+@dataclass(frozen=True)
+class ChooseVideoRequested:
+    pass
+
+
+@dataclass(frozen=True)
+class PreviewFrameRequested:
+    pass
+
+
+@dataclass(frozen=True)
+class RenderVideoRequested:
+    pass
+
+
+@dataclass(frozen=True)
+class RebuildEditedCutsRequested:
+    pass
+
+
+@dataclass(frozen=True)
+class OpenOutputRequested:
+    pass
+
+
+@dataclass(frozen=True)
+class OpenOutputFolderRequested:
+    pass
+
+
+@dataclass(frozen=True)
+class ManageModelsRequested:
+    pass
+
+
+@dataclass(frozen=True)
+class ManageWorkspacesRequested:
+    pass
+
+
+type WindowCommand = (
+    ChooseVideoRequested
+    | PreviewFrameRequested
+    | RenderVideoRequested
+    | RebuildEditedCutsRequested
+    | OpenOutputRequested
+    | OpenOutputFolderRequested
+    | ManageModelsRequested
+    | ManageWorkspacesRequested
+)
+
+
+class WindowServices(Protocol):
+    """Controller-owned command dispatcher; implemented in Task 15."""
+
+    def dispatch(self, command: WindowCommand) -> None: ...

@@ -13,6 +13,50 @@ from pathlib import Path
 from rembggui import __version__
 
 
+def _run_gui() -> int:
+    """Lazily import Qt only for the normal graphical launch path."""
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+
+    from rembggui.core.state import AppState, Event, reduce
+    from rembggui.ui.main_window import MainWindow
+    from rembggui.ui.ports import WindowCommand
+    from rembggui.ui.theme import install_theme
+
+    class ReducerStore:
+        def __init__(self) -> None:
+            self.state = AppState()
+            self._listeners: list[object] = []
+
+        def dispatch(self, event: Event) -> None:
+            self.state = reduce(self.state, event)
+            for listener in tuple(self._listeners):
+                listener(self.state)  # type: ignore[operator]
+
+        def subscribe(self, listener: object):  # type: ignore[no-untyped-def]
+            self._listeners.append(listener)
+
+            def unsubscribe() -> None:
+                self._listeners.remove(listener)
+
+            return unsubscribe
+
+    class NoOpServices:
+        def dispatch(self, command: WindowCommand) -> None:
+            del command
+
+    application = QApplication.instance()
+    if not isinstance(application, QApplication):
+        application = QApplication(["rembggui"])
+    application.setApplicationName("rembgGUI")
+    application.setOrganizationName("rembgGUI")
+    install_theme(application)
+    settings = QSettings()
+    window = MainWindow(ReducerStore(), NoOpServices(), settings)
+    window.show()
+    return application.exec()
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run rembgGUI, handling headless diagnostics before Qt is imported."""
     multiprocessing.freeze_support()
@@ -62,5 +106,4 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0
 
-    print("The graphical application is not available in this scaffold yet.")
-    return 0
+    return _run_gui()

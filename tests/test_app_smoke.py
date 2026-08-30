@@ -82,6 +82,20 @@ def test_main_reports_version_without_opening_qt(capsys):
     assert capsys.readouterr().out.strip().startswith("rembgGUI ")
 
 
+def test_main_delegates_normal_launch_to_lazy_gui_seam(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import rembggui.app as app
+
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        app, "_run_gui", lambda: calls.append(True) or 23, raising=False
+    )
+
+    assert app.main([]) == 23
+    assert calls == [True]
+
+
 def test_main_smoke_test_prints_machine_readable_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
