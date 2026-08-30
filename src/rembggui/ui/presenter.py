@@ -13,6 +13,7 @@ from rembggui.core.state import (
     SourceState,
     capabilities,
 )
+from rembggui.ui.source_error_copy import source_error_copy
 
 
 @dataclass(frozen=True)
@@ -127,11 +128,9 @@ def present(state: AppState) -> PresentationModel:
         PreviewState.STALE,
     } or (state.preview is PreviewState.RUNNING and state.preview_result is not None)
     source_error_detail = str(state.source_error) if state.source_error else None
-    source_error_message = (
-        "This video could not be read. Choose another video."
-        if state.source is SourceState.ERROR
-        else None
-    )
+    source_error_message = None
+    if state.source is SourceState.ERROR:
+        source_error_message = source_error_copy(state.source_error)
     artifact_path = (
         str(state.artifact_result.value) if state.artifact_result is not None else None
     )

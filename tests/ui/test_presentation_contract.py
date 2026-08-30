@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from PySide6.QtCore import QSettings
 
+from rembggui.core.errors import AppError, ErrorCode
 from rembggui.core.state import (
     AppState,
     ArtifactResult,
@@ -30,6 +31,19 @@ from rembggui.ui.inspector import Inspector
 from rembggui.ui.presenter import present
 from rembggui.ui.theme import load_packaged_fonts
 
+_SOURCE_ERROR_CASES = [
+    (ErrorCode.SOURCE_NOT_LOCAL, "Choose a video stored on this Mac."),
+    (ErrorCode.SOURCE_UNREADABLE, "Choose a video file that can be opened and read."),
+    (ErrorCode.SOURCE_NO_VIDEO, "Choose a file that contains a video track."),
+    (ErrorCode.SOURCE_CORRUPT, "Choose another video file; this one appears damaged."),
+    (ErrorCode.SOURCE_ZERO_DURATION, "Choose a video with a positive duration."),
+    (ErrorCode.SOURCE_HDR_UNSUPPORTED, "Convert to 8-bit SDR and try again."),
+    (ErrorCode.SOURCE_DIMENSIONS_UNSUPPORTED, "Resize to 3840×2160 or smaller."),
+    (ErrorCode.SOURCE_FPS_UNSUPPORTED, "Convert the video to 60 fps or less."),
+    (ErrorCode.SOURCE_DURATION_UNSUPPORTED, "Choose a video under 10 minutes."),
+    (ErrorCode.SOURCE_FORMAT_UNSUPPORTED, "Choose an MP4, MOV, WebM, or MKV video."),
+]
+
 
 def _ready() -> AppState:
     return reduce(
@@ -44,6 +58,18 @@ def _current() -> AppState:
         running,
         PreviewSucceeded(
             "preview", PreviewResult("source", "preview-request", "result")
+        ),
+    )
+
+
+def _source_error(code: ErrorCode) -> AppState:
+    loading = reduce(AppState(), SourceLoadRequested("source", "load"))
+    return reduce(
+        loading,
+        SourceLoadFailed(
+            "source",
+            "load",
+            AppError(code, "source", "source.test", "technical detail", "retry"),
         ),
     )
 
@@ -122,6 +148,37 @@ def test_presenter_has_no_qt_or_job_imports() -> None:
         if isinstance(node, ast.ImportFrom)
     ]
     assert not any(name.startswith(("PySide6", "rembggui.jobs")) for name in imports)
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    _SOURCE_ERROR_CASES,
+)
+def test_each_source_error_code_selects_actionable_copy(
+    code: ErrorCode, expected: str
+) -> None:
+    model = present(_source_error(code))
+
+    assert model.source_error_message == expected
+    assert model.source_error_detail == "technical detail"
+
+
+def test_mapped_source_error_copies_are_distinct() -> None:
+    messages = [
+        present(_source_error(code)).source_error_message
+        for code, _ in _SOURCE_ERROR_CASES
+    ]
+
+    assert len(messages) == len(set(messages))
+
+
+def test_unmapped_source_error_uses_generic_copy() -> None:
+    model = present(_source_error(ErrorCode.INVALID_ERROR))
+
+    assert model.source_error_message == (
+        "This video could not be read. Choose another video."
+    )
+    assert model.source_error_detail == "technical detail"
 
 
 def test_missing_packaged_fonts_fall_back_honestly(tmp_path: Path) -> None:
