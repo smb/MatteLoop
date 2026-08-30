@@ -8,6 +8,7 @@ from PySide6.QtTest import QTest
 
 from rembggui.core.timeline import (
     PlayheadChanged,
+    ResetRange,
     SetEndToPlayhead,
     SetStartToPlayhead,
     StepFrame,
@@ -39,9 +40,9 @@ def test_timeline_shows_exact_playhead_range_and_outside_status(qtbot) -> None:
     widget.set_presentation(_presentation(playhead=Fraction(2)))
 
     assert widget.height() >= 176
-    assert widget.timecode_label.text() == "00:00:02.000"
+    assert widget.timecode_label.text() == "0:02.000"
     assert widget.frame_label.text() == "Frame 000061"
-    assert widget.range_label.text() == "IN 00:00:00.500   OUT 00:00:01.500"
+    assert widget.range_label.text() == "IN 0:00.500   OUT 0:01.500"
     assert widget.range_status_label.text() == "Outside export range"
     assert widget.accessibleDescription().startswith("Preview frame playhead")
 
@@ -109,3 +110,15 @@ def test_timeline_buttons_emit_range_commands_without_thumbnail_decode(qtbot) ->
 
     assert isinstance(events[0], SetStartToPlayhead)
     assert isinstance(events[1], SetEndToPlayhead)
+
+
+def test_timeline_reset_range_button_emits_reset_range_command(qtbot) -> None:
+    widget = TimelineWidget()
+    qtbot.addWidget(widget)
+    widget.set_presentation(_presentation())
+    events: list[object] = []
+    widget.command_requested.connect(events.append)
+
+    qtbot.mouseClick(widget.reset_range_button, Qt.MouseButton.LeftButton)
+
+    assert events == [ResetRange()]

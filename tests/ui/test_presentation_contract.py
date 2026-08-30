@@ -6,7 +6,9 @@ from pathlib import Path
 import pytest
 from PySide6.QtCore import QSettings
 
+from rembggui.core.crop_state import CropChanged, CropToggleChanged, ResetCrop
 from rembggui.core.errors import AppError, ErrorCode
+from rembggui.core.specs import CropSpec
 from rembggui.core.state import (
     AppState,
     ArtifactResult,
@@ -27,6 +29,7 @@ from rembggui.core.state import (
     SourceLoadRequested,
     reduce,
 )
+from rembggui.ui.crop_presentation import CropPresentation
 from rembggui.ui.inspector import Inspector
 from rembggui.ui.presenter import present
 from rembggui.ui.theme import load_packaged_fonts
@@ -201,3 +204,28 @@ def test_inspector_uses_defaults_for_malformed_disclosure_settings(qtbot) -> Non
     qtbot.addWidget(inspector)
     assert inspector.disclosures["segmentation"][0].isChecked()
     assert not inspector.disclosures["crop_cleanup"][0].isChecked()
+
+
+def test_inspector_crop_fields_mirror_values_and_emit_reducer_commands(qtbot) -> None:
+    settings = QSettings(
+        QSettings.IniFormat, QSettings.UserScope, "rembggui-test", "crop-fields"
+    )
+    settings.clear()
+    inspector = Inspector(settings)
+    qtbot.addWidget(inspector)
+    presentation = CropPresentation(
+        "source", 100, 50, 100, 50, 0, 1.0, CropSpec(10, 8, 40, 20)
+    )
+    inspector.apply_crop(presentation, enabled=True, editable=True)
+    commands: list[object] = []
+    inspector.command_requested.connect(commands.append)
+
+    inspector.crop_x_spinbox.setValue(12)
+    inspector.crop_toggle.setChecked(False)
+    inspector.crop_reset_button.click()
+
+    assert commands[0] == CropChanged(CropSpec(12, 8, 40, 20))
+    assert commands[1] == CropToggleChanged(False)
+    assert commands[2] == ResetCrop()
+    assert inspector.crop_width_spinbox.maximum() == 100
+    assert inspector.crop_height_spinbox.maximum() == 50

@@ -76,6 +76,10 @@ class TimelineState:
         )
         return replace(self, end=timestamp)
 
+    def reset_range(self) -> TimelineState:
+        """Restore the export interval to the complete source duration."""
+        return replace(self, start=Fraction(0), end=self.duration)
+
 
 @dataclass(frozen=True, slots=True)
 class PlayheadChanged:
@@ -108,6 +112,11 @@ class SetEndToPlayhead:
 
 
 @dataclass(frozen=True, slots=True)
+class ResetRange:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
 class SourceFrameDecoded:
     source_id: str
     generation: int
@@ -124,6 +133,7 @@ TimelineEvent = (
     | EndChanged
     | SetStartToPlayhead
     | SetEndToPlayhead
+    | ResetRange
 )
 
 
@@ -144,6 +154,8 @@ def update_timeline(
             updated, category = timeline.set_start(timeline.playhead), "Export range"
         elif isinstance(event, SetEndToPlayhead):
             updated, category = timeline.set_end(timeline.playhead), "Export range"
+        elif isinstance(event, ResetRange):
+            updated, category = timeline.reset_range(), "Export range"
         else:
             return None
     except ValueError:
@@ -198,7 +210,9 @@ def format_timecode(timestamp: Fraction) -> str:
     total_seconds, milliseconds = divmod(milliseconds, 1000)
     hours, remainder = divmod(total_seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
-    return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
+    return f"{minutes}:{seconds:02d}.{milliseconds:03d}"
 
 
 def absolute_frame_number(timestamp: Fraction, source_fps: Fraction) -> int:

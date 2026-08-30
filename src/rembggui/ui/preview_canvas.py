@@ -102,11 +102,13 @@ class PreviewCanvas(QLabel):
 class PreviewStage(QFrame):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        from rembggui.ui.crop_canvas import CropCanvas
+
         self.setObjectName("preview_stage")
         layout = QHBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(1)
-        self.original_canvas = PreviewCanvas("Original", "original_canvas")
+        self.original_canvas = CropCanvas()
         self.result_canvas = PreviewCanvas("Result", "result_canvas")
         self.original_canvas.setText("Original")
         self.result_canvas.setProperty("status", "none")

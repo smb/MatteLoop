@@ -217,7 +217,7 @@ class RenderController(QObject):
         if source_id is None or state.source is not SourceState.READY:
             return
         try:
-            inputs = _preview_inputs(state.source_value, state.timeline)
+            inputs = _preview_inputs(state.source_value, state.timeline, state.crop)
             request = _render_request(
                 inputs,
                 "birefnet-portrait",

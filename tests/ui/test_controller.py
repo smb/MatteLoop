@@ -77,7 +77,7 @@ def test_dropped_video_loads_metadata_and_displays_first_frame(tmp_path, qtbot) 
     metadata = store.state.source_value
     assert metadata is not None
     assert window.source_dimensions.text() == "4 × 2"
-    assert window.source_duration.text() == "0:01.00"
+    assert window.source_duration.text() == "0:01.000"
     assert window.source_frame_rate.text() == "2 fps"
     assert window.source_file_size.text() == format_source_file_size(metadata.file_size)
     pixmap = window.original_canvas.pixmap()

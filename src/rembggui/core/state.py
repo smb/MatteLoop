@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
+from rembggui.core import crop_state as _crop_state
+from rembggui.core import specs
 from rembggui.core.timeline import (
     SourceFrameDecoded,
     TimelineEvent,
@@ -12,6 +14,10 @@ from rembggui.core.timeline import (
     timeline_from_metadata,
 )
 from rembggui.core.timeline_reducer import reduce_timeline
+
+
+def __getattr__(name: str) -> object:
+    return getattr(_crop_state, name)
 
 
 class SourceState(StrEnum):
@@ -112,6 +118,8 @@ class AppState:
     source_value: object | None = None
     source_frame: object | None = None
     timeline: TimelineState | None = None
+    crop: specs.CropSpec | None = None
+    crop_enabled: bool = True
     source_error: object | None = None
     model_available: bool = True
     model_supports_render: bool = True
@@ -143,8 +151,7 @@ class AppState:
         ):
             raise ValueError("ready source requires identity and metadata")
         if self.source is SourceState.ERROR and (
-            self.source_id is None
-            or self.source_request_id is None
+            self.source_id is None or self.source_request_id is None
             or self.source_error is None
         ):
             raise ValueError("source error requires identities and an error")
@@ -359,8 +366,7 @@ type Event = (
     | CancelRequested
     | CancelAcknowledged
     | EditedCutsScanRequested
-    | EditedCutsChanged
-    | TimelineEvent
+    | EditedCutsChanged | _crop_state.CropEvent | TimelineEvent
 )
 
 
@@ -371,10 +377,8 @@ def reduce(state: AppState, event: Event) -> AppState:
         if state.job.phase is not JobState.IDLE:
             return state
         return AppState(
-            source=SourceState.LOADING,
-            source_id=event.source_id,
+            source=SourceState.LOADING, source_id=event.source_id,
             source_request_id=event.request_id,
-            source_frame=None,
             model_available=state.model_available,
             model_supports_render=state.model_supports_render,
             focus_target=FocusTarget.NONE,
@@ -388,9 +392,11 @@ def reduce(state: AppState, event: Event) -> AppState:
             source_value=event.value,
             source_frame=event.frame,
             timeline=timeline_from_metadata(event.value),
-            source_error=None,
+            crop=_crop_state.default_crop_for_source(event.value), source_error=None,
             focus_target=FocusTarget.PREVIEW_ACTION,
         )
+    if isinstance(event, _crop_state.CropEvent):
+        return _crop_state.reduce_crop(state, event)
     if isinstance(event, (SourceFrameDecoded, TimelineEvent)):
         return reduce_timeline(state, event)
     if isinstance(event, SourceLoadFailed):
@@ -594,7 +600,6 @@ def reduce(state: AppState, event: Event) -> AppState:
             preflight_warning=False,
             focus_target=FocusTarget.SUCCESS_BANNER,
         )
-
     if isinstance(event, RenderFailed):
         if not _matches_render_result(
             state,
@@ -618,7 +623,6 @@ def reduce(state: AppState, event: Event) -> AppState:
             preflight_warning=False,
             focus_target=focus,
         )
-
     if isinstance(event, CancelRequested):
         if event.job_id != state.job.job_id or state.job.phase in {
             JobState.IDLE,
@@ -630,7 +634,6 @@ def reduce(state: AppState, event: Event) -> AppState:
             job=replace(state.job, phase=JobState.CANCELLING, stage="Cancelling"),
             focus_target=FocusTarget.JOB_DIALOG,
         )
-
     if isinstance(event, CancelAcknowledged):
         if (
             event.job_id != state.job.job_id
@@ -660,7 +663,6 @@ def reduce(state: AppState, event: Event) -> AppState:
             job_request_id=None,
             focus_target=focus,
         )
-
     if isinstance(event, EditedCutsScanRequested):
         if not _matches_artifact_identity(
             state, event.source_id, event.artifact_request_id
@@ -674,7 +676,6 @@ def reduce(state: AppState, event: Event) -> AppState:
             edited_cuts_request_id=event.request_id,
             focus_target=focus,
         )
-
     if isinstance(event, EditedCutsChanged):
         if not _matches_edited_cuts_result(state, event):
             return state
@@ -698,7 +699,6 @@ def reduce(state: AppState, event: Event) -> AppState:
             edited_cuts_request_id=None,
             focus_target=focus,
         )
-
     return state
 
 

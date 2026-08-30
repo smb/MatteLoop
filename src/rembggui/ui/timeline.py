@@ -31,6 +31,7 @@ from rembggui.core.geometry import (
 from rembggui.core.timeline import (
     EndChanged,
     PlayheadChanged,
+    ResetRange,
     SetEndToPlayhead,
     SetStartToPlayhead,
     StartChanged,
@@ -222,7 +223,7 @@ class TimelineWidget(QFrame):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(20, 132, 20, 10)
         layout.setSpacing(12)
-        self.timecode_label = QLabel("00:00:00.000")
+        self.timecode_label = QLabel("0:00.000")
         self.timecode_label.setObjectName("timeline_timecode")
         self.frame_label = QLabel("Frame —")
         self.frame_label.setObjectName("timeline_frame")
@@ -235,6 +236,8 @@ class TimelineWidget(QFrame):
         self.set_start_button.setAccessibleName("Set export start to playhead")
         self.set_end_button = QPushButton("Set OUT")
         self.set_end_button.setAccessibleName("Set export end to playhead")
+        self.reset_range_button = QPushButton("Reset Range")
+        self.reset_range_button.setAccessibleName("Reset export range")
         for label in (
             self.timecode_label,
             self.frame_label,
@@ -248,11 +251,15 @@ class TimelineWidget(QFrame):
         layout.addStretch(1)
         layout.addWidget(self.set_start_button)
         layout.addWidget(self.set_end_button)
+        layout.addWidget(self.reset_range_button)
         self.set_start_button.clicked.connect(
             lambda: self.command_requested.emit(SetStartToPlayhead())
         )
         self.set_end_button.clicked.connect(
             lambda: self.command_requested.emit(SetEndToPlayhead())
+        )
+        self.reset_range_button.clicked.connect(
+            lambda: self.command_requested.emit(ResetRange())
         )
 
     def set_presentation(self, presentation: TimelinePresentation | None) -> None:
@@ -509,7 +516,7 @@ class TimelineWidget(QFrame):
     def _update_telemetry(self) -> None:
         presentation = self._presentation
         if presentation is None:
-            self.timecode_label.setText("00:00:00.000")
+            self.timecode_label.setText("0:00.000")
             self.frame_label.setText("Frame —")
             self.range_label.setText("IN —   OUT —")
             self.range_status_label.clear()

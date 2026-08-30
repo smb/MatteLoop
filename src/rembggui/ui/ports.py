@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from rembggui.core.crop_state import CropEvent
 from rembggui.core.state import AppState, Event
 from rembggui.core.timeline import TimelineEvent
 
@@ -79,6 +80,7 @@ type WindowCommand = (
     | OpenOutputFolderRequested
     | ManageModelsRequested
     | ManageWorkspacesRequested
+    | CropEvent
     | TimelineEvent
 )
 

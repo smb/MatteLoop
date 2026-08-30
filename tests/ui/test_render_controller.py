@@ -9,6 +9,8 @@ from PIL import Image
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QDesktopServices, QImage
 
+from rembggui.core.crop_state import CropChanged
+from rembggui.core.specs import CropSpec
 from rembggui.core.state import (
     AppState,
     ArtifactState,
@@ -189,6 +191,28 @@ def test_render_command_uses_the_selected_export_range(tmp_path, qtbot) -> None:
     request = runtime.render_requests[0]
     assert request.sampling.start == Fraction(1, 2)
     assert request.sampling.end == Fraction(3, 2)
+    controller.shutdown()
+
+
+def test_render_command_uses_the_selected_oriented_crop(tmp_path, qtbot) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"fixture")
+    runtime = FakeRenderRuntime()
+    selected = reduce(_ready_state(source), CropChanged(CropSpec(8, 12, 96, 80)))
+    selected = reduce(selected, PreviewRequested("preview", "preview-request"))
+    selected = reduce(
+        selected,
+        PreviewSucceeded(
+            "preview", PreviewResult("source", "preview-request", QImage())
+        ),
+    )
+    store = RecordingStore(selected)
+    controller = SourceController(store, preview_runtime=runtime)
+
+    controller.dispatch(RenderVideoRequested())
+
+    qtbot.waitUntil(lambda: store.state.artifact is ArtifactState.VALID, timeout=5000)
+    assert runtime.render_requests[0].crop == CropSpec(8, 12, 96, 80)
     controller.shutdown()
 
 

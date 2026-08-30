@@ -9,6 +9,8 @@ import pytest
 from PIL import Image
 from PySide6.QtCore import QSettings, Qt
 
+from rembggui.core.crop_state import CropChanged
+from rembggui.core.specs import CropSpec
 from rembggui.core.state import (
     CancelRequested,
     JobStageChanged,
@@ -217,6 +219,31 @@ def test_preview_request_uses_the_playhead_and_selected_export_range(
     assert playhead == Fraction(1)
     assert request.sampling.start == Fraction(1, 2)
     assert request.sampling.end == Fraction(3, 2)
+    controller.shutdown()
+
+
+def test_preview_request_uses_the_selected_oriented_crop(
+    tmp_path: Path, qtbot
+) -> None:
+    path = tmp_path / "source.mp4"
+    path.write_bytes(b"fixture")
+    runtime = FakePreviewRuntime()
+    store = RecordingStore()
+    controller = SourceController(
+        store,
+        source_adapter=FakeSourceAdapter(path),
+        preview_runtime=runtime,
+    )
+
+    controller.dispatch(VideoDropped(path))
+    qtbot.waitUntil(lambda: store.state.source.value == "ready", timeout=5000)
+    controller.dispatch(CropChanged(CropSpec(10, 12, 80, 70)))
+    controller.dispatch(PreviewFrameRequested())
+
+    qtbot.waitUntil(lambda: store.state.preview is PreviewState.CURRENT, timeout=5000)
+    request, _playhead = runtime.requests[0]
+
+    assert request.crop == CropSpec(10, 12, 80, 70)
     controller.shutdown()
 
 

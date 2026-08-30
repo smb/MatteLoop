@@ -14,6 +14,7 @@ from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QFileDialog, QWidget
 
+from rembggui.core.crop_state import CropEvent
 from rembggui.core.errors import AppError, ErrorCode
 from rembggui.core.state import (
     SourceLoaded,
@@ -24,6 +25,7 @@ from rembggui.core.state import (
 from rembggui.core.timeline import (
     EndChanged,
     PlayheadChanged,
+    ResetRange,
     SetEndToPlayhead,
     SetStartToPlayhead,
     SourceFrameDecoded,
@@ -209,6 +211,8 @@ class SourceController(QObject):
             self._preview_controller.dispatch(command)
         elif isinstance(command, RenderVideoRequested):
             self._render_controller.dispatch(command)
+        elif isinstance(command, CropEvent):
+            self._store.dispatch(command)
         elif isinstance(
             command,
             (
@@ -218,6 +222,7 @@ class SourceController(QObject):
                 EndChanged,
                 SetStartToPlayhead,
                 SetEndToPlayhead,
+                ResetRange,
             ),
         ):
             self._dispatch_timeline(command)

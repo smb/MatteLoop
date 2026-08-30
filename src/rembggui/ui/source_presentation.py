@@ -8,6 +8,8 @@ from fractions import Fraction
 from pathlib import Path
 from typing import TypedDict
 
+from rembggui.core.timeline import format_timecode
+
 _SOURCE_FILENAME_MAX_LENGTH = 40
 # The download callback fires per 256 KiB chunk — about 60 times a second at
 # 15 MiB/s — so a sample-count window spans milliseconds and the figure is
@@ -65,16 +67,10 @@ def format_source_dimensions(width: object, height: object) -> str:
 
 
 def format_source_duration(duration: object) -> str:
-    """Return a source duration as m:ss.hh or h:mm:ss.hh."""
+    """Return a source duration using the shared millisecond timecode format."""
     if not isinstance(duration, Fraction) or duration < 0:
         return ""
-    hundredths = _rounded_hundredths(duration)
-    total_seconds, centiseconds = divmod(hundredths, 100)
-    hours, remainder = divmod(total_seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    if hours:
-        return f"{hours}:{minutes:02d}:{seconds:02d}.{centiseconds:02d}"
-    return f"{minutes}:{seconds:02d}.{centiseconds:02d}"
+    return format_timecode(duration)
 
 
 def format_source_frame_rate(rate: object) -> str:

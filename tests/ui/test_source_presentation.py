@@ -21,16 +21,16 @@ def _ready(metadata: object) -> AppState:
     )
 
 
-def test_present_formats_fraction_duration_as_centisecond_timecode() -> None:
+def test_present_formats_fraction_duration_as_millisecond_timecode() -> None:
     model = present(_ready(SimpleNamespace(duration=Fraction(13, 5))))
 
-    assert model.source_duration == "0:02.60"
+    assert model.source_duration == "0:02.600"
 
 
 def test_present_formats_hour_long_duration_with_hours() -> None:
     model = present(_ready(SimpleNamespace(duration=Fraction(7323, 2))))
 
-    assert model.source_duration == "1:01:01.50"
+    assert model.source_duration == "1:01:01.500"
 
 
 def test_present_formats_fraction_frame_rate_to_two_decimal_places() -> None:

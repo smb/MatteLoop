@@ -359,6 +359,7 @@ class _PreviewInputs:
     start: Fraction
     end: Fraction
     playhead: Fraction
+    crop: CropSpec
 
 
 class _PreviewWorker(QObject):
@@ -513,7 +514,7 @@ class PreviewController(QObject):
         metadata = state.source_value
         if source_id is None or state.source is not SourceState.READY:
             return
-        inputs = _preview_inputs(metadata, state.timeline)
+        inputs = _preview_inputs(metadata, state.timeline, state.crop)
         job_id = uuid4().hex
         request_id = uuid4().hex
         self._store.dispatch(
@@ -667,7 +668,9 @@ class PreviewController(QObject):
 
 
 def _preview_inputs(
-    metadata: object, timeline: TimelineState | None = None
+    metadata: object,
+    timeline: TimelineState | None = None,
+    crop: CropSpec | None = None,
 ) -> _PreviewInputs:
     source = getattr(metadata, "path", None)
     width = getattr(metadata, "width", None)
@@ -682,7 +685,14 @@ def _preview_inputs(
         raise ValueError("loaded source metadata cannot build a preview request")
     if timeline is None:
         return _PreviewInputs(
-            source, width, height, duration, Fraction(0), duration, Fraction(0)
+            source,
+            width,
+            height,
+            duration,
+            Fraction(0),
+            duration,
+            Fraction(0),
+            crop or CropSpec(0, 0, width, height),
         )
     if timeline.duration != duration:
         raise ValueError("timeline duration does not match loaded source metadata")
@@ -694,6 +704,7 @@ def _preview_inputs(
         timeline.start,
         timeline.end,
         timeline.playhead,
+        crop or CropSpec(0, 0, width, height),
     )
 
 
@@ -708,7 +719,7 @@ def _render_request(
     return RenderRequest(
         source=inputs.source,
         sampling=SamplingSpec(inputs.start, inputs.end, fps=fps),
-        crop=CropSpec(0, 0, inputs.width, inputs.height),
+        crop=inputs.crop,
         segmentation=SegmentationSpec(
             model_id=model_id, edge_mode=EdgeMode.STANDARD
         ),

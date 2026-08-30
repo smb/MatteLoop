@@ -13,6 +13,7 @@ from rembggui.core.state import (
     SourceState,
     capabilities,
 )
+from rembggui.ui.crop_presentation import CropPresentation, present_crop
 from rembggui.ui.source_error_copy import source_error_copy
 from rembggui.ui.source_presentation import present_source_metadata as s
 from rembggui.ui.timeline_presentation import TimelinePresentation, present_timeline
@@ -64,6 +65,8 @@ class PresentationModel:
     source_file_size: str
     source_path: str | None
     source_frame: object | None
+    crop: CropPresentation | None
+    crop_enabled: bool
     timeline: TimelinePresentation | None
     result_frame: object | None
     source_loading: bool
@@ -150,12 +153,7 @@ def present(state: AppState) -> PresentationModel:
         source_mode=source_mode,
         result_message=message,
         result_marker=marker,
-        show_stage=state.source
-        in {
-            SourceState.LOADING,
-            SourceState.READY,
-            SourceState.ERROR,
-        },
+        show_stage=state.source is not SourceState.EMPTY,
         show_timeline=state.source in {SourceState.LOADING, SourceState.READY},
         show_success=state.artifact is ArtifactState.VALID,
         show_rebuild=state.edited_cuts,
@@ -203,6 +201,8 @@ def present(state: AppState) -> PresentationModel:
         workspace_open=state.edited_cuts or state.edited_cuts_error is not None,
         **s(state.source_value if ready else None, state.source is SourceState.LOADING),
         source_frame=state.source_frame,
+        crop=present_crop(state),
+        crop_enabled=state.crop_enabled,
         timeline=present_timeline(state),
         result_frame=(
             state.preview_result.value if state.preview_result is not None else None

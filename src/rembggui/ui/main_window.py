@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from PySide6.QtCore import QByteArray, QSettings, Qt, QTimer
-from PySide6.QtGui import QFontMetrics, QImage
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from rembggui.core.state import AppState, FocusTarget
 from rembggui.ui.action_shelf import ActionShelf
+from rembggui.ui.crop_view import render_source_editor
 from rembggui.ui.inspector import Inspector
 from rembggui.ui.ports import (
     ChooseVideoRequested,
@@ -178,7 +179,8 @@ class MainWindow(QMainWindow):
         self.preview_button.clicked.connect(
             lambda: self._services.dispatch(PreviewFrameRequested())
         )
-        self.timeline_widget.command_requested.connect(self._services.dispatch)
+        for widget in (self.timeline_widget, self.original_canvas, self.inspector):
+            widget.command_requested.connect(self._services.dispatch)
         self.render_button.clicked.connect(
             lambda: self._services.dispatch(RenderVideoRequested())
         )
@@ -216,6 +218,7 @@ class MainWindow(QMainWindow):
                 self.manage_models_button,
                 self.inspector.disclosures["time_sampling"][0],
                 self.inspector.disclosures["crop_cleanup"][0],
+                *self.inspector.crop_tab_widgets(),
                 self.inspector.disclosures["output"][0],
                 self.inspector.disclosures["workspace"][0],
                 self.edited_cut_recovery,
@@ -262,10 +265,7 @@ class MainWindow(QMainWindow):
         self.source_error_copy.setText(model.source_error_message or "")
         self.source_drop_surface.heading.setText(model.source_surface_heading)
         self.source_strip.set_presented_metadata(model)
-        source_frame = model.source_frame
-        self.original_canvas.set_frame(
-            source_frame if isinstance(source_frame, QImage) else None
-        )
+        render_source_editor(self.original_canvas, self.inspector, model)
         self.result_canvas.set_presented_frame(model.result_frame, model.result_message)
         self.result_canvas.setAccessibleName(model.result_accessible_name)
         self.result_canvas.setAccessibleDescription(model.result_accessible_description)
