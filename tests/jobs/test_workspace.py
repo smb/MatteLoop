@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import gc
+import hashlib
 import json
 import multiprocessing
 import os
@@ -2188,17 +2189,56 @@ def test_component_binding_closes_descriptors_when_fstat_fails(
     assert process.num_fds() <= before
 
 
-def test_local_filesystem_policy_is_injectable_and_removable_is_local(
+def test_local_filesystem_policy_degrades_for_nonlocal_and_unknown_storage(
     tmp_path: Path,
 ) -> None:
-    workspace_module._assert_local_filesystem(tmp_path, probe=lambda _bound: True)
-    with pytest.raises(AppError) as exc:
-        workspace_module._assert_local_filesystem(tmp_path, probe=lambda _bound: False)
+    assert (
+        workspace_module._locality_fallback(
+            tmp_path, probe=lambda _bound: True
+        )
+        is None
+    )
+    nonlocal_fallback = workspace_module._locality_fallback(
+        tmp_path, probe=lambda _bound: False
+    )
+    assert nonlocal_fallback is not None
+    assert nonlocal_fallback.reason == "network-filesystem"
 
-    assert exc.value.code is ErrorCode.CUT_WORKSPACE_UNSAFE
+    def undecidable(_bound: workspace_module._BoundDirectory) -> bool:
+        raise OSError("injected unsupported probe")
+
+    unknown_fallback = workspace_module._locality_fallback(
+        tmp_path, probe=undecidable
+    )
+    assert unknown_fallback is not None
+    assert unknown_fallback.reason == "locality-unknown"
     assert workspace_module._windows_drive_type_is_local(2) is True
     assert workspace_module._windows_drive_type_is_local(3) is True
     assert workspace_module._windows_drive_type_is_local(4) is False
+
+
+def test_nonlocal_workspace_uses_deterministic_local_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cache_root = tmp_path / "user-cache"
+    monkeypatch.setattr(
+        workspace_module, "user_cache_dir", lambda _app: str(cache_root)
+    )
+    monkeypatch.setattr(
+        workspace_module,
+        "_default_local_filesystem_probe",
+        lambda _bound: False,
+    )
+
+    layout = workspace_module._workspace_layout(tmp_path, create=True)
+
+    assert layout.fallback_used
+    assert layout.fallback is not None
+    assert layout.fallback.reason == "network-filesystem"
+    assert layout.workspace_root == cache_root / "workspaces" / (
+        hashlib.sha256(os.fsencode(str(tmp_path))).hexdigest()
+    )
+    assert layout.workspace_root != tmp_path / ".rembggui-work"
 
 
 @pytest.mark.parametrize(
