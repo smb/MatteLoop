@@ -14,6 +14,7 @@ from rembggui.core.errors import AppError, ErrorCode
 from rembggui.jobs.models.cache_fs import BoundModelDirectory
 from rembggui.jobs.models.catalog import ExecutionClass, ModelCatalog, ModelSpec
 from rembggui.jobs.models.session import ModelSessionManager, PreparationResult
+from rembggui.jobs.protocol import SegmentOptions
 from rembggui.jobs.segmentation_host import (
     _create_rembg_session,
     _instantiate_verified_rembg_session,
@@ -198,7 +199,7 @@ def test_cloth_launch_uses_internal_full_default_and_preserves_source_shape(
     # The pinned ORT import creates a telemetry session marker in its current
     # directory on macOS; keep that third-party test artifact in pytest's temp.
     monkeypatch.chdir(tmp_path)
-    result = _run_rembg(source, prepared)
+    result = _run_rembg(source, prepared, SegmentOptions("standard"))
 
     assert result.shape == (4, 7, 4)
     assert calls == [{"cloth_category": "full"}]
