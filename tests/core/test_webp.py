@@ -74,6 +74,31 @@ def noisy_rgba(path: Path, size: tuple[int, int] = (256, 256)) -> Path:
     return path
 
 
+def cutout_animation_paths(
+    directory: Path,
+    prefix: str,
+    *,
+    transparent_rgb: tuple[int, int, int] = (17, 29, 43),
+    visible_rgb: tuple[int, int, int] = (200, 100, 50),
+    visible_alpha: int = 255,
+    changed_frame: int | None = None,
+) -> tuple[Path, ...]:
+    paths: list[Path] = []
+    for index in range(2):
+        image = Image.new("RGBA", (128, 128), (*transparent_rgb, 0))
+        pixel = (
+            (*visible_rgb, visible_alpha)
+            if changed_frame is None or index == changed_frame
+            else (200, 100, 50, 255)
+        )
+        image.putpixel((64 + index, 64), pixel)
+        path = directory / f"{prefix}-{index}.png"
+        image.save(path)
+        image.close()
+        paths.append(path)
+    return tuple(paths)
+
+
 def riff_chunks(data: bytes | bytearray) -> list[tuple[int, bytes, int, int]]:
     chunks: list[tuple[int, bytes, int, int]] = []
     position = 12
@@ -368,6 +393,118 @@ def test_distinct_rgba_frames_keep_each_emitted_frame_and_delay(
     assert summary.frames == 3
     assert summary.duration_ms == 200
     assert info.delays_ms == (67, 66, 67)
+
+
+def test_animation_accepts_libwebp_transparent_rgb_rewrites(tmp_path: Path) -> None:
+    paths = cutout_animation_paths(tmp_path, "transparent")
+    output = tmp_path / "transparent.webp"
+
+    summary = encode_lossless_webp(paths, (100, 100), output)
+
+    assert summary.frames == 2
+    assert validate_webp(output, expected_frames=2, expected_duration_ms=200)
+    with Image.open(output) as encoded:
+        for path, frame in zip(paths, ImageSequence.Iterator(encoded), strict=True):
+            with Image.open(path) as source, frame.convert("RGBA") as actual:
+                source_bytes = source.tobytes()
+                actual_bytes = actual.tobytes()
+                pixels = zip(
+                    (
+                        source_bytes[index : index + 4]
+                        for index in range(0, len(source_bytes), 4)
+                    ),
+                    (
+                        actual_bytes[index : index + 4]
+                        for index in range(0, len(actual_bytes), 4)
+                    ),
+                    strict=True,
+                )
+                differences = tuple(
+                    (expected, decoded)
+                    for expected, decoded in pixels
+                    if expected != decoded
+                )
+                assert differences
+                assert all(
+                    expected[3] == decoded[3]
+                    and (
+                        expected[:3] == decoded[:3]
+                        or (expected[3] == 0 and decoded[3] == 0)
+                    )
+                    for expected, decoded in differences
+                )
+
+
+def test_animation_rejects_a_single_alpha_change(tmp_path: Path) -> None:
+    expected = cutout_animation_paths(
+        tmp_path,
+        "expected",
+        transparent_rgb=(0, 0, 0),
+    )
+    changed = cutout_animation_paths(
+        tmp_path,
+        "changed",
+        transparent_rgb=(0, 0, 0),
+        visible_alpha=254,
+        changed_frame=0,
+    )
+    output = tmp_path / "animation.webp"
+    encode_lossless_webp(expected, (100, 100), output)
+
+    with pytest.raises(AppError) as exc:
+        webp_module._validate_encoded_pixels(
+            changed,
+            output,
+            allow_invisible_rgb_changes=True,
+        )
+
+    assert exc.value.code is ErrorCode.INVALID_OUTPUT
+
+
+def test_animation_rejects_a_single_visible_rgb_change(tmp_path: Path) -> None:
+    expected = cutout_animation_paths(
+        tmp_path,
+        "expected",
+        transparent_rgb=(0, 0, 0),
+    )
+    changed = cutout_animation_paths(
+        tmp_path,
+        "changed",
+        transparent_rgb=(0, 0, 0),
+        visible_rgb=(201, 100, 50),
+        changed_frame=0,
+    )
+    output = tmp_path / "animation.webp"
+    encode_lossless_webp(expected, (100, 100), output)
+
+    with pytest.raises(AppError) as exc:
+        webp_module._validate_encoded_pixels(
+            changed,
+            output,
+            allow_invisible_rgb_changes=True,
+        )
+
+    assert exc.value.code is ErrorCode.INVALID_OUTPUT
+
+
+def test_still_rejects_rgb_changes_under_transparent_pixels(tmp_path: Path) -> None:
+    expected = cutout_animation_paths(
+        tmp_path,
+        "expected",
+        transparent_rgb=(0, 0, 0),
+    )[0]
+    changed = cutout_animation_paths(
+        tmp_path,
+        "changed",
+        transparent_rgb=(1, 2, 3),
+    )[0]
+    output = tmp_path / "still.webp"
+    encode_lossless_webp((expected,), (100,), output)
+
+    with pytest.raises(AppError) as exc:
+        webp_module._validate_encoded_pixels((changed,), output)
+
+    assert exc.value.code is ErrorCode.INVALID_OUTPUT
 
 
 def test_single_rgba_frame_remains_a_valid_still(tmp_path: Path) -> None:

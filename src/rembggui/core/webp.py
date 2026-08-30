@@ -188,6 +188,7 @@ def encode_lossless_webp(
             temporary,
             emitted.identities,
             rgba_ownership_tracker,
+            allow_invisible_rgb_changes=emitted.animated,
         )
         os.replace(temporary, destination)
     except AppError as error:
@@ -1098,6 +1099,8 @@ def _validate_encoded_pixels(
     output: Path,
     expected_identities: tuple[_FileIdentity, ...] | None = None,
     rgba_ownership_tracker: RgbaOwnershipTracker | None = None,
+    *,
+    allow_invisible_rgb_changes: bool = False,
 ) -> None:
     try:
         with _open_pillow(output) as encoded:
@@ -1113,6 +1116,7 @@ def _validate_encoded_pixels(
                     source_path,
                     expected_identity,
                     rgba_ownership_tracker,
+                    allow_invisible_rgb_changes,
                 )
     except AppError:
         raise
@@ -1126,6 +1130,7 @@ def _validate_encoded_frame(
     source_path: Path,
     expected_identity: _FileIdentity | None,
     rgba_ownership_tracker: RgbaOwnershipTracker | None,
+    allow_invisible_rgb_changes: bool,
 ) -> None:
     encoded.seek(index)
     encoded.load()
@@ -1140,22 +1145,57 @@ def _validate_encoded_frame(
             if rgba_ownership_tracker is not None:
                 rgba_ownership_tracker.register(source)
             if encoded.mode == "RGBA":
-                difference = ImageChops.difference(source, encoded)
+                converted = None
+                actual = encoded
             else:
                 converted = encoded.convert("RGBA")
                 if rgba_ownership_tracker is not None:
                     rgba_ownership_tracker.register(converted)
-                try:
-                    difference = ImageChops.difference(source, converted)
-                finally:
-                    converted.close()
-            with difference:
-                if rgba_ownership_tracker is not None:
-                    rgba_ownership_tracker.register(difference)
-                if difference.getbbox(alpha_only=False) is not None:
+                actual = converted
+            try:
+                if allow_invisible_rgb_changes:
+                    matches = _animation_rgba_pixels_match(source, actual)
+                else:
+                    difference = ImageChops.difference(source, actual)
+                    with difference:
+                        if rgba_ownership_tracker is not None:
+                            rgba_ownership_tracker.register(difference)
+                        matches = difference.getbbox(alpha_only=False) is None
+                if not matches:
                     raise _invalid_output(
                         f"encoded frame {index} does not match its RGBA source"
                     )
+            finally:
+                if converted is not None:
+                    converted.close()
+
+
+def _animation_rgba_pixels_match(
+    source: Image.Image, encoded: Image.Image
+) -> bool:
+    with source.getchannel("A") as source_alpha:
+        with encoded.getchannel("A") as encoded_alpha:
+            with ImageChops.difference(source_alpha, encoded_alpha) as difference:
+                if difference.getbbox() is not None:
+                    return False
+
+            # libwebp's animation encoder rewrites RGB under fully transparent
+            # pixels, and FFmpeg's libwebp_anim wrapper ignores WebP's `exact`
+            # option. Alpha and RGB on every visible pixel remain exact here.
+            with ImageChops.lighter(source_alpha, encoded_alpha) as visible_alpha:
+                with visible_alpha.point(
+                    lambda value: 255 if value > 0 else 0
+                ) as visible_mask:
+                    with source.convert("RGB") as source_rgb:
+                        with encoded.convert("RGB") as encoded_rgb:
+                            with ImageChops.difference(
+                                source_rgb, encoded_rgb
+                            ) as difference:
+                                with Image.new("RGB", difference.size) as empty:
+                                    with Image.composite(
+                                        difference, empty, visible_mask
+                                    ) as visible_difference:
+                                        return visible_difference.getbbox() is None
 
 
 def _resize_from_sources(
@@ -1292,6 +1332,7 @@ def _prepare_candidate(
             temporary,
             frames.identities,
             rgba_ownership_tracker=rgba_ownership_tracker,
+            allow_invisible_rgb_changes=frames.animated,
         )
         if info.file_size > target_bytes:
             raise _impossible_size(
