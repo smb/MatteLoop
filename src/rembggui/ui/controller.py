@@ -266,14 +266,12 @@ class SourceController(QObject):
         ):
             self._dispatch_timeline(command)
         elif isinstance(command, RebuildEditedCutsRequested):
-            # TODO(next slice: rebuild): wire edited-cut rebuild to the job service.
-            return
+            self._render_controller.dispatch(command)
         elif isinstance(command, ManageModelsRequested):
             # TODO(next slice: models): add the model manager command service.
             return
         elif isinstance(command, ManageWorkspacesRequested):
-            # TODO(next slice: workspaces): add the workspace manager command service.
-            return
+            self._render_controller.dispatch(command)
         elif isinstance(command, OpenOutputRequested):
             self._render_controller.dispatch(command)
         elif isinstance(command, OpenOutputFolderRequested):

@@ -12,6 +12,8 @@ from rembggui.resources import resource_path
 
 UI_FONT = "IBM Plex Sans"
 MONO_FONT = "IBM Plex Mono"
+ACCENT_COLOR = "#B7F34A"
+SECONDARY_COLOR = "#A3ABB2"
 _FONT_FILES = (
     "IBMPlexSans-Regular.ttf",
     "IBMPlexSans-SemiBold.ttf",

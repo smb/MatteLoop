@@ -7,6 +7,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Protocol
 
+import numpy as np
 from platformdirs import user_cache_dir
 
 from rembggui.core.errors import AppError, ErrorCode
@@ -21,6 +22,7 @@ from rembggui.jobs.context import JobContext
 from rembggui.jobs.models.catalog import ModelCatalog
 from rembggui.jobs.models.download import ModelDownloader
 from rembggui.jobs.models.session import ModelSessionManager
+from rembggui.jobs.protocol import SegmentRequest
 from rembggui.jobs.render import (
     FilesystemWorkspacePort,
     LocalSourcePort,
@@ -28,9 +30,11 @@ from rembggui.jobs.render import (
     PreviewService,
     RenderArtifact,
     SystemClock,
+    find_matching_cut_workspace,
 )
 from rembggui.jobs.render import PreviewResult as RenderPreviewResult
 from rembggui.jobs.segmentation_host import SegmentationClient
+from rembggui.jobs.workspace import CutWorkspace
 from rembggui.ui.download_transport import (
     QtNetworkDownloadTransport as _QtNetworkDownloadTransport,
 )
@@ -70,6 +74,14 @@ class _SessionHolder:
             )
         self.client = SegmentationClient(payload)
         return self.client
+
+
+class _NoInferencePort:
+    """Satisfy the frozen service contract for a source-free Rebuild."""
+
+    def segment(self, frame: np.ndarray, request: SegmentRequest) -> np.ndarray:
+        del frame, request
+        raise RuntimeError("Rebuild attempted segmentation")
 
 
 class ProductionPreviewRuntime:
@@ -230,6 +242,56 @@ class ProductionPreviewRuntime:
         from rembggui.ui.render_pipeline import render_prepared
 
         return render_prepared(prepared, request, context)
+
+    def find_matching_workspace(
+        self, request: RenderRequest, context: JobContext
+    ) -> CutWorkspace | None:
+        artifact = self.catalog.get(request.segmentation.model_id).artifact
+        if artifact is None:
+            return None
+        return find_matching_cut_workspace(
+            LocalSourcePort(),
+            FilesystemWorkspacePort(),
+            request,
+            model_weight_sha256=artifact.sha256,
+            rembg_version=self.catalog.rembg_version,
+            context=context,
+        )
+
+    def rebuild(
+        self,
+        request: RenderRequest,
+        cut_workspace: CutWorkspace,
+        context: JobContext,
+    ) -> RenderArtifact:
+        prepared = self._prepared
+        if (
+            prepared is None
+            or prepared.model_id != request.segmentation.model_id
+        ):
+            spec = self.catalog.get(request.segmentation.model_id)
+            artifact = spec.artifact
+            if artifact is None:
+                raise AppError(
+                    ErrorCode.MODEL_PREPARATION_INVALID,
+                    "rebuild",
+                    "error.model.preparation-invalid",
+                    "selected model has no downloadable artifact",
+                    "retry-render",
+                    context.job_id,
+                )
+            prepared = PreparedSegmentation(
+                _NoInferencePort(),
+                spec.id,
+                artifact.sha256,
+                self.catalog.rembg_version,
+                frozenset(spec.edge_modes),
+            )
+        from rembggui.ui.render_pipeline import render_prepared
+
+        return render_prepared(
+            prepared, request, context, cut_workspace=cut_workspace
+        )
 
     def close(self) -> None:
         self._manager.close()

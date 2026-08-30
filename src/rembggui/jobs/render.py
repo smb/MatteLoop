@@ -26,7 +26,7 @@ import stat
 import tempfile
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from fractions import Fraction
 from functools import partial
@@ -93,6 +93,7 @@ from rembggui.jobs.workspace import (
     transfer_deferred_bound_directory_closes,
     validate_cut_set,
 )
+from rembggui.jobs.workspace_names import readable_workspace_name
 
 
 class SourcePort(Protocol):
@@ -121,7 +122,11 @@ class WorkspacePort(Protocol):
     def open_promoted(self, output_directory: Path, cache_key: str) -> CutWorkspace: ...
 
     def create_staging(
-        self, output_directory: Path, cache_key: str, job_id: str
+        self,
+        output_directory: Path,
+        cache_key: str,
+        job_id: str,
+        directory_name: str | None = None,
     ) -> CutWorkspace: ...
 
     def stage(
@@ -458,9 +463,15 @@ class FilesystemWorkspacePort:
         return CutWorkspace.open(output_directory, cache_key)
 
     def create_staging(
-        self, output_directory: Path, cache_key: str, job_id: str
+        self,
+        output_directory: Path,
+        cache_key: str,
+        job_id: str,
+        directory_name: str | None = None,
     ) -> CutWorkspace:
-        return CutWorkspace.create_staging(output_directory, cache_key, job_id)
+        return CutWorkspace.create_staging(
+            output_directory, cache_key, job_id, directory_name
+        )
 
     def stage(
         self, workspace: CutWorkspace, index: int, image: Image.Image
@@ -527,6 +538,39 @@ class FilesystemWorkspacePort:
         metadata: CutUnionMetadata,
     ) -> bool:
         return compare_and_set_union_metadata(workspace, expected_hashes, metadata)
+
+
+def find_matching_cut_workspace(
+    source: SourcePort,
+    workspace: WorkspacePort,
+    request: RenderRequest,
+    *,
+    model_weight_sha256: str,
+    rembg_version: str,
+    context: JobContext,
+) -> CutWorkspace | None:
+    """Find one validated workspace whose manifest matches every cut input."""
+    source_sha = source.complete_sha256(request.source, context)
+    context.checkpoint("source-hash")
+    inputs = cut_cache_key_inputs(
+        request,
+        source_sha256=source_sha,
+        model_weight_sha256=model_weight_sha256,
+        rembg_version=rembg_version,
+    )
+    cache_key = cut_cache_key_from_inputs(inputs)
+    try:
+        candidate = workspace.open_promoted(request.output.directory, cache_key)
+        manifest = workspace.validate(candidate)
+    except AppError as error:
+        if error.code in {
+            ErrorCode.CUT_MANIFEST_INVALID,
+            ErrorCode.CUT_SET_INVALID,
+            ErrorCode.CUT_WORKSPACE_UNSAFE,
+        }:
+            return None
+        raise
+    return candidate if manifest.cache_key == cache_key else None
 
 
 class PillowWebPEncoder:
@@ -970,6 +1014,19 @@ class RenderService:
                     "normal render cannot use a rebuild request",
                 )
             self._segmentation.validate_for(request)
+            if not request.regenerate:
+                reusable = find_matching_cut_workspace(
+                    self._source,
+                    self._workspace,
+                    request,
+                    model_weight_sha256=self._segmentation.model_weight_sha256,
+                    rembg_version=self._segmentation.rembg_version,
+                    context=context,
+                )
+                if reusable is not None:
+                    return self.rebuild(
+                        replace(request, rebuild=True), reusable, context
+                    )
             source_info = self._source.probe(request.source, context)
             request.validate_for_source(
                 source_info.width, source_info.height, source_info.duration
@@ -993,7 +1050,10 @@ class RenderService:
             self._advisory_disk_check(request, len(timestamps), notes)
             context.checkpoint("cut-staging")
             staged = self._workspace.create_staging(
-                request.output.directory, cache_key, context.job_id
+                request.output.directory,
+                cache_key,
+                context.job_id,
+                readable_workspace_name(request.source, cache_key),
             )
             frame_records: list[CutFrame] = []
             actual_pts: list[Fraction] = []

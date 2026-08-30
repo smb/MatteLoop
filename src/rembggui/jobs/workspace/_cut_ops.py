@@ -189,7 +189,7 @@ def promote_cut_set(
         )
         _cleanup_staged_cut(workspace.path, failure)
         raise failure from error
-    target = workspace.cuts_root / workspace.cache_key
+    target = workspace.cuts_root / workspace.directory_name
     marker = workspace.cuts_root / f".replace-{workspace.cache_key}.json"
     token = uuid.uuid4().hex
     backup = workspace.cuts_root / f".backup-{workspace.cache_key}-{token}"
@@ -226,6 +226,7 @@ def promote_cut_set(
                     "phase": "prepared",
                     "previous_manifest_sha256": previous_hash,
                     "stage_name": workspace.path.name,
+                    "target_name": target.name,
                     "used_exchange": False,
                     "version": 1,
                 }
@@ -284,6 +285,7 @@ def promote_cut_set(
                         target,
                         WorkspaceLifecycle.PROMOTED,
                         workspace.fallback,
+                        target.name,
                     )
                     with cuts_bound.open_child(target.name) as promoted_bound:
                         validated = _validate_bound_cut_set(

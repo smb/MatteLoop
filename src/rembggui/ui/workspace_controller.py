@@ -1,0 +1,88 @@
+"""Picker lifecycle and safe actions for promoted cut sets."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from pathlib import Path
+
+from PySide6.QtCore import QUrl
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import QMessageBox, QWidget
+
+from rembggui.core.errors import AppError, ErrorCode
+from rembggui.core.specs import RenderRequest
+from rembggui.jobs.models.catalog import ModelCatalog
+from rembggui.jobs.workspace import CutWorkspace, WorkspaceSummary, delete_workspace
+from rembggui.ui.workspace_dialog import WorkspacePickerDialog
+
+
+class WorkspacePickerController:
+    """Own the picker widget and its read/open/delete actions."""
+
+    def __init__(
+        self,
+        *,
+        dialog_parent: QWidget | None,
+        request_factory: Callable[[], RenderRequest | None],
+        active_workspace: Callable[[], CutWorkspace | None],
+    ) -> None:
+        self.dialog = WorkspacePickerDialog(ModelCatalog.load_resource(), dialog_parent)
+        self._request_factory = request_factory
+        self._active_workspace = active_workspace
+        self.dialog.open_requested.connect(self._open_selected)
+        self.dialog.delete_requested.connect(self._delete_selected)
+
+    def open(self, output_directory: Path) -> None:
+        self.dialog.load(output_directory)
+        self.dialog.open()
+
+    def close(self) -> None:
+        self.dialog.close()
+
+    def _open_selected(self, value: object) -> None:
+        if isinstance(value, WorkspaceSummary):
+            QDesktopServices.openUrl(
+                QUrl.fromLocalFile(str(value.workspace.path))
+            )
+
+    def _delete_selected(self, value: object) -> None:
+        if not isinstance(value, WorkspaceSummary):
+            return
+        active = self._active_workspace()
+        if active is not None and active.path == value.workspace.path:
+            QMessageBox.warning(
+                self.dialog,
+                "Cut set is in use",
+                "This cut set is being used by a running job.",
+            )
+            return
+        allow_pinned = value.pinned
+        if allow_pinned and not self._confirm_pinned_delete():
+            return
+        try:
+            delete_workspace(value.workspace, allow_pinned=allow_pinned)
+        except AppError as error:
+            if error.code is not ErrorCode.CUT_WORKSPACE_PINNED or allow_pinned:
+                QMessageBox.warning(
+                    self.dialog, "Could not delete cut set", str(error)
+                )
+                return
+            if not self._confirm_pinned_delete():
+                return
+            try:
+                delete_workspace(value.workspace, allow_pinned=True)
+            except AppError:
+                return
+        request = self._request_factory()
+        if request is not None:
+            self.dialog.load(request.output.directory)
+
+    def _confirm_pinned_delete(self) -> bool:
+        answer = QMessageBox.question(
+            self.dialog,
+            "Delete pinned cut set?",
+            "This set is pinned. Delete it anyway?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer is QMessageBox.StandardButton.Yes

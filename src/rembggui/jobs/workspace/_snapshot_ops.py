@@ -30,6 +30,7 @@ if TYPE_CHECKING:
         _validate_path_value,
     )
     from ._models import (
+        _READABLE_WORKSPACE_NAME_RE,
         CutWorkspace,
         ScratchCleanupResult,
         WorkspaceLifecycle,
@@ -117,6 +118,7 @@ def _snapshot_validated_workspace(
             snapshot_path,
             WorkspaceLifecycle.SNAPSHOT,
             workspace.fallback,
+            workspace.directory_name,
         )
         validate_cut_set(snapshot)
         return snapshot
@@ -210,6 +212,7 @@ def snapshot_for_rebuild(
             snapshot_path,
             WorkspaceLifecycle.SNAPSHOT,
             workspace.fallback,
+            workspace.directory_name,
         )
         validate_cut_set(snapshot)
         return snapshot
@@ -258,24 +261,43 @@ def list_workspaces(
         for scanned, (name, info) in enumerate(bound.iter_entries(), start=1):
             if scanned > MAX_WORKSPACE_ENTRIES * 3:
                 raise _unsafe_error("workspace namespace exceeds the listing bound")
-            if _CACHE_KEY_RE.fullmatch(name) is None:
+            if name.startswith("."):
+                continue
+            if stat.S_ISLNK(info.st_mode):
+                raise _unsafe_error(f"workspace entry {name!r} is redirected")
+            if not stat.S_ISDIR(info.st_mode):
+                continue
+            if _CACHE_KEY_RE.fullmatch(name) is not None:
+                cache_key = name
+                manifest = None
+            elif _READABLE_WORKSPACE_NAME_RE.fullmatch(name) is not None:
+                try:
+                    manifest, _identity = _read_manifest(cuts / name)
+                except AppError:
+                    continue
+                cache_key = manifest.cache_key
+            else:
                 continue
             seen += 1
             if seen > MAX_WORKSPACE_ENTRIES:
                 raise _unsafe_error("workspace count exceeds the listing bound")
-            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-                raise _unsafe_error(f"workspace entry {name!r} is redirected")
             workspace = CutWorkspace(
                 output,
                 root,
                 cuts,
                 scratch,
-                name,
+                cache_key,
                 cuts / name,
                 WorkspaceLifecycle.PROMOTED,
                 layout.fallback,
+                name,
             )
-            manifest = validate_cut_set(workspace)
+            try:
+                manifest = validate_cut_set(workspace)
+            except AppError as error:
+                if error.code is not ErrorCode.CUT_SET_INVALID:
+                    raise
+                manifest = detect_external_edits(workspace)
             size_bytes = sum(frame.size_bytes for frame in manifest.frames)
             size_bytes += len(manifest.to_json_bytes())
             summaries.append(WorkspaceSummary(workspace, manifest, size_bytes))

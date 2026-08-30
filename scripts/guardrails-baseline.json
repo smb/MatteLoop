@@ -4,7 +4,7 @@
     "long_functions": 1
   },
   "src/rembggui/core/state.py": {
-    "lines": 853,
+    "lines": 869,
     "long_functions": 1
   },
   "src/rembggui/core/webp.py": {
@@ -24,7 +24,7 @@
     "long_functions": 1
   },
   "src/rembggui/jobs/render.py": {
-    "lines": 2856,
+    "lines": 2916,
     "long_functions": 11
   },
   "src/rembggui/jobs/segmentation_host.py": {
@@ -40,7 +40,7 @@
     "long_functions": 2
   },
   "src/rembggui/jobs/workspace/_cut_ops.py": {
-    "lines": 442,
+    "lines": 444,
     "long_functions": 1
   },
   "src/rembggui/jobs/workspace/_filesystem.py": {
@@ -52,7 +52,7 @@
     "long_functions": 2
   },
   "src/rembggui/jobs/workspace/_manifest_io.py": {
-    "lines": 377,
+    "lines": 378,
     "long_functions": 2
   },
   "src/rembggui/jobs/workspace/_manifest_validation.py": {
@@ -68,8 +68,8 @@
     "long_functions": 2
   },
   "src/rembggui/jobs/workspace/_snapshot_ops.py": {
-    "lines": 410,
-    "long_functions": 2
+    "lines": 432,
+    "long_functions": 3
   },
   "src/rembggui/smoke.py": {
     "lines": 464,

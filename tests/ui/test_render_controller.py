@@ -28,6 +28,7 @@ from rembggui.core.state import (
 from rembggui.core.timeline import EndChanged, StartChanged
 from rembggui.core.webp import validate_webp
 from rembggui.jobs.render import ImmutableRgba, PreparedSegmentation, RenderArtifact
+from rembggui.jobs.workspace import CutWorkspace, WorkspaceLifecycle
 from rembggui.ui.controller import SourceController
 from rembggui.ui.ports import (
     OpenOutputFolderRequested,
@@ -106,6 +107,16 @@ class ServiceRenderRuntime(FakeRenderRuntime):
             request,
             context,
         )
+
+
+class MatchingCutsRuntime(FakeRenderRuntime):
+    def __init__(self, workspace: CutWorkspace) -> None:
+        super().__init__()
+        self.workspace = workspace
+
+    def find_matching_workspace(self, request, context):
+        del request, context
+        return self.workspace
 
 
 class RecordingStore(ReducerStore):
@@ -299,6 +310,51 @@ def test_existing_output_requires_explicit_replace_choice(tmp_path, qtbot) -> No
     qtbot.mouseClick(dialog.buttons()[0], Qt.MouseButton.LeftButton)
     qtbot.waitUntil(lambda: store.state.artifact is ArtifactState.VALID, timeout=5000)
     assert runtime.render_requests[0].output.collision_policy.value == "replace"
+    controller.shutdown()
+
+
+def test_matching_cut_set_offers_three_choices_with_rebuild_default(
+    tmp_path, qtbot
+) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"fixture")
+    cuts_root = tmp_path / ".rembggui-work" / "cuts"
+    workspace = CutWorkspace(
+        tmp_path,
+        tmp_path / ".rembggui-work",
+        cuts_root,
+        tmp_path / ".rembggui-work" / "scratch",
+        "a" * 64,
+        cuts_root / "source-aaaaaaaa",
+        WorkspaceLifecycle.PROMOTED,
+        None,
+        "source-aaaaaaaa",
+    )
+    runtime = MatchingCutsRuntime(workspace)
+    store = RecordingStore(_current_state(source))
+    controller = SourceController(store, preview_runtime=runtime)
+
+    controller.dispatch(RenderVideoRequested())
+
+    qtbot.waitUntil(
+        lambda: controller.render_controller.reuse_dialog is not None,
+        timeout=5000,
+    )
+    dialog = controller.render_controller.reuse_dialog
+    assert dialog is not None
+    assert [button.text() for button in dialog.buttons()] == [
+        "Rebuild",
+        "Regenerate",
+        "Cancel",
+    ]
+    assert dialog.defaultButton().text() == "Rebuild"
+    qtbot.mouseClick(dialog.buttons()[2], Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(
+        lambda: controller.render_controller.reuse_dialog is None,
+        timeout=5000,
+    )
+    assert store.state.job.kind is None
+    assert not runtime.render_requests
     controller.shutdown()
 
 

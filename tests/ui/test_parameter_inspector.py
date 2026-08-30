@@ -1,11 +1,16 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QSettings, Qt
 
 from rembggui.core.execution_providers import (
     COREML_EXECUTION_PROVIDER,
     CPU_EXECUTION_PROVIDER,
     ProviderOption,
+)
+from rembggui.ui.aligned_rows import (
+    ACCESSIBLE_DESCRIPTION_ROLE,
+    ROW_DATA_ROLE,
+    STATUS_ROLE,
 )
 from rembggui.ui.inspector import Inspector
 
@@ -47,7 +52,12 @@ def test_inspector_exposes_the_thirteen_enabled_models_with_default_selected(
     ]
     assert inspector.model_picker.currentData() == "birefnet-portrait"
     portrait_index = inspector.model_picker.findData("birefnet-portrait")
-    assert inspector.model_picker.itemText(portrait_index).endswith("cached locally")
+    assert inspector.model_picker.itemText(portrait_index) == "BiRefNet Portrait"
+    assert inspector.model_picker.itemData(portrait_index, STATUS_ROLE) == "cached"
+    assert "cached locally" in inspector.model_picker.itemData(
+        portrait_index, ACCESSIBLE_DESCRIPTION_ROLE
+    )
+    assert not inspector.model_picker.itemIcon(portrait_index).isNull()
     assert inspector.edge_picker.count() == 2
 
 
@@ -77,12 +87,15 @@ def test_inspector_shows_manifest_download_size_and_cache_status_for_each_model(
 
     for index in range(inspector.model_picker.count()):
         model_id = inspector.model_picker.itemData(index)
-        text = inspector.model_picker.itemText(index)
-        assert expected_sizes[model_id] in text
+        row = inspector.model_picker.itemData(index, ROW_DATA_ROLE)
+        assert row.columns[1].text == expected_sizes[model_id]
         expected_status = (
-            "cached locally" if model_id == "u2netp" else "not cached locally"
+            "cached locally" if model_id == "u2netp" else "not cached yet"
         )
-        assert text.endswith(expected_status)
+        detail = inspector.model_picker.itemData(
+            index, Qt.ItemDataRole.AccessibleTextRole
+        )
+        assert expected_status in detail
 
 
 def test_inspector_emits_parameter_commands_from_standard_controls(qtbot) -> None:

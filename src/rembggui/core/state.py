@@ -298,6 +298,7 @@ class RebuildRequested:
     job_id: str
     request_id: str
     initiator_focus: FocusTarget = FocusTarget.REBUILD_ACTION
+    workspace_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -570,7 +571,9 @@ def reduce(state: AppState, event: Event) -> AppState:
             event.initiator_focus,
         )
     if isinstance(event, RebuildRequested):
-        if not capabilities(state).can_rebuild:
+        if not capabilities(state).can_rebuild and not _can_start_selected_rebuild(
+            state, event.workspace_key
+        ):
             return state
         return _start_render(
             state,
@@ -759,6 +762,19 @@ def _start_render(
         job_request_id=request_id,
         preflight_warning=False,
         focus_target=FocusTarget.JOB_DIALOG,
+    )
+
+
+def _can_start_selected_rebuild(state: AppState, workspace_key: str | None) -> bool:
+    """Allow a picker-selected durable set without pretending it is edited."""
+    return (
+        isinstance(workspace_key, str)
+        and bool(workspace_key)
+        and state.job.phase is JobState.IDLE
+        and state.source is SourceState.READY
+        and state.source_id is not None
+        and state.source_value is not None
+        and state.model_supports_render
     )
 
 

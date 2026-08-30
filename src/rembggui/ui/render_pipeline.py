@@ -132,8 +132,10 @@ def render_prepared(
     prepared: PreparedSegmentation,
     request: RenderRequest,
     context: JobContext,
+    *,
+    cut_workspace: CutWorkspace | None = None,
 ) -> RenderArtifact:
-    """Run the existing service with stage-reporting adapters around its ports."""
+    """Run render or Rebuild with stage-reporting adapters around its ports."""
     reporter = _StageReporter(context)
     segmentation = PreparedSegmentation(
         _SegmentationStagePort(prepared.port, reporter),
@@ -153,4 +155,6 @@ def render_prepared(
         clock=SystemClock(),
         output_publisher=AtomicOutputPublisher(),
     )
-    return service.render(request, context)
+    if cut_workspace is None:
+        return service.render(request, context)
+    return service.rebuild(request, cut_workspace, context)

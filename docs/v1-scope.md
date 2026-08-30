@@ -51,7 +51,7 @@ Nothing else gates V1. When that sentence is true end to end, V1 is done.
 | Jobs | Exclusive modal job dialog with truthful stage/progress and working cancellation. |
 | Accessibility | Full keyboard reachability, correct tab order, accessible names and values on **standard** widgets, no colour-only status. |
 | Persistence | `QSettings` primitives, window geometry, output directory. |
-| Cuts | Post-segmentation cuts are still persisted (already implemented) — but see the deferral of the *Rebuild workflow* below. |
+| Cuts | Post-segmentation cuts are persisted, editable, selectable from a promoted cut-set picker, and reusable through Rebuild. **Scope reopened 2026-08-31:** re-rendering an edited clip otherwise repeats segmentation, including a 927 MiB model and 39 inferences, merely to re-encode. |
 
 ---
 
@@ -62,7 +62,6 @@ code that already exists stays as it is; it is not deleted, and it is not grown.
 
 | Deferred item | Design ref | Rationale |
 |---|---|---|
-| **Rebuild-from-edited-cuts workflow and its UI** | Task 11 / 12 | The most expensive feature in the plan. Its value cannot be judged before a first real render exists. The persistence engine already exists; the *workflow* waits. |
 | **Custom `QAccessible` virtual-child tree** for timeline and crop | Task 14 | Standard-widget accessibility is committed for V1. A bespoke accessible tree for custom-painted canvases is a large, untestable-on-one-machine surface. |
 | **`bria-rmbg` and `u2net_cloth_seg`** | Design catalog | `bria-rmbg` requires a model-specific licence consent flow; `u2net_cloth_seg` needs a clothing-category input the UI cannot provide. |
 | `ViTMatte`, alpha-matting edge mode | Design | Already outside committed scope; stays there. |
@@ -84,7 +83,7 @@ The plan's task numbering is kept only so older commits stay readable.
 | 1–9 | Foundation, specs, reducer, timebase, geometry, WebP, source, jobs, models | Implemented |
 | 10 | Packaging / streaming-encoder spike | Encoder question resolved (PyAV `libwebp_anim`, streaming). Packaging deferred. |
 | 11 | Durable cut workspaces | Implemented, **frozen** — see guardrail G3 |
-| 12 | Preview / render / Rebuild orchestration | Preview + render implemented; Rebuild frozen |
+| 12 | Preview / render / Rebuild orchestration | Preview + render + Rebuild implemented |
 | 13 | Application shell | Implemented |
 | **14** | Timeline, crop editor, keyboard contexts | **V1 — in progress**, minus the custom accessibility tree |
 | **15** | Preview integration, job dialog | **V1 — in progress**, minus Model/Workspace manager UIs |

@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QLabel,
     QLineEdit,
+    QListView,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -43,6 +44,14 @@ from rembggui.core.parameters import (
 from rembggui.core.specs import CropSpec, EdgeMode
 from rembggui.core.timeline import DurationChanged, EndChanged, StartChanged
 from rembggui.jobs.models.catalog import ModelCatalog
+from rembggui.ui.aligned_rows import (
+    ACCESSIBLE_DESCRIPTION_ROLE,
+    AlignedColumn,
+    AlignedRow,
+    AlignedRowDelegate,
+    install_aligned_row,
+    status_icon,
+)
 from rembggui.ui.crop_presentation import CropPresentation
 from rembggui.ui.parameter_presentation import (
     ParameterPresentation,
@@ -142,6 +151,9 @@ class Inspector(QFrame):
         self.model_picker = QComboBox()
         self.model_picker.setObjectName("model_picker")
         self.model_picker.setAccessibleName("Segmentation model")
+        self.model_picker.setView(QListView())
+        self.model_picker.view().setItemDelegate(AlignedRowDelegate(self.model_picker))
+        self.model_picker.view().setMinimumWidth(460)
         catalog = ModelCatalog.load_resource()
         for model_id in V1_MODEL_IDS:
             spec = catalog.get(model_id)
@@ -150,14 +162,21 @@ class Inspector(QFrame):
                 artifact.size_bytes if artifact is not None else None
             )
             availability = self._model_options.get(model_id, False)
-            status = "cached locally" if availability else "not cached locally"
-            self.model_picker.addItem(
-                f"{spec.display_name} — {size} — {status}", model_id
+            status = "cached" if availability else "uncached"
+            status_words = "cached locally" if availability else "not cached yet"
+            detail = (
+                f"{spec.display_name}; {spec.purpose}; {size}; {status_words}; "
+                f"{spec.license_note}"
             )
-            self.model_picker.setItemData(
-                self.model_picker.count() - 1,
-                f"{spec.display_name} ({size}; {status})",
-                Qt.ItemDataRole.ToolTipRole,
+            row = AlignedRow(
+                "✓" if availability else "↓",
+                status,
+                (AlignedColumn(spec.display_name), AlignedColumn(size, True)),
+                detail,
+            )
+            self.model_picker.addItem(status_icon(row), row.display_text, model_id)
+            install_aligned_row(
+                self.model_picker, row, index=self.model_picker.count() - 1
             )
         self.model_picker.setCurrentIndex(
             self.model_picker.findData(catalog.default_id)
@@ -171,6 +190,7 @@ class Inspector(QFrame):
         self.edge_picker.setAccessibleName("Edge treatment")
         self.edge_picker.addItem("Standard", EdgeMode.STANDARD)
         self.edge_picker.addItem("Decontaminate colors", EdgeMode.DECONTAMINATE_COLORS)
+        self.model_picker.currentIndexChanged.connect(self._update_model_accessibility)
 
     def _build_sampling_parameter_controls(self) -> None:
         self.fps_spinbox = QSpinBox()
@@ -267,9 +287,18 @@ class Inspector(QFrame):
             self.command_requested.emit(command)
 
     def _model_changed(self, _index: int) -> None:
+        self._update_model_accessibility()
         model_id = self.model_picker.currentData()
         if isinstance(model_id, str):
             self._emit_if_editable(ModelChanged(model_id))
+
+    def _update_model_accessibility(self, _index: int = -1) -> None:
+        index = self.model_picker.currentIndex()
+        detail = self.model_picker.itemData(index, ACCESSIBLE_DESCRIPTION_ROLE)
+        if not isinstance(detail, str):
+            detail = ""
+        self.model_picker.setToolTip(detail)
+        self.model_picker.setAccessibleDescription(detail)
 
     def _provider_changed(self, _index: int) -> None:
         selected = self.provider_picker.currentData()
@@ -392,6 +421,7 @@ class Inspector(QFrame):
                 str(presentation.output_directory or "")
             )
             self._clear_filename_error()
+            self._update_model_accessibility()
         finally:
             del blockers
 

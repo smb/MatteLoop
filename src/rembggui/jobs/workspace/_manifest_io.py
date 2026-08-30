@@ -19,7 +19,6 @@ if TYPE_CHECKING:
     from ._manifest import CutManifest
     from ._manifest_validation import (
         _canonical_json,
-        _exact_keys,
         _reject_json_constant,
         _strict_object,
         _string,
@@ -217,20 +216,18 @@ def _recover_promotion(cuts_root: Path, cache_key: str) -> None:
         )
         if not isinstance(payload, dict):
             raise _promotion_error("promotion journal is not an object")
-        _exact_keys(
-            payload,
-            {
-                "backup_name",
-                "cache_key",
-                "candidate_manifest_sha256",
-                "phase",
-                "previous_manifest_sha256",
-                "stage_name",
-                "used_exchange",
-                "version",
-            },
-            "promotion journal",
-        )
+        journal_fields = {
+            "backup_name",
+            "cache_key",
+            "candidate_manifest_sha256",
+            "phase",
+            "previous_manifest_sha256",
+            "stage_name",
+            "used_exchange",
+            "version",
+        }
+        if set(payload) not in (journal_fields, journal_fields | {"target_name"}):
+            raise _promotion_error("promotion journal contains unexpected fields")
         if payload["version"] != 1 or payload["cache_key"] != cache_key:
             raise _promotion_error("promotion journal identity is invalid")
         stage_name = _string(payload["stage_name"], "stage name")
@@ -243,6 +240,10 @@ def _recover_promotion(cuts_root: Path, cache_key: str) -> None:
             f".backup-{cache_key}-"
         ):
             raise _promotion_error("promotion journal backup is unsafe")
+        target_name = _string(payload.get("target_name", cache_key), "target name")
+        _validate_component(target_name)
+        if target_name.startswith("."):
+            raise _promotion_error("promotion journal target is hidden")
         candidate_hash = _string(
             payload["candidate_manifest_sha256"], "candidate manifest hash"
         )
@@ -251,7 +252,7 @@ def _recover_promotion(cuts_root: Path, cache_key: str) -> None:
         if previous_hash is not None:
             previous_hash = _string(previous_hash, "previous manifest hash")
             _validate_sha256(previous_hash, "previous manifest hash")
-        target = cuts_root / cache_key
+        target = cuts_root / target_name
         stage = cuts_root / stage_name
         backup = cuts_root / backup_name
         target_hash = _manifest_hash_if_valid(target, cache_key)

@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING
 # ruff: noqa: F403,F405,F811
 from ._common import *  # noqa: F403,F401
 
+_READABLE_WORKSPACE_NAME_RE = re.compile(r".+-[0-9a-f]{8}\Z")
+
 if TYPE_CHECKING:
     from ._cut_ops import detect_external_edits, validate_cut_set
     from ._errors import _set_error, _stage_error, _unsafe_error
@@ -14,6 +16,7 @@ if TYPE_CHECKING:
     from ._manifest_io import _read_manifest, _recover_promotion, _write_manifest_atomic
     from ._manifest_validation import (
         _validate_cache_key,
+        _validate_component,
         _validate_frame_index,
         _validate_job_id,
         _validate_path_value,
@@ -35,6 +38,41 @@ __all__ = (
 )
 
 
+def _existing_promoted_path(cuts_root: Path, cache_key: str) -> Path:
+    """Resolve a full key from either legacy or presentation naming."""
+    legacy = cuts_root / cache_key
+    if legacy.exists():
+        return legacy
+    if not cuts_root.exists():
+        return legacy
+    try:
+        with _BoundDirectory.open(cuts_root) as bound:
+            for name, info in bound.iter_entries():
+                if (
+                    name.startswith(".")
+                    or stat.S_ISLNK(info.st_mode)
+                    or not stat.S_ISDIR(info.st_mode)
+                    or _READABLE_WORKSPACE_NAME_RE.fullmatch(name) is None
+                ):
+                    continue
+                candidate = cuts_root / name
+                try:
+                    manifest, _identity = _read_manifest(candidate)
+                except (AppError, OSError):
+                    continue
+                if manifest.cache_key == cache_key:
+                    return candidate
+    except (AppError, OSError):
+        return legacy
+    return legacy
+
+
+def _existing_promoted_name(cuts_root: Path, cache_key: str) -> str | None:
+    """Return an existing directory name for a key, if one is discoverable."""
+    path = _existing_promoted_path(cuts_root, cache_key)
+    return path.name if path.exists() else None
+
+
 class WorkspaceLifecycle(StrEnum):
     STAGING = "staging"
     PROMOTED = "promoted"
@@ -53,9 +91,15 @@ class CutWorkspace:
     path: Path
     lifecycle: WorkspaceLifecycle
     fallback: WorkspaceFallback | None = None
+    directory_name: str = ""
 
     def __post_init__(self) -> None:
         _validate_cache_key(self.cache_key)
+        directory_name = self.directory_name or self.cache_key
+        _validate_component(directory_name)
+        if directory_name.startswith("."):
+            raise _unsafe_error("promoted workspace name must not be hidden")
+        object.__setattr__(self, "directory_name", directory_name)
         for value in (
             self.output_directory,
             self.workspace_root,
@@ -76,7 +120,7 @@ class CutWorkspace:
         if not _same_lexical_path(self.scratch_root, self.workspace_root / "scratch"):
             raise _unsafe_error("scratch root is not canonical")
         if self.lifecycle is WorkspaceLifecycle.PROMOTED:
-            expected = self.cuts_root / self.cache_key
+            expected = self.cuts_root / directory_name
             if not _same_lexical_path(self.path, expected):
                 raise _unsafe_error("promoted workspace path is not canonical")
         elif self.lifecycle is WorkspaceLifecycle.STAGING:
@@ -99,7 +143,11 @@ class CutWorkspace:
     @classmethod
     @_filesystem_boundary("stage", "cannot create staged cut workspace")
     def create_staging(
-        cls, output_directory: Path, cache_key: str, job_id: str
+        cls,
+        output_directory: Path,
+        cache_key: str,
+        job_id: str,
+        directory_name: str | None = None,
     ) -> Self:
         _validate_cache_key(cache_key)
         _validate_job_id(job_id)
@@ -107,6 +155,14 @@ class CutWorkspace:
         output, root, cuts, scratch = layout
         with _promotion_lock(str(cuts / cache_key)):
             _recover_promotion(cuts, cache_key)
+        if directory_name is not None:
+            existing_name = _existing_promoted_name(cuts, cache_key)
+            if existing_name is not None:
+                directory_name = existing_name
+            elif directory_name != cache_key and (cuts / directory_name).exists():
+                directory_name = f"{directory_name}-{cache_key}"
+        directory_name = directory_name or cache_key
+        _validate_component(directory_name)
         stage = cuts / f".stage-{cache_key}-{job_id}"
         try:
             with _BoundDirectory.open(cuts) as bound:
@@ -132,26 +188,41 @@ class CutWorkspace:
             stage,
             WorkspaceLifecycle.STAGING,
             layout.fallback,
+            directory_name,
         )
 
     @classmethod
     @_filesystem_boundary("unsafe", "cannot open promoted cut workspace")
     def open(cls, output_directory: Path, cache_key: str) -> Self:
-        _validate_cache_key(cache_key)
         layout = _workspace_layout(output_directory, create=False)
         output, root, cuts, scratch = layout
+        if _CACHE_KEY_RE.fullmatch(cache_key) is None:
+            _validate_component(cache_key)
+            if (
+                cache_key.startswith(".")
+                or _READABLE_WORKSPACE_NAME_RE.fullmatch(cache_key) is None
+            ):
+                _validate_cache_key(cache_key)
+            try:
+                manifest, _identity = _read_manifest(cuts / cache_key)
+            except (AppError, OSError):
+                _validate_cache_key(cache_key)
+            cache_key = manifest.cache_key
+        _validate_cache_key(cache_key)
         with _promotion_lock(str(cuts / cache_key)):
             if cuts.exists():
                 _recover_promotion(cuts, cache_key)
+        path = _existing_promoted_path(cuts, cache_key)
         return cls(
             output,
             root,
             cuts,
             scratch,
             cache_key,
-            cuts / cache_key,
+            path,
             WorkspaceLifecycle.PROMOTED,
             layout.fallback,
+            path.name,
         )
 
     @_filesystem_boundary("set", "cannot read promoted cut")
