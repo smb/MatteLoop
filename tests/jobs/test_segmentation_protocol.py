@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import multiprocessing
+import sys
 import threading
 import time
 from multiprocessing import Pipe, active_children
 from multiprocessing.shared_memory import SharedMemory
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -20,6 +22,7 @@ from rembggui.jobs.protocol import (
     CancelRequest,
     ProtocolCodecError,
     SegmentFailure,
+    SegmentOptions,
     SegmentRequest,
     SegmentResponse,
     SharedFrame,
@@ -32,6 +35,8 @@ from rembggui.jobs.protocol import (
 )
 from rembggui.jobs.segmentation_host import (
     SegmentationClient,
+    _PreparedRembgSession,
+    _run_rembg,
     _serve_segmentation_connection,
 )
 from tests.jobs.fake_segmentation_child import (
@@ -81,12 +86,18 @@ def _capture_custom_segment_error(
 
 def test_protocol_dataclasses_are_frozen_and_round_trip_through_byte_codec() -> None:
     messages = (
-        request(),
+        SegmentRequest(
+            PROTOCOL_VERSION,
+            "j1",
+            "r0",
+            options=SegmentOptions("alpha_matting", 230, 20, 5),
+        ),
         SegmentRequest(
             PROTOCOL_VERSION,
             "j1",
             "r1",
             SharedFrame("slot", (2, 3, 3), "uint8", 18),
+            SegmentOptions("alpha_matting", 230, 20, 5),
         ),
         SegmentResponse(PROTOCOL_VERSION, "j1", "r1", (2, 3, 4), "uint8", 24),
         CancelRequest(PROTOCOL_VERSION, "j1"),
@@ -124,6 +135,59 @@ def test_protocol_dataclasses_are_frozen_and_round_trip_through_byte_codec() -> 
     )
     with pytest.raises((AttributeError, TypeError)):
         messages[0].job_id = "changed"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b'{"type":"segment_request","protocol_version":2,"job_id":"j1","request_id":"r1","slot":{"name":"s","shape":[1,1,3],"dtype":"uint8","byte_length":3},"options":{"edge_mode":"provider","alpha_matting_foreground_threshold":240,"alpha_matting_background_threshold":10,"alpha_matting_erode_size":10}}',
+        b'{"type":"segment_request","protocol_version":2,"job_id":"j1","request_id":"r1","slot":{"name":"s","shape":[1,1,3],"dtype":"uint8","byte_length":3},"options":{"edge_mode":"alpha_matting","alpha_matting_foreground_threshold":10,"alpha_matting_background_threshold":10,"alpha_matting_erode_size":10}}',
+        b'{"type":"segment_request","protocol_version":2,"job_id":"j1","request_id":"r1","slot":{"name":"s","shape":[1,1,3],"dtype":"uint8","byte_length":3},"options":{"edge_mode":"alpha_matting","alpha_matting_foreground_threshold":240,"alpha_matting_background_threshold":10,"alpha_matting_erode_size":true}}',
+    ],
+)
+def test_segment_options_reject_unknown_modes_and_invalid_matting_at_wire_boundary(
+    payload: bytes,
+) -> None:
+    with pytest.raises(ProtocolCodecError):
+        decode_parent_message(payload)
+
+
+@pytest.mark.parametrize(
+    ("options", "expected"),
+    [
+        (SegmentOptions("standard"), {"alpha_matting": False}),
+        (SegmentOptions("decontaminate"), {"alpha_matting": False}),
+        (
+            SegmentOptions("alpha_matting", 230, 20, 5),
+            {
+                "alpha_matting": True,
+                "alpha_matting_background_threshold": 20,
+                "alpha_matting_erode_size": 5,
+                "alpha_matting_foreground_threshold": 230,
+            },
+        ),
+    ],
+)
+def test_run_rembg_uses_only_documented_edge_and_matting_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+    options: SegmentOptions,
+    expected: dict[str, object],
+) -> None:
+    calls: list[tuple[object, dict[str, object]]] = []
+
+    def remove(source: np.ndarray, *, session: object, **kwargs: object) -> np.ndarray:
+        calls.append((session, kwargs))
+        alpha = np.full(source.shape[:2] + (1,), 255, dtype=np.uint8)
+        return np.concatenate((source[..., :3], alpha), axis=2)
+
+    monkeypatch.setitem(sys.modules, "rembg", SimpleNamespace(remove=remove))
+    session = object()
+
+    result = _run_rembg(red_frame(), _PreparedRembgSession(session, ()), options)
+
+    assert result.shape == (4, 5, 4)
+    assert calls == [(session, expected)]
+    assert "post_process_mask" not in calls[0][1]
 
 
 @pytest.mark.parametrize(
@@ -1360,7 +1424,9 @@ def _assert_failure_then_late_cancel_ack(
 
 
 def test_production_serve_loop_success_uses_exact_codec_and_shared_slot() -> None:
-    def inference(frame: np.ndarray, _session: object) -> np.ndarray:
+    def inference(
+        frame: np.ndarray, _session: object, _options: SegmentOptions
+    ) -> np.ndarray:
         alpha = np.full(frame.shape[:2] + (1,), 255, dtype=np.uint8)
         return np.ascontiguousarray(np.concatenate((frame[..., :3], alpha), axis=2))
 
@@ -1396,7 +1462,9 @@ def test_production_loop_acknowledges_cancel_only_after_inference_barrier() -> N
     entered = threading.Event()
     release = threading.Event()
 
-    def inference(frame: np.ndarray, _session: object) -> np.ndarray:
+    def inference(
+        frame: np.ndarray, _session: object, _options: SegmentOptions
+    ) -> np.ndarray:
         entered.set()
         assert release.wait(timeout=1)
         alpha = np.full(frame.shape[:2] + (1,), 255, dtype=np.uint8)
@@ -1437,7 +1505,9 @@ def test_production_loop_acks_queued_cancel_before_queued_shutdown() -> None:
     entered = threading.Event()
     release = threading.Event()
 
-    def inference(frame: np.ndarray, _session: object) -> np.ndarray:
+    def inference(
+        frame: np.ndarray, _session: object, _options: SegmentOptions
+    ) -> np.ndarray:
         entered.set()
         assert release.wait(timeout=1)
         return np.zeros(frame.shape[:2] + (4,), dtype=np.uint8)
@@ -1481,7 +1551,9 @@ def test_production_loop_rejects_insufficient_actual_slot_capacity(
 ) -> None:
     inference_called = False
 
-    def inference(_frame: np.ndarray, _session: object) -> np.ndarray:
+    def inference(
+        _frame: np.ndarray, _session: object, _options: SegmentOptions
+    ) -> np.ndarray:
         nonlocal inference_called
         inference_called = True
         raise AssertionError("must not run")
@@ -1535,7 +1607,9 @@ def test_production_loop_source_buffer_failure_keeps_cancel_ack_path(
 
     monkeypatch.setattr(segmentation_host_module, "SharedMemory", InvalidBufferSlot)
     parent, thread = _start_production_loop(
-        lambda frame, _session: np.zeros(frame.shape[:2] + (4,), dtype=np.uint8)
+        lambda frame, _session, _options: np.zeros(
+            frame.shape[:2] + (4,), dtype=np.uint8
+        )
     )
     try:
         parent.send_bytes(
@@ -1599,7 +1673,9 @@ def test_production_loop_output_buffer_failure_acks_late_cancel_without_stale_st
         def tobytes(self, order: str = "C") -> bytes:
             raise BufferError("injected result copy failure")
 
-    def inference(frame: np.ndarray, _session: object) -> np.ndarray:
+    def inference(
+        frame: np.ndarray, _session: object, _options: SegmentOptions
+    ) -> np.ndarray:
         result = np.zeros(frame.shape[:2] + (4,), dtype=np.uint8)
         if failure_mode == "copy" and not OutputFailSlot.failed:
             OutputFailSlot.failed = True
@@ -1673,7 +1749,9 @@ def test_production_loop_rejects_invalid_tobytes_payload_before_output_write(
 
     inference_calls = 0
 
-    def inference(frame: np.ndarray, _session: object) -> np.ndarray:
+    def inference(
+        frame: np.ndarray, _session: object, _options: SegmentOptions
+    ) -> np.ndarray:
         nonlocal inference_calls
         inference_calls += 1
         result = np.zeros(frame.shape[:2] + (4,), dtype=np.uint8)
@@ -1748,7 +1826,7 @@ def test_production_loop_poll_transport_failure_does_not_escape(
             _serve_segmentation_connection(
                 PollFailConnection(child),
                 object(),
-                lambda frame, _session: np.zeros(
+                lambda frame, _session, _options: np.zeros(
                     frame.shape[:2] + (4,), dtype=np.uint8
                 ),
                 process_id=123,
@@ -1791,7 +1869,9 @@ def test_production_loop_rejects_descriptor_shape_dtype_and_byte_length(
     wire_mutation: object,
 ) -> None:
     parent, thread = _start_production_loop(
-        lambda frame, _session: np.zeros(frame.shape[:2] + (4,), dtype=np.uint8)
+        lambda frame, _session, _options: np.zeros(
+            frame.shape[:2] + (4,), dtype=np.uint8
+        )
     )
     wire = encode_parent_message(
         SegmentRequest(
@@ -1814,7 +1894,9 @@ def test_production_loop_rejects_descriptor_shape_dtype_and_byte_length(
 
 def test_production_loop_attach_failure_still_acknowledges_late_cancel() -> None:
     parent, thread = _start_production_loop(
-        lambda frame, _session: np.zeros(frame.shape[:2] + (4,), dtype=np.uint8)
+        lambda frame, _session, _options: np.zeros(
+            frame.shape[:2] + (4,), dtype=np.uint8
+        )
     )
     parent.send_bytes(
         encode_parent_message(
@@ -1834,7 +1916,9 @@ def test_production_loop_attach_failure_still_acknowledges_late_cancel() -> None
 
 
 def test_production_loop_inference_failure_still_acknowledges_late_cancel() -> None:
-    def inference(_frame: np.ndarray, _session: object) -> np.ndarray:
+    def inference(
+        _frame: np.ndarray, _session: object, _options: SegmentOptions
+    ) -> np.ndarray:
         raise ValueError("injected inference failure")
 
     parent, thread = _start_production_loop(inference)
@@ -1889,7 +1973,9 @@ def test_late_cancel_after_invalid_result_has_no_stale_effect_on_next_request() 
 
     parent, child = Pipe(duplex=True)
 
-    def inference(frame: np.ndarray, _session: object) -> np.ndarray:
+    def inference(
+        frame: np.ndarray, _session: object, _options: SegmentOptions
+    ) -> np.ndarray:
         nonlocal call_count
         call_count += 1
         if call_count == 1:
@@ -1960,7 +2046,9 @@ def test_late_cancel_after_invalid_result_has_no_stale_effect_on_next_request() 
 )
 def test_production_loop_closes_on_invalid_control_bytes(raw: bytes) -> None:
     parent, thread = _start_production_loop(
-        lambda frame, _session: np.zeros(frame.shape[:2] + (4,), dtype=np.uint8)
+        lambda frame, _session, _options: np.zeros(
+            frame.shape[:2] + (4,), dtype=np.uint8
+        )
     )
     parent.send_bytes(raw)
     thread.join(timeout=1)

@@ -99,3 +99,21 @@ def test_tracker_deduplicates_identity_and_uses_weak_liveness() -> None:
     del image
     gc.collect()
     assert tracker.current == 0
+
+
+def test_tracker_can_include_framed_and_auto_fit_full_resolution_sizes() -> None:
+    tracker = tracker_type()((128, 128))
+    tracker.include_size((160, 192))
+    cut = Image.new("RGBA", (128, 128))
+    framed = Image.new("RGBA", (160, 192))
+
+    tracker.register(cut)
+    tracker.register(framed)
+
+    assert tracker.current == 2
+    assert tracker.peak == 2
+    cut.close()
+    framed.close()
+    del cut, framed
+    gc.collect()
+    assert tracker.current == 0

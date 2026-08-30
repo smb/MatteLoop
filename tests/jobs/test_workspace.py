@@ -35,10 +35,13 @@ from rembggui.jobs.workspace import (
     CutWorkspace,
     cleanup_abandoned_scratch,
     cleanup_scratch,
+    compare_and_set_union_metadata,
     delete_workspace,
     detect_external_edits,
+    discard_staged_set,
     list_workspaces,
     promote_cut_set,
+    promote_for_render,
     snapshot_for_rebuild,
     stage_cut,
     validate_cut_set,
@@ -58,7 +61,14 @@ def _cache_inputs(*, source: str = "a" * 64) -> dict[str, object]:
         "rembg_version": "2.0.72",
         "pipeline_schema_version": "pipeline-v1",
         "orientation_color_version": "orientation-color-v1",
-        "edge_settings": {"mode": "standard"},
+        "edge_settings": {
+            "mode": "standard",
+            "alpha_matting": {
+                "foreground_threshold": 240,
+                "background_threshold": 10,
+                "erode_size": 10,
+            },
+        },
     }
 
 
@@ -121,6 +131,48 @@ def _rewrite_frame(path: Path, color: tuple[int, int, int, int]) -> None:
     temporary = path.with_suffix(".editing")
     Image.new("RGBA", (8, 6), color).save(temporary, format="PNG")
     os.replace(temporary, path)
+
+
+def test_discard_staged_set_removes_only_the_private_candidate(tmp_path: Path) -> None:
+    durable = _promoted(tmp_path, job_id="old")
+    staged, _manifest = _completed_staging(tmp_path, job_id="new", image_offset=4)
+
+    assert discard_staged_set(staged)
+    assert not staged.path.exists()
+    assert validate_cut_set(durable).frames[0].sha256 != _manifest.frames[0].sha256
+
+
+def test_promote_for_render_returns_durable_and_prepublication_snapshot(
+    tmp_path: Path,
+) -> None:
+    staged, manifest = _completed_staging(tmp_path, job_id="render-private")
+    scratch = staged.scratch_root / "render-private"
+
+    durable, private, promoted_manifest = promote_for_render(staged, manifest, scratch)
+
+    assert durable.lifecycle is workspace_module.WorkspaceLifecycle.PROMOTED
+    assert private.lifecycle is workspace_module.WorkspaceLifecycle.SNAPSHOT
+    assert promoted_manifest == validate_cut_set(durable)
+    with private.read_promoted_cut(0) as before:
+        before_bytes = before.tobytes()
+    _rewrite_frame(durable.path / "frame-000000.png", (200, 10, 20, 255))
+    with private.read_promoted_cut(0) as after:
+        assert after.tobytes() == before_bytes
+
+
+def test_union_metadata_compare_and_set_uses_expected_frame_hashes(
+    tmp_path: Path,
+) -> None:
+    durable = _promoted(tmp_path)
+    baseline = validate_cut_set(durable)
+    expected_hashes = tuple(frame.sha256 for frame in baseline.frames)
+    first = CutUnionMetadata((0, 0, 8, 6), "2", "d" * 64)
+    second = CutUnionMetadata((1, 1, 7, 5), "2", "e" * 64)
+
+    assert compare_and_set_union_metadata(durable, expected_hashes, first)
+    _rewrite_frame(durable.path / "frame-000000.png", (3, 4, 5, 255))
+    assert not compare_and_set_union_metadata(durable, expected_hashes, second)
+    assert detect_external_edits(durable).union_metadata is None
 
 
 class _ExclusiveWindowsCutsApi:

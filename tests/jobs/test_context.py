@@ -193,3 +193,82 @@ def test_cancel_ack_rejects_bool_protocol_version(tmp_path: Path) -> None:
     assert scheduler.active is context
     assert context.acknowledge_cancel(CancelAck(PROTOCOL_VERSION, "j1"))
     lease.__exit__(None, None, None)
+
+
+def test_local_checkpoint_acknowledges_cancel_and_raises_structured_error(
+    tmp_path: Path,
+) -> None:
+    scheduler = ExclusiveJobScheduler()
+    lease = scheduler.claim(JobKind.RENDER, "j1", workspace=tmp_path)
+    context = lease.__enter__()
+    assert context.request_cancel()
+
+    with pytest.raises(AppError) as exc:
+        context.checkpoint("after-segment")
+
+    assert exc.value.code is ErrorCode.JOB_CANCELLED
+    assert context.terminal_state is JobTerminalState.CANCELLED
+    assert context.cancellation.acknowledged
+    assert scheduler.active is None
+    lease.__exit__(AppError, exc.value, None)
+
+
+def test_commit_if_not_cancelled_linearizes_publish_before_late_cancel(
+    tmp_path: Path,
+) -> None:
+    context = JobContext(
+        "j1",
+        JobKind.RENDER,
+        tmp_path,
+        lambda _event: None,
+        CancellationState(),
+    )
+    commit_entered = Event()
+    release_commit = Event()
+    cancel_results: list[bool] = []
+
+    def commit() -> str:
+        commit_entered.set()
+        assert release_commit.wait(timeout=1)
+        return "published"
+
+    committed: list[str] = []
+    commit_thread = Thread(
+        target=lambda: committed.append(context.commit_if_not_cancelled(commit))
+    )
+    commit_thread.start()
+    assert commit_entered.wait(timeout=1)
+    cancel_thread = Thread(
+        target=lambda: cancel_results.append(context.request_cancel())
+    )
+    cancel_thread.start()
+    release_commit.set()
+    commit_thread.join(timeout=1)
+    cancel_thread.join(timeout=1)
+
+    assert committed == ["published"]
+    assert cancel_results == [False]
+    assert context.terminal_state is JobTerminalState.SUCCEEDED
+
+
+def test_cancel_wins_before_commit_and_publish_is_never_called(tmp_path: Path) -> None:
+    context = JobContext(
+        "j1",
+        JobKind.RENDER,
+        tmp_path,
+        lambda _event: None,
+        CancellationState(),
+    )
+    called = False
+
+    def commit() -> None:
+        nonlocal called
+        called = True
+
+    assert context.request_cancel()
+    with pytest.raises(AppError) as exc:
+        context.commit_if_not_cancelled(commit)
+
+    assert exc.value.code is ErrorCode.JOB_CANCELLED
+    assert not called
+    assert context.terminal_state is JobTerminalState.CANCELLED

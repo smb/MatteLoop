@@ -142,6 +142,61 @@ class JobContext:
             self._terminal_state = JobTerminalState.CANCEL_PENDING
             return True
 
+    def checkpoint(self, stage: str) -> None:
+        """Acknowledge a local cancellation at a cooperative safe boundary."""
+        if not isinstance(stage, str) or not stage:
+            raise ValueError("stage must be a non-empty string")
+        notify = False
+        with self._lock:
+            if self._terminal_state is JobTerminalState.RUNNING:
+                return
+            if self._terminal_state is JobTerminalState.CANCEL_PENDING:
+                if not self.cancellation._acknowledge():
+                    raise RuntimeError("pending cancellation could not be acknowledged")
+                self._terminal_state = JobTerminalState.CANCELLED
+                notify = True
+            elif self._terminal_state is not JobTerminalState.CANCELLED:
+                raise RuntimeError("terminal jobs have no cancellation checkpoints")
+        if notify and self._terminal_sink is not None:
+            self._terminal_sink(self)
+        raise AppError(
+            ErrorCode.JOB_CANCELLED,
+            stage,
+            "error.job.cancelled",
+            f"job cancelled at the {stage} safe point",
+            "retry-job",
+            self.job_id,
+        )
+
+    def commit_if_not_cancelled[T](self, commit: Callable[[], T]) -> T:
+        """Linearize the final irreversible commit against cancellation."""
+        if not callable(commit):
+            raise TypeError("commit must be callable")
+        cancelled = False
+        with self._lock:
+            if self._terminal_state is JobTerminalState.CANCEL_PENDING:
+                if not self.cancellation._acknowledge():
+                    raise RuntimeError("pending cancellation could not be acknowledged")
+                self._terminal_state = JobTerminalState.CANCELLED
+                cancelled = True
+            elif self._terminal_state is not JobTerminalState.RUNNING:
+                raise RuntimeError("only running jobs may commit output")
+            else:
+                result = commit()
+                self._terminal_state = JobTerminalState.SUCCEEDED
+        if self._terminal_sink is not None:
+            self._terminal_sink(self)
+        if cancelled:
+            raise AppError(
+                ErrorCode.JOB_CANCELLED,
+                "publish",
+                "error.job.cancelled",
+                "job cancelled before output publication committed",
+                "retry-job",
+                self.job_id,
+            )
+        return result
+
     def acknowledge_cancel(self, acknowledgement: CancelAck) -> bool:
         if (
             not isinstance(acknowledgement, CancelAck)

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import NoReturn
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 CONTROL_JOB_ID = "__control__"
 MAX_PROTOCOL_MESSAGE_BYTES = 64 * 1024
 _MAX_ID_LENGTH = 256
@@ -28,11 +28,20 @@ class SharedFrame:
 
 
 @dataclass(frozen=True, slots=True)
+class SegmentOptions:
+    edge_mode: str = "standard"
+    alpha_matting_foreground_threshold: int = 240
+    alpha_matting_background_threshold: int = 10
+    alpha_matting_erode_size: int = 10
+
+
+@dataclass(frozen=True, slots=True)
 class SegmentRequest:
     protocol_version: int
     job_id: str
     request_id: str
     slot: SharedFrame | None = None
+    options: SegmentOptions = field(default_factory=SegmentOptions)
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,16 +111,27 @@ def decode_parent_message(data: bytes) -> ParentMessage:
     if message_type == "segment_request":
         _exact_keys(
             payload,
-            {"type", "protocol_version", "job_id", "request_id", "slot"},
+            {
+                "type",
+                "protocol_version",
+                "job_id",
+                "request_id",
+                "slot",
+                "options",
+            },
         )
         slot_payload = payload["slot"]
         if type(slot_payload) is not dict:
             _fail("slot must be an object")
+        options_payload = payload["options"]
+        if type(options_payload) is not dict:
+            _fail("options must be an object")
         return SegmentRequest(
             _version(payload),
             _identifier(payload, "job_id"),
             _identifier(payload, "request_id"),
             _decode_slot(slot_payload),
+            _decode_segment_options(options_payload),
         )
     if message_type == "cancel_request":
         _exact_keys(payload, {"type", "protocol_version", "job_id"})
@@ -186,6 +206,7 @@ def _message_payload(message: object) -> dict[str, object]:
             "job_id": message.job_id,
             "request_id": message.request_id,
             "slot": _slot_payload(message.slot),
+            "options": _segment_options_payload(message.options),
         }
     if type(message) is SegmentResponse:
         return {
@@ -240,6 +261,44 @@ def _slot_payload(slot: SharedFrame) -> dict[str, object]:
         "dtype": slot.dtype,
         "byte_length": slot.byte_length,
     }
+
+
+def _segment_options_payload(options: SegmentOptions) -> dict[str, object]:
+    if type(options) is not SegmentOptions:
+        _fail("segment options must be an exact SegmentOptions")
+    payload = {
+        "edge_mode": options.edge_mode,
+        "alpha_matting_foreground_threshold": (
+            options.alpha_matting_foreground_threshold
+        ),
+        "alpha_matting_background_threshold": (
+            options.alpha_matting_background_threshold
+        ),
+        "alpha_matting_erode_size": options.alpha_matting_erode_size,
+    }
+    _decode_segment_options(payload)
+    return payload
+
+
+def _decode_segment_options(payload: dict[str, object]) -> SegmentOptions:
+    _exact_keys(
+        payload,
+        {
+            "edge_mode",
+            "alpha_matting_foreground_threshold",
+            "alpha_matting_background_threshold",
+            "alpha_matting_erode_size",
+        },
+    )
+    edge_mode = _exact_string(payload, "edge_mode", 32)
+    if edge_mode not in {"standard", "decontaminate", "alpha_matting"}:
+        _fail("edge mode is not supported by the protocol")
+    foreground = _strict_int(payload, "alpha_matting_foreground_threshold", minimum=1)
+    background = _strict_int(payload, "alpha_matting_background_threshold", minimum=0)
+    erosion = _strict_int(payload, "alpha_matting_erode_size", minimum=0)
+    if foreground > 255 or background > 255 or background >= foreground:
+        _fail("alpha-matting thresholds are invalid")
+    return SegmentOptions(edge_mode, foreground, background, erosion)
 
 
 def _decode_slot(payload: dict[str, object]) -> SharedFrame:

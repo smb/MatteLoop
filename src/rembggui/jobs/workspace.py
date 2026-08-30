@@ -49,10 +49,7 @@ from typing import (
 from PIL import Image, UnidentifiedImageError
 
 from rembggui.core.errors import AppError, ErrorCode
-from rembggui.core.fingerprints import (
-    FINGERPRINT_SCHEMA,
-    FINGERPRINT_SCHEMA_VERSION,
-)
+from rembggui.core.fingerprints import cut_cache_key_from_inputs
 from rembggui.core.rgba import RgbaOwnershipTracker
 from rembggui.jobs.models.cache_fs import BoundDirectoryCloseError, UnsafeCacheError
 
@@ -389,13 +386,8 @@ class CutManifest:
         if type(frozen) is not FrozenJsonMap:
             raise _manifest_error("cache_key_inputs must be an object")
         _validate_cache_inputs(frozen)
-        payload: dict[str, object] = {
-            "fingerprint_schema": FINGERPRINT_SCHEMA,
-            "fingerprint_schema_version": FINGERPRINT_SCHEMA_VERSION,
-            "kind": "cut-cache-key",
-        }
-        payload.update(cast(dict[str, object], _thaw_json(frozen)))
-        return hashlib.sha256(_canonical_json(payload)).hexdigest()
+        thawed = cast(dict[str, object], _thaw_json(frozen))
+        return cut_cache_key_from_inputs(thawed)
 
     def to_json_bytes(self) -> bytes:
         return _canonical_json(self._to_payload()) + b"\n"
@@ -795,6 +787,63 @@ def stage_cut(workspace: CutWorkspace, index: int, image: Image.Image) -> CutFra
     return frame
 
 
+@_filesystem_boundary("stage", "cannot discard staged cut workspace")
+def discard_staged_set(workspace: CutWorkspace) -> bool:
+    """Explicitly remove one unpublished staged set and nothing durable."""
+    _require_workspace(workspace)
+    if workspace.lifecycle is not WorkspaceLifecycle.STAGING:
+        raise _stage_error("discard requires a staged cut workspace")
+    try:
+        with _BoundDirectory.open(workspace.cuts_root) as parent:
+            _remove_bound_tree(parent, workspace.path.name)
+            parent.fsync()
+    except FileNotFoundError:
+        return False
+    return True
+
+
+@_filesystem_boundary("promotion", "cannot prepare cuts for render")
+def promote_for_render(
+    workspace: CutWorkspace,
+    manifest: CutManifest,
+    scratch_directory: Path,
+    *,
+    cancelled: CancellationCheck | None = None,
+    prefer_reflink: bool = True,
+) -> tuple[CutWorkspace, CutWorkspace, CutManifest]:
+    """Snapshot a validated stage, then durably publish it for later jobs."""
+    _require_workspace(workspace)
+    if workspace.lifecycle is not WorkspaceLifecycle.STAGING:
+        raise _promotion_error("render promotion requires a staged workspace")
+    if type(manifest) is not CutManifest or manifest.cache_key != workspace.cache_key:
+        raise _manifest_error("render manifest does not match its staged workspace")
+    check_cancelled = cancelled if cancelled is not None else _not_cancelled
+    if not callable(check_cancelled):
+        raise TypeError("cancelled must be callable")
+    private: CutWorkspace | None = None
+    try:
+        _raise_if_cancelled(check_cancelled)
+        _write_manifest_atomic(workspace.path, manifest)
+        candidate = validate_cut_set(workspace)
+        private = _snapshot_validated_workspace(
+            workspace,
+            candidate,
+            scratch_directory,
+            cancelled=check_cancelled,
+            prefer_reflink=prefer_reflink,
+        )
+        _raise_if_cancelled(check_cancelled)
+        durable = promote_cut_set(workspace)
+        promoted_manifest = validate_cut_set(durable)
+        return durable, private, promoted_manifest
+    except AppError as error:
+        if private is not None:
+            _cleanup_snapshot(scratch_directory, error)
+        if workspace.path.exists():
+            _cleanup_staged_cut(workspace.path, error)
+        raise
+
+
 @_filesystem_boundary("promotion", "cannot promote cut workspace")
 def promote_cut_set(
     workspace: CutWorkspace, manifest: CutManifest | None = None
@@ -1019,6 +1068,139 @@ def detect_external_edits(
                 workspace.path, updated, expected_identity=manifest_identity
             )
         return validate_cut_set(workspace)
+
+
+@_filesystem_boundary("set", "cannot compare-and-set cut union metadata")
+def compare_and_set_union_metadata(
+    workspace: CutWorkspace,
+    expected_frame_hashes: Sequence[str],
+    union_metadata: CutUnionMetadata,
+    *,
+    now_ns: int | None = None,
+) -> bool:
+    """Publish derived union data only while the expected cut bytes still win."""
+    _require_workspace(workspace)
+    if workspace.lifecycle is not WorkspaceLifecycle.PROMOTED:
+        raise _set_error("union metadata updates require durable promoted cuts")
+    if isinstance(expected_frame_hashes, (str, bytes)):
+        raise TypeError("expected_frame_hashes must be a sequence")
+    expected = tuple(expected_frame_hashes)
+    if any(type(value) is not str for value in expected):
+        raise TypeError("expected frame hashes must be strings")
+    if type(union_metadata) is not CutUnionMetadata:
+        raise TypeError("union_metadata must be a CutUnionMetadata")
+    timestamp = time.time_ns() if now_ns is None else now_ns
+    _bounded_int(timestamp, "last-use timestamp", minimum=0, maximum=_MAX_INT64)
+    with _promotion_lock(str(workspace.cuts_root / workspace.cache_key)):
+        manifest, manifest_identity = _read_manifest(workspace.path)
+        frames, _identities = _scan_cut_set(
+            workspace.path,
+            manifest,
+            manifest_identity,
+            compare_recorded=False,
+        )
+        if tuple(frame.sha256 for frame in frames) != expected:
+            return False
+        updated = replace(
+            manifest,
+            frames=frames,
+            edited=manifest.edited or frames != manifest.frames,
+            union_metadata=union_metadata,
+            last_used_at_ns=max(
+                timestamp, manifest.created_at_ns, manifest.last_used_at_ns
+            ),
+        )
+        try:
+            _write_manifest_atomic(
+                workspace.path, updated, expected_identity=manifest_identity
+            )
+        except AppError as error:
+            if (
+                error.code is ErrorCode.CUT_MANIFEST_INVALID
+                and "changed before the atomic update" in error.technical_detail
+            ):
+                return False
+            raise
+        return True
+
+
+def _snapshot_validated_workspace(
+    workspace: CutWorkspace,
+    baseline: CutManifest,
+    scratch_directory: Path,
+    *,
+    cancelled: CancellationCheck,
+    prefer_reflink: bool,
+) -> CutWorkspace:
+    if not isinstance(scratch_directory, Path):
+        raise _unsafe_error("scratch directory must be a Path")
+    _validate_path_value(scratch_directory)
+    if scratch_directory.parent != workspace.scratch_root:
+        raise _unsafe_error("snapshot must use scratch/<job-id> under its workspace")
+    _validate_job_id(scratch_directory.name)
+    snapshot_path = scratch_directory / "cuts-snapshot"
+    started = False
+    try:
+        _raise_if_cancelled(cancelled)
+        source_manifest, manifest_identity = _read_manifest(workspace.path)
+        if source_manifest != baseline:
+            raise _cuts_changed("staged manifest changed before private snapshot")
+        _frames, baseline_identities = _scan_cut_set(
+            workspace.path,
+            baseline,
+            manifest_identity,
+            compare_recorded=True,
+        )
+        with _BoundDirectory.open(workspace.scratch_root) as scratch_bound:
+            scratch_bound.mkdir(scratch_directory.name, exist_ok=False)
+            started = True
+            with scratch_bound.open_child(scratch_directory.name) as job_bound:
+                job_bound.mkdir(snapshot_path.name, exist_ok=False)
+                with job_bound.open_child(snapshot_path.name):
+                    pass
+        for frame in baseline.frames:
+            _raise_if_cancelled(cancelled)
+            _copy_frame_descriptor_bound(
+                workspace.path,
+                snapshot_path,
+                frame,
+                prefer_reflink=prefer_reflink,
+            )
+        _write_manifest_atomic(snapshot_path, baseline)
+        _raise_if_cancelled(cancelled)
+        after, after_identity = _read_manifest(workspace.path)
+        after_frames, after_identities = _scan_cut_set(
+            workspace.path,
+            after,
+            after_identity,
+            compare_recorded=True,
+        )
+        if (
+            after != baseline
+            or after_frames != baseline.frames
+            or after_identities != baseline_identities
+        ):
+            raise _cuts_changed("cuts changed during private render snapshot")
+        snapshot = CutWorkspace(
+            workspace.output_directory,
+            workspace.workspace_root,
+            workspace.cuts_root,
+            workspace.scratch_root,
+            workspace.cache_key,
+            snapshot_path,
+            WorkspaceLifecycle.SNAPSHOT,
+        )
+        validate_cut_set(snapshot)
+        return snapshot
+    except AppError as error:
+        if started:
+            _cleanup_snapshot(scratch_directory, error)
+        raise
+    except OSError as error:
+        failure = _snapshot_error(f"cannot create private render snapshot: {error}")
+        if started:
+            _cleanup_snapshot(scratch_directory, failure)
+        raise failure from error
 
 
 @_filesystem_boundary("snapshot", "cannot snapshot cut workspace")
@@ -2763,8 +2945,36 @@ def _validate_cache_inputs(inputs: FrozenJsonMap) -> None:
     ):
         _bounded_text(_string(inputs[field], field), field)
     edge = _frozen_object(inputs["edge_settings"], "edge_settings")
-    _exact_keys(edge, {"mode"}, "edge_settings")
-    _bounded_text(_string(edge["mode"], "edge mode"), "edge mode")
+    _exact_keys(edge, {"alpha_matting", "mode"}, "edge_settings")
+    edge_mode = _bounded_text(_string(edge["mode"], "edge mode"), "edge mode")
+    if edge_mode not in {"standard", "decontaminate", "alpha_matting"}:
+        raise _manifest_error("edge mode is not supported by the pinned catalog")
+    matting = _frozen_object(edge["alpha_matting"], "alpha matting")
+    _exact_keys(
+        matting,
+        {"background_threshold", "erode_size", "foreground_threshold"},
+        "alpha matting",
+    )
+    foreground = _bounded_int(
+        _int(matting["foreground_threshold"], "matting foreground threshold"),
+        "matting foreground threshold",
+        minimum=1,
+        maximum=255,
+    )
+    background = _bounded_int(
+        _int(matting["background_threshold"], "matting background threshold"),
+        "matting background threshold",
+        minimum=0,
+        maximum=255,
+    )
+    if background >= foreground:
+        raise _manifest_error("matting background must be below foreground")
+    _bounded_int(
+        _int(matting["erode_size"], "matting erosion size"),
+        "matting erosion size",
+        minimum=0,
+        maximum=_MAX_INT64,
+    )
 
 
 def _fraction_payload(value: FrozenJsonValue, field: str) -> float:

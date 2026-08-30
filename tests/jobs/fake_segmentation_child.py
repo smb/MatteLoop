@@ -33,7 +33,7 @@ def fake_segmentation_child(connection: Connection, model_spec: object) -> None:
         WorkerReady(PROTOCOL_VERSION, CONTROL_JOB_ID, os.getpid())
     )
     if mode == "startup-version":
-        ready = ready.replace(b'"protocol_version":1', b'"protocol_version":2')
+        ready = ready.replace(b'"protocol_version":2', b'"protocol_version":999')
     connection.send_bytes(ready)
     if mode == "startup-version":
         connection.close()
@@ -112,7 +112,9 @@ def fake_segmentation_child(connection: Connection, model_spec: object) -> None:
                     continue
                 raw = encode_child_message(response)
                 if mode == "response-version":
-                    raw = raw.replace(b'"protocol_version":1', b'"protocol_version":2')
+                    raw = raw.replace(
+                        b'"protocol_version":2', b'"protocol_version":999'
+                    )
                 if mode == "invalid-utf8":
                     raw = b"\xff"
                 if mode == "oversized":

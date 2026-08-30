@@ -28,7 +28,7 @@ class RgbaOwnershipTracker:
     scoped callers rather than the source of lifetime truth.
     """
 
-    __slots__ = ("_nonweak", "_owners", "_peak", "_size", "__weakref__")
+    __slots__ = ("_nonweak", "_owners", "_peak", "_sizes", "__weakref__")
 
     def __init__(self, size: tuple[int, int]) -> None:
         width, height = size
@@ -41,7 +41,7 @@ class RgbaOwnershipTracker:
             or height <= 0
         ):
             raise ValueError("tracked RGBA size must contain positive integers")
-        self._size = size
+        self._sizes = {size}
         self._owners: dict[int, weakref.ReferenceType[Any]] = {}
         self._nonweak: dict[int, object] = {}
         self._peak = 0
@@ -54,6 +54,20 @@ class RgbaOwnershipTracker:
     @property
     def peak(self) -> int:
         return self._peak
+
+    def include_size(self, size: tuple[int, int]) -> None:
+        """Include another job-owned full-frame resolution in the accounting."""
+        width, height = size
+        if (
+            not isinstance(width, int)
+            or isinstance(width, bool)
+            or not isinstance(height, int)
+            or isinstance(height, bool)
+            or width <= 0
+            or height <= 0
+        ):
+            raise ValueError("tracked RGBA size must contain positive integers")
+        self._sizes.add(size)
 
     def register[OwnerT](
         self,
@@ -134,13 +148,11 @@ class RgbaOwnershipTracker:
         self._peak = max(self._peak, len(self._owners) + len(self._nonweak))
 
     def _is_full_resolution_rgba(self, owner: object) -> bool:
-        width, height = self._size
         if isinstance(owner, Image.Image):
-            return owner.mode == "RGBA" and owner.size == self._size
+            return owner.mode == "RGBA" and owner.size in self._sizes
         if isinstance(owner, np.ndarray):
-            return (
-                owner.dtype == np.uint8
-                and owner.shape == (height, width, 4)
-                and owner.nbytes == width * height * 4
-            )
+            if owner.dtype != np.uint8 or owner.ndim != 3 or owner.shape[2] != 4:
+                return False
+            height, width, _channels = owner.shape
+            return (width, height) in self._sizes and owner.nbytes == width * height * 4
         return False

@@ -17,11 +17,14 @@ from rembggui.core.errors import AppError, ErrorCode, ValidationError
 from rembggui.core.fingerprints import (
     complete_source_sha256,
     cut_cache_key,
+    cut_cache_key_inputs,
     preview_fingerprint,
     provisional_source_fingerprint,
     render_fingerprint,
+    union_fingerprint,
 )
 from rembggui.core.specs import (
+    AlphaMattingSpec,
     CollisionPolicy,
     CropSpec,
     EdgeMode,
@@ -92,9 +95,10 @@ def test_provisional_fingerprint_handles_empty_and_overlapping_chunks(
         sort_keys=True,
     )
 
-    assert provisional_source_fingerprint(source, chunk_size=8) == hashlib.sha256(
-        canonical_json.encode("utf-8")
-    ).hexdigest()
+    assert (
+        provisional_source_fingerprint(source, chunk_size=8)
+        == hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+    )
 
 
 def test_complete_hash_promotes_file_content_independently_of_path(
@@ -106,9 +110,10 @@ def test_complete_hash_promotes_file_content_independently_of_path(
     source_a.write_bytes(payload)
     source_b.write_bytes(payload)
 
-    assert complete_source_sha256(source_a, chunk_size=997) == hashlib.sha256(
-        payload
-    ).hexdigest()
+    assert (
+        complete_source_sha256(source_a, chunk_size=997)
+        == hashlib.sha256(payload).hexdigest()
+    )
     assert complete_source_sha256(source_a, chunk_size=997) == complete_source_sha256(
         source_b, chunk_size=4096
     )
@@ -190,7 +195,9 @@ def test_output_path_does_not_stale_segmentation(tmp_path: Path) -> None:
         ),
     )
 
-    assert preview_fingerprint(request) == preview_fingerprint(changed_output)
+    assert preview_fingerprint(request, Fraction(1, 5)) == preview_fingerprint(
+        changed_output, Fraction(1, 5)
+    )
     assert cut_cache_key(
         request, source_sha256=SOURCE_SHA, model_weight_sha256=MODEL_SHA
     ) == cut_cache_key(
@@ -212,9 +219,7 @@ def test_output_path_does_not_stale_segmentation(tmp_path: Path) -> None:
         ),
         lambda request: replace(
             request,
-            segmentation=SegmentationSpec(
-                "birefnet-portrait", EdgeMode.ALPHA_MATTING
-            ),
+            segmentation=SegmentationSpec("birefnet-portrait", EdgeMode.ALPHA_MATTING),
         ),
     ],
 )
@@ -226,9 +231,7 @@ def test_cut_key_invalidates_only_for_authoritative_cut_inputs(
 
     assert cut_cache_key(
         request, source_sha256=SOURCE_SHA, model_weight_sha256=MODEL_SHA
-    ) != cut_cache_key(
-        changed, source_sha256=SOURCE_SHA, model_weight_sha256=MODEL_SHA
-    )
+    ) != cut_cache_key(changed, source_sha256=SOURCE_SHA, model_weight_sha256=MODEL_SHA)
 
 
 def test_cut_key_tracks_source_model_pipeline_and_color_identities(
@@ -275,12 +278,10 @@ def test_framing_and_output_limits_do_not_invalidate_cut_reuse(tmp_path: Path) -
 
     assert cut_cache_key(
         request, source_sha256=SOURCE_SHA, model_weight_sha256=MODEL_SHA
-    ) == cut_cache_key(
-        changed, source_sha256=SOURCE_SHA, model_weight_sha256=MODEL_SHA
-    )
+    ) == cut_cache_key(changed, source_sha256=SOURCE_SHA, model_weight_sha256=MODEL_SHA)
     assert preview_fingerprint(
-        request, source_fingerprint=SOURCE_SHA
-    ) != preview_fingerprint(changed, source_fingerprint=SOURCE_SHA)
+        request, Fraction(1, 5), source_fingerprint=SOURCE_SHA
+    ) != preview_fingerprint(changed, Fraction(1, 5), source_fingerprint=SOURCE_SHA)
 
 
 def test_render_size_limit_does_not_invalidate_preview(tmp_path: Path) -> None:
@@ -288,8 +289,8 @@ def test_render_size_limit_does_not_invalidate_preview(tmp_path: Path) -> None:
     changed = replace(request, output=replace(request.output, max_bytes=250_000))
 
     assert preview_fingerprint(
-        request, source_fingerprint=SOURCE_SHA
-    ) == preview_fingerprint(changed, source_fingerprint=SOURCE_SHA)
+        request, Fraction(1, 5), source_fingerprint=SOURCE_SHA
+    ) == preview_fingerprint(changed, Fraction(1, 5), source_fingerprint=SOURCE_SHA)
 
 
 def test_preview_uses_supplied_source_identity_without_reading_source(
@@ -299,23 +300,27 @@ def test_preview_uses_supplied_source_identity_without_reading_source(
     supplied = provisional_source_fingerprint(request.source)
     request.source.unlink()
 
-    assert preview_fingerprint(request, source_fingerprint=supplied) == (
-        preview_fingerprint(request, source_fingerprint=supplied)
-    )
+    assert preview_fingerprint(
+        request, Fraction(1, 5), source_fingerprint=supplied
+    ) == preview_fingerprint(request, Fraction(1, 5), source_fingerprint=supplied)
 
 
 def test_preview_tracks_all_content_layers_it_consumes(tmp_path: Path) -> None:
     request = request_a(tmp_path)
     source_identity = "cd" * 32
-    baseline = preview_fingerprint(request, source_fingerprint=source_identity)
+    baseline = preview_fingerprint(
+        request, Fraction(1, 5), source_fingerprint=source_identity
+    )
 
     variants = (
         preview_fingerprint(
             replace(request, sampling=SamplingSpec(Fraction(0), Fraction(1), 24)),
+            Fraction(1, 5),
             source_fingerprint=source_identity,
         ),
         preview_fingerprint(
             replace(request, crop=CropSpec(1, 3, 128, 192)),
+            Fraction(1, 5),
             source_fingerprint=source_identity,
         ),
         preview_fingerprint(
@@ -325,14 +330,17 @@ def test_preview_tracks_all_content_layers_it_consumes(tmp_path: Path) -> None:
                     "birefnet-portrait", EdgeMode.DECONTAMINATE_COLORS
                 ),
             ),
+            Fraction(1, 5),
             source_fingerprint=source_identity,
         ),
         preview_fingerprint(
             replace(request, framing=replace(request.framing, padding=9)),
+            Fraction(1, 5),
             source_fingerprint=source_identity,
         ),
         preview_fingerprint(
             request,
+            Fraction(1, 5),
             source_fingerprint=source_identity,
             orientation_color_version="orientation-color-v2",
         ),
@@ -367,6 +375,24 @@ def test_render_tracks_framing_and_size_but_not_destination_or_job_mode(
     assert render_fingerprint(new_framing, cut_key=cut_key) != baseline
     assert render_fingerprint(new_limit, cut_key=cut_key) != baseline
     assert render_fingerprint(request, cut_key="ee" * 32) != baseline
+
+
+def test_union_identity_tracks_only_cut_content_and_alpha_threshold(
+    tmp_path: Path,
+) -> None:
+    request = request_a(tmp_path)
+    cut_key = "ef" * 32
+    baseline = union_fingerprint(request, cut_key=cut_key)
+    new_output = replace(request, output=replace(request.output, max_bytes=17))
+    new_padding = replace(request, framing=replace(request.framing, padding=99))
+    new_threshold = replace(
+        request,
+        framing=replace(request.framing, alpha_threshold=Decimal("3")),
+    )
+
+    assert union_fingerprint(new_output, cut_key=cut_key) == baseline
+    assert union_fingerprint(new_padding, cut_key=cut_key) == baseline
+    assert union_fingerprint(new_threshold, cut_key=cut_key) != baseline
 
 
 def test_render_fingerprint_distinguishes_long_exact_decimal_values(
@@ -414,9 +440,9 @@ def test_render_fingerprint_canonicalizes_equivalent_decimal_forms(
         ),
     )
 
-    assert render_fingerprint(
-        trailing_zero, cut_key="ef" * 32
-    ) == render_fingerprint(exponent_form, cut_key="ef" * 32)
+    assert render_fingerprint(trailing_zero, cut_key="ef" * 32) == render_fingerprint(
+        exponent_form, cut_key="ef" * 32
+    )
 
 
 def test_render_fingerprint_canonicalizes_signed_zero(tmp_path: Path) -> None:
@@ -430,9 +456,9 @@ def test_render_fingerprint_canonicalizes_signed_zero(tmp_path: Path) -> None:
         framing=replace(request.framing, alpha_threshold=Decimal("0")),
     )
 
-    assert render_fingerprint(
-        negative_zero, cut_key="ef" * 32
-    ) == render_fingerprint(positive_zero, cut_key="ef" * 32)
+    assert render_fingerprint(negative_zero, cut_key="ef" * 32) == render_fingerprint(
+        positive_zero, cut_key="ef" * 32
+    )
 
 
 def test_render_fingerprint_is_independent_of_decimal_context_precision(
@@ -473,7 +499,9 @@ def test_render_fingerprint_is_independent_of_decimal_context_precision(
             model_weight_sha256=MODEL_SHA,
             pipeline_schema_version="",
         ),
-        lambda request: preview_fingerprint(request, source_fingerprint="bad"),
+        lambda request: preview_fingerprint(
+            request, Fraction(1, 5), source_fingerprint="bad"
+        ),
         lambda request: render_fingerprint(request, cut_key="bad"),
     ],
 )
@@ -491,7 +519,14 @@ def test_cut_key_uses_a_canonical_versioned_json_schema(tmp_path: Path) -> None:
     canonical_json = json.dumps(
         {
             "crop": {"height": 192, "width": 128, "x": 2, "y": 3},
-            "edge_settings": {"mode": "standard"},
+            "edge_settings": {
+                "alpha_matting": {
+                    "background_threshold": 10,
+                    "erode_size": 10,
+                    "foreground_threshold": 240,
+                },
+                "mode": "standard",
+            },
             "fingerprint_schema": "rembggui-fingerprint",
             "fingerprint_schema_version": 1,
             "kind": "cut-cache-key",
@@ -512,6 +547,59 @@ def test_cut_key_uses_a_canonical_versioned_json_schema(tmp_path: Path) -> None:
         sort_keys=True,
     )
 
+    assert (
+        cut_cache_key(request, source_sha256=SOURCE_SHA, model_weight_sha256=MODEL_SHA)
+        == hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+    )
+
+
+def test_preview_identity_tracks_playhead_and_matting_values(tmp_path: Path) -> None:
+    request = request_a(tmp_path)
+    source_identity = "cd" * 32
+    baseline = preview_fingerprint(
+        request, Fraction(1, 5), source_fingerprint=source_identity
+    )
+    changed_matting = replace(
+        request,
+        segmentation=replace(
+            request.segmentation,
+            alpha_matting=AlphaMattingSpec(230, 12, 7),
+        ),
+    )
+
+    assert baseline != preview_fingerprint(
+        request, Fraction(1, 4), source_fingerprint=source_identity
+    )
+    assert baseline != preview_fingerprint(
+        changed_matting, Fraction(1, 5), source_fingerprint=source_identity
+    )
+
+
+def test_cut_key_is_built_from_the_public_frozen_inputs(tmp_path: Path) -> None:
+    request = request_a(tmp_path)
+    inputs = cut_cache_key_inputs(
+        request, source_sha256=SOURCE_SHA, model_weight_sha256=MODEL_SHA
+    )
+
     assert cut_cache_key(
         request, source_sha256=SOURCE_SHA, model_weight_sha256=MODEL_SHA
-    ) == hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+    ) == fingerprints_module.cut_cache_key_from_inputs(inputs)
+    with pytest.raises(TypeError):
+        inputs["source_sha256"] = "ff" * 32  # type: ignore[index]
+
+
+def test_complete_hash_checks_cancellation_between_chunks(tmp_path: Path) -> None:
+    source = tmp_path / "cancelled.mp4"
+    source.write_bytes(b"0123456789")
+    checks = 0
+
+    def cancelled() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks >= 3
+
+    with pytest.raises(AppError) as exc:
+        complete_source_sha256(source, chunk_size=2, is_cancelled=cancelled)
+
+    assert exc.value.code is ErrorCode.JOB_CANCELLED
+    assert checks == 3

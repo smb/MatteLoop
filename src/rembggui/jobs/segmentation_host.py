@@ -58,6 +58,7 @@ from rembggui.jobs.protocol import (
     ParentMessage,
     ProtocolCodecError,
     SegmentFailure,
+    SegmentOptions,
     SegmentRequest,
     SegmentResponse,
     SharedFrame,
@@ -79,7 +80,7 @@ _MAX_LAUNCH_TEXT_BYTES = 16 * 1024
 
 type Uint8Frame = NDArray[np.uint8]
 type ChildTarget = Callable[[Connection, object], None]
-type Inference = Callable[[Uint8Frame, object], Uint8Frame]
+type Inference = Callable[[Uint8Frame, object, SegmentOptions], Uint8Frame]
 
 
 class SegmentationClient:
@@ -554,6 +555,7 @@ class SegmentationClient:
             or type(request.request_id) is not str
             or not request.request_id
             or request.slot is not None
+            or type(request.options) is not SegmentOptions
         ):
             job_id = request.job_id if isinstance(request, SegmentRequest) else None
             raise self._protocol_error(
@@ -937,7 +939,7 @@ def _serve_segmentation_connection(
                     return
                 continue
             try:
-                result = inference(source, session)
+                result = inference(source, session, message.options)
             except BaseException as error:
                 if not _send_child(connection, _inference_failure(message, error)):
                     return
@@ -1350,14 +1352,29 @@ def _model_cache_error(detail: str) -> AppError:
     )
 
 
-def _run_rembg(source: Uint8Frame, session: object) -> Uint8Frame:
+def _run_rembg(
+    source: Uint8Frame, session: object, options: SegmentOptions
+) -> Uint8Frame:
     from rembg import remove  # type: ignore[import-untyped]
 
     actual_session = session
-    inference_kwargs: dict[str, str] = {}
+    inference_kwargs: dict[str, object] = {}
     if type(session) is _PreparedRembgSession:
         actual_session = session.session
         inference_kwargs = dict(session.inference_kwargs)
+    inference_kwargs["alpha_matting"] = options.edge_mode == "alpha_matting"
+    if options.edge_mode == "alpha_matting":
+        inference_kwargs.update(
+            {
+                "alpha_matting_foreground_threshold": (
+                    options.alpha_matting_foreground_threshold
+                ),
+                "alpha_matting_background_threshold": (
+                    options.alpha_matting_background_threshold
+                ),
+                "alpha_matting_erode_size": options.alpha_matting_erode_size,
+            }
+        )
     result = np.asarray(remove(source, session=actual_session, **inference_kwargs))
     if result.dtype != np.dtype(np.uint8):
         raise ValueError("rembg output dtype is not uint8")

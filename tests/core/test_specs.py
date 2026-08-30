@@ -11,6 +11,7 @@ import pytest
 import rembggui.core.specs as core_specs
 from rembggui.core.errors import ErrorCode, ValidationError
 from rembggui.core.specs import (
+    AlphaMattingSpec,
     CollisionPolicy,
     CropSpec,
     EdgeMode,
@@ -154,6 +155,38 @@ def test_segmentation_defaults_and_edge_mode_are_immutable() -> None:
         segmentation.model_id = "u2net"  # type: ignore[misc]
 
 
+def test_alpha_matting_defaults_match_the_pinned_rembg_api() -> None:
+    matting = AlphaMattingSpec()
+
+    assert matting.foreground_threshold == 240
+    assert matting.background_threshold == 10
+    assert matting.erode_size == 10
+    assert SegmentationSpec().alpha_matting == matting
+    with pytest.raises(FrozenInstanceError):
+        matting.foreground_threshold = 200  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        (0, 10, 10),
+        (256, 10, 10),
+        (240, -1, 10),
+        (240, 256, 10),
+        (10, 10, 10),
+        (240, 10, -1),
+        (240, 10, True),
+    ],
+)
+def test_alpha_matting_rejects_invalid_thresholds_and_erosion(
+    values: tuple[int, int, int],
+) -> None:
+    with pytest.raises(ValidationError) as exc:
+        AlphaMattingSpec(*values)
+
+    assert exc.value.code is ErrorCode.INVALID_SEGMENTATION
+
+
 @pytest.mark.parametrize(
     "threshold",
     [
@@ -250,9 +283,7 @@ def test_output_rejects_windows_impossible_filename_on_any_host(
     assert exc.value.code is ErrorCode.INVALID_OUTPUT
 
 
-@pytest.mark.parametrize(
-    "filename", ["cut\x01out.webp", "CONIN$.webp", "CONOUT$.webp"]
-)
+@pytest.mark.parametrize("filename", ["cut\x01out.webp", "CONIN$.webp", "CONOUT$.webp"])
 def test_output_rejects_standard_windows_reserved_filename_on_any_host(
     filename: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

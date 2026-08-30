@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 import stat
 import tempfile
 import warnings
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal
@@ -185,7 +186,11 @@ def encode_lossless_webp(
     except AppError as error:
         primary = error
         raise
-    except (OSError, ValueError, av.FFmpegError) as error:
+    except OSError as error:
+        wrapped = _output_os_error(error, "lossless WebP encoding failed")
+        primary = wrapped
+        raise wrapped from error
+    except (ValueError, av.FFmpegError) as error:
         wrapped = _invalid_output(f"lossless WebP encoding failed: {error}")
         primary = wrapped
         raise wrapped from error
@@ -285,9 +290,20 @@ def fit_webp_to_size(
     target_bytes: int,
     work_dir: Path,
     destination: Path,
+    *,
+    is_cancelled: Callable[[], bool] | None = None,
+    rgba_ownership_tracker: RgbaOwnershipTracker | None = None,
 ) -> Path:
     """Fit a validated WebP to a byte target using at most twelve encodes."""
-    source = _validate_frame_inputs(source_frame_paths, delays_ms)
+    _raise_if_fit_cancelled(is_cancelled)
+    if rgba_ownership_tracker is None:
+        source = _validate_frame_inputs(source_frame_paths, delays_ms)
+    else:
+        source = _validate_frame_inputs(
+            source_frame_paths,
+            delays_ms,
+            rgba_ownership_tracker,
+        )
     if (
         not isinstance(target_bytes, int)
         or isinstance(target_bytes, bool)
@@ -300,20 +316,38 @@ def fit_webp_to_size(
         work_dir.mkdir(parents=True, exist_ok=True)
         scratch = Path(tempfile.mkdtemp(prefix="webp-fit-", dir=work_dir))
     except OSError as error:
-        raise _invalid_output(f"cannot create auto-fit workspace: {error}") from error
+        raise _output_os_error(error, "cannot create auto-fit workspace") from error
 
     primary: BaseException | None = None
     prepared_output: Path | None = None
     scratch_cleaned = False
     try:
-        source = _snapshot_frame_set(source, scratch / "source-snapshot")
+        _raise_if_fit_cancelled(is_cancelled)
+        source = _snapshot_frame_set(
+            source,
+            scratch / "source-snapshot",
+            rgba_ownership_tracker,
+        )
+        _raise_if_fit_cancelled(is_cancelled)
         cumulative_scale = Decimal(1)
         current_paths = source.paths
         current_size = source.size
         active_scaled_dir: Path | None = None
         for attempt in range(_MAX_FIT_ENCODINGS):
+            _raise_if_fit_cancelled(is_cancelled)
             candidate = scratch / f"candidate-{attempt:02d}.webp"
-            summary = encode_lossless_webp(current_paths, source.delays_ms, candidate)
+            if rgba_ownership_tracker is None:
+                summary = encode_lossless_webp(
+                    current_paths, source.delays_ms, candidate
+                )
+            else:
+                summary = encode_lossless_webp(
+                    current_paths,
+                    source.delays_ms,
+                    candidate,
+                    rgba_ownership_tracker=rgba_ownership_tracker,
+                )
+            _raise_if_fit_cancelled(is_cancelled)
             if summary.file_size <= target_bytes:
                 prepared_output = _prepare_candidate(
                     candidate,
@@ -322,14 +356,16 @@ def fit_webp_to_size(
                     source.delays_ms,
                     current_size,
                     target_bytes,
+                    rgba_ownership_tracker,
                 )
+                _raise_if_fit_cancelled(is_cancelled)
                 _cleanup_tree(scratch, None)
                 scratch_cleaned = True
                 try:
                     os.replace(prepared_output, destination)
                 except OSError as error:
-                    raise _invalid_output(
-                        f"cannot atomically promote fitted WebP: {error}"
+                    raise _output_os_error(
+                        error, "cannot atomically promote fitted WebP"
                     ) from error
                 prepared_output = None
                 return destination
@@ -347,6 +383,8 @@ def fit_webp_to_size(
             if next_scale >= Decimal(1):
                 break
             next_size = _scaled_dimensions(source.size, next_scale)
+            if rgba_ownership_tracker is not None:
+                rgba_ownership_tracker.include_size(next_size)
             if (
                 next_size == (MIN_FINAL_DIMENSION, MIN_FINAL_DIMENSION)
                 and (
@@ -360,7 +398,19 @@ def fit_webp_to_size(
             if active_scaled_dir is not None:
                 _cleanup_tree(active_scaled_dir, None)
             scaled_dir = scratch / f"scaled-{attempt + 1:02d}"
-            current_paths = _resize_from_sources(source.paths, next_size, scaled_dir)
+            _raise_if_fit_cancelled(is_cancelled)
+            if rgba_ownership_tracker is None:
+                current_paths = _resize_from_sources(
+                    source.paths, next_size, scaled_dir
+                )
+            else:
+                current_paths = _resize_from_sources(
+                    source.paths,
+                    next_size,
+                    scaled_dir,
+                    rgba_ownership_tracker,
+                )
+            _raise_if_fit_cancelled(is_cancelled)
             current_size = next_size
             active_scaled_dir = scaled_dir
             cumulative_scale = next_scale
@@ -544,7 +594,18 @@ def _rewrite_animation_durations(path: Path, delays_ms: tuple[int, ...]) -> None
     offsets = _animation_duration_offsets(path)
     if len(offsets) != len(delays_ms):
         raise _invalid_output("encoder returned an incomplete animation")
+    alpha_flag_offset, background_offset = _animation_metadata_offsets(path)
     with path.open("r+b") as output:
+        # FFmpeg's WebP muxer writes an opaque background hint and may encode
+        # the first frame as a cropped rectangle. Pillow honors that hint,
+        # turning the transparent canvas around a cutout opaque. Canonicalize
+        # the ANIM BGRA field to transparent black before validating pixels.
+        output.seek(alpha_flag_offset)
+        flags = _read_exact(output, 1)[0]
+        output.seek(alpha_flag_offset)
+        output.write(bytes((flags | 0x10,)))
+        output.seek(background_offset)
+        output.write(b"\0\0\0\0")
         for offset, delay in zip(offsets, delays_ms, strict=True):
             output.seek(offset)
             output.write(delay.to_bytes(3, "little"))
@@ -572,6 +633,32 @@ def _animation_duration_offsets(path: Path) -> tuple[int, ...]:
     return tuple(offsets)
 
 
+def _animation_metadata_offsets(path: Path) -> tuple[int, int]:
+    with path.open("rb") as source:
+        file_size = _read_riff_header(source)
+        position = 12
+        alpha_flag_offset: int | None = None
+        while position < file_size:
+            tag, size = _read_chunk_header_at(source, position)
+            if tag == b"VP8X":
+                if size != 10 or alpha_flag_offset is not None:
+                    raise _invalid_output("encoder returned invalid VP8X metadata")
+                alpha_flag_offset = position + 8
+            if tag == b"ANIM":
+                if size != 6:
+                    raise _invalid_output("encoder returned an invalid ANIM chunk")
+                if alpha_flag_offset is None:
+                    raise _invalid_output("encoder returned ANIM before VP8X")
+                return alpha_flag_offset, position + 8
+            position += 8 + size + (size & 1)
+    raise _invalid_output("encoder returned animation frames without ANIM metadata")
+
+
+def _read_chunk_header_at(source: BinaryIO, position: int) -> tuple[bytes, int]:
+    source.seek(position)
+    return _read_chunk_header(source)
+
+
 def _parse_riff(path: Path, actual_size: int) -> _RiffFacts:
     with path.open("rb") as source:
         declared_size = _read_riff_header(source)
@@ -597,6 +684,7 @@ def _parse_riff(path: Path, actual_size: int) -> _RiffFacts:
             raise _invalid_output("WebP has an invalid ANIM chunk")
         source.seek(second[2])
         animation_data = _read_exact(source, 6)
+        background_has_alpha = animation_data[3] < 255
         loop = int.from_bytes(animation_data[4:6], "little")
         _require_zero_padding(source, second[3], second[1])
 
@@ -619,7 +707,7 @@ def _parse_riff(path: Path, actual_size: int) -> _RiffFacts:
             position = chunk[4]
         if not delays:
             raise _invalid_output("animated WebP must contain at least one ANMF frame")
-        if has_alpha_flag != any(frame_alpha):
+        if has_alpha_flag != (background_has_alpha or any(frame_alpha)):
             raise _invalid_output("VP8X alpha flag does not match VP8L frame alpha")
         return _RiffFacts(width, height, tuple(delays), loop, has_alpha_flag)
 
@@ -805,7 +893,10 @@ def _validate_encoded_frame(
 
 
 def _resize_from_sources(
-    source_paths: tuple[Path, ...], size: tuple[int, int], destination: Path
+    source_paths: tuple[Path, ...],
+    size: tuple[int, int],
+    destination: Path,
+    rgba_ownership_tracker: RgbaOwnershipTracker | None = None,
 ) -> tuple[Path, ...]:
     destination.mkdir()
     output_paths: list[Path] = []
@@ -817,6 +908,8 @@ def _resize_from_sources(
         ):
             with _open_pillow(input_file) as source:
                 source.load()
+                if rgba_ownership_tracker is not None:
+                    rgba_ownership_tracker.register(source)
                 premultiplied = source.convert("RGBa")
         try:
             resized = premultiplied.resize(size, Image.Resampling.LANCZOS)
@@ -824,6 +917,8 @@ def _resize_from_sources(
             premultiplied.close()
         try:
             rgba = resized.convert("RGBA")
+            if rgba_ownership_tracker is not None:
+                rgba_ownership_tracker.register(rgba)
         finally:
             resized.close()
         try:
@@ -834,7 +929,11 @@ def _resize_from_sources(
     return tuple(output_paths)
 
 
-def _snapshot_frame_set(source: _FrameSet, destination: Path) -> _FrameSet:
+def _snapshot_frame_set(
+    source: _FrameSet,
+    destination: Path,
+    rgba_ownership_tracker: RgbaOwnershipTracker | None = None,
+) -> _FrameSet:
     destination.mkdir()
     snapshot_paths: list[Path] = []
     for index, (path, identity) in enumerate(
@@ -850,7 +949,11 @@ def _snapshot_frame_set(source: _FrameSet, destination: Path) -> _FrameSet:
                 output.flush()
                 os.fsync(output.fileno())
         snapshot_paths.append(snapshot)
-    return _validate_frame_inputs(tuple(snapshot_paths), source.delays_ms)
+    if rgba_ownership_tracker is None:
+        return _validate_frame_inputs(tuple(snapshot_paths), source.delays_ms)
+    return _validate_frame_inputs(
+        tuple(snapshot_paths), source.delays_ms, rgba_ownership_tracker
+    )
 
 
 def _scaled_dimensions(
@@ -874,6 +977,7 @@ def _prepare_candidate(
     delays_ms: tuple[int, ...],
     expected_dimensions: tuple[int, int],
     target_bytes: int,
+    rgba_ownership_tracker: RgbaOwnershipTracker | None = None,
 ) -> Path:
     temporary = _sibling_temporary(destination)
     primary: BaseException | None = None
@@ -886,13 +990,18 @@ def _prepare_candidate(
             temporary,
             expected_frames=len(current_frame_paths),
             expected_duration_ms=sum(delays_ms) if len(delays_ms) > 1 else 0,
+            rgba_ownership_tracker=rgba_ownership_tracker,
         )
         expected_delays = delays_ms if len(delays_ms) > 1 else ()
         if info.delays_ms != expected_delays:
             raise _invalid_output("fitted WebP frame delays changed during promotion")
         if (info.width, info.height) != expected_dimensions:
             raise _invalid_output("fitted WebP dimensions changed during promotion")
-        _validate_encoded_pixels(current_frame_paths, temporary)
+        _validate_encoded_pixels(
+            current_frame_paths,
+            temporary,
+            rgba_ownership_tracker=rgba_ownership_tracker,
+        )
         if info.file_size > target_bytes:
             raise _impossible_size(
                 "validated WebP remains larger than the requested byte target"
@@ -902,7 +1011,7 @@ def _prepare_candidate(
         primary = error
         raise
     except OSError as error:
-        wrapped = _invalid_output(f"cannot prepare fitted WebP: {error}")
+        wrapped = _output_os_error(error, "cannot prepare fitted WebP")
         primary = wrapped
         raise wrapped from error
     except BaseException as error:
@@ -911,6 +1020,19 @@ def _prepare_candidate(
     finally:
         if primary is not None:
             _cleanup_file(temporary, primary)
+
+
+def _raise_if_fit_cancelled(
+    is_cancelled: Callable[[], bool] | None,
+) -> None:
+    if is_cancelled is not None and is_cancelled():
+        raise AppError(
+            ErrorCode.JOB_CANCELLED,
+            "auto-fit",
+            "error.job.cancelled",
+            "lossless WebP auto-fit was cancelled at a safe point",
+            "none",
+        )
 
 
 def _validate_destination(destination: Path) -> Path:
@@ -936,7 +1058,7 @@ def _sibling_temporary(destination: Path) -> Path:
         descriptor = None
         return temporary
     except OSError as error:
-        wrapped = _invalid_output(f"cannot create sibling output temporary: {error}")
+        wrapped = _output_os_error(error, "cannot create sibling output temporary")
         if descriptor is not None:
             try:
                 os.close(descriptor)
@@ -1090,6 +1212,29 @@ def _invalid_output(detail: str) -> AppError:
         "error.webp.invalid-output",
         detail,
         "choose-output",
+    )
+
+
+def _output_os_error(error: OSError, detail: str) -> AppError:
+    if error.errno in {errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)}:
+        suffix = "disk quota or free space exhausted"
+        retry_action = "free-disk-space"
+    elif error.errno in {
+        errno.EACCES,
+        errno.EPERM,
+        getattr(errno, "EROFS", errno.EACCES),
+    }:
+        suffix = "output location is not writable"
+        retry_action = "choose-writable-output"
+    else:
+        suffix = f"{type(error).__name__}: {error}"
+        retry_action = "retry-output"
+    return AppError(
+        ErrorCode.INVALID_OUTPUT,
+        "webp",
+        "error.webp.invalid-output",
+        f"{detail}: {suffix}",
+        retry_action,
     )
 
 

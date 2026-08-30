@@ -6,12 +6,21 @@ import hashlib
 import json
 import os
 import stat
+from collections.abc import Callable, Mapping
 from decimal import Decimal
+from fractions import Fraction
 from pathlib import Path
-from typing import BinaryIO, Protocol
+from types import MappingProxyType
+from typing import BinaryIO, Protocol, cast
 
 from rembggui.core.errors import AppError, ErrorCode, ValidationError
-from rembggui.core.specs import CropSpec, FramingSpec, RenderRequest, SamplingSpec
+from rembggui.core.specs import (
+    CropSpec,
+    FramingSpec,
+    RenderRequest,
+    SamplingSpec,
+    catalog_edge_mode,
+)
 
 FINGERPRINT_SCHEMA = "rembggui-fingerprint"
 FINGERPRINT_SCHEMA_VERSION = 1
@@ -58,11 +67,16 @@ def provisional_source_fingerprint(
 
 
 def complete_source_sha256(
-    source: Path, *, chunk_size: int = COMPLETE_HASH_CHUNK_SIZE
+    source: Path,
+    *,
+    chunk_size: int = COMPLETE_HASH_CHUNK_SIZE,
+    is_cancelled: Callable[[], bool] | None = None,
 ) -> str:
     """Stream a complete source digest, rejecting any concurrent source change."""
     source = _validated_source_path(source)
     chunk_size = _validated_chunk_size(chunk_size)
+    if is_cancelled is not None and not callable(is_cancelled):
+        raise _invalid_source("is_cancelled must be callable")
     try:
         path_before = source.stat()
         if not stat.S_ISREG(path_before.st_mode):
@@ -76,7 +90,13 @@ def complete_source_sha256(
         with source.open("rb") as source_file:
             opened_before = os.fstat(source_file.fileno())
             _require_unchanged(path_before, opened_before)
-            bytes_read = _update_digest(source_file, digest, chunk_size)
+            bytes_read = (
+                _update_digest(source_file, digest, chunk_size)
+                if is_cancelled is None
+                else _update_digest_cancellable(
+                    source_file, digest, chunk_size, is_cancelled
+                )
+            )
             opened_after = os.fstat(source_file.fileno())
             path_after = source.stat()
     except AppError:
@@ -94,12 +114,19 @@ def complete_source_sha256(
 
 def preview_fingerprint(
     request: RenderRequest,
+    playhead: Fraction,
     *,
     source_fingerprint: str | None = None,
     orientation_color_version: str = ORIENTATION_COLOR_VERSION,
 ) -> str:
     """Identify only inputs consumed by preview generation."""
     request = _validated_request(request)
+    if not isinstance(playhead, Fraction) or playhead < 0:
+        raise ValidationError(
+            ErrorCode.INVALID_RENDER_REQUEST,
+            "fingerprint",
+            "preview playhead must be a non-negative Fraction",
+        )
     if source_fingerprint is None:
         source_fingerprint = provisional_source_fingerprint(request.source)
     source_fingerprint = _validated_sha256(source_fingerprint, "source_fingerprint")
@@ -110,11 +137,12 @@ def preview_fingerprint(
         {
             **_schema("preview"),
             "source_fingerprint": source_fingerprint,
+            "playhead": _fraction(playhead),
             "sampling": _sampling(request.sampling),
             "crop": _crop(request.crop),
             "segmentation": {
                 "model_id": request.segmentation.model_id,
-                "edge_mode": request.segmentation.edge_mode.value,
+                **_edge_settings(request),
             },
             "framing": _framing(request.framing),
             "orientation_color_version": orientation_color_version,
@@ -132,11 +160,30 @@ def cut_cache_key(
     rembg_version: str = REMBG_VERSION,
 ) -> str:
     """Return the authoritative persistent identity for segmented cut reuse."""
+    inputs = cut_cache_key_inputs(
+        request,
+        source_sha256=source_sha256,
+        model_weight_sha256=model_weight_sha256,
+        pipeline_schema_version=pipeline_schema_version,
+        orientation_color_version=orientation_color_version,
+        rembg_version=rembg_version,
+    )
+    return cut_cache_key_from_inputs(inputs)
+
+
+def cut_cache_key_inputs(
+    request: RenderRequest,
+    *,
+    source_sha256: str,
+    model_weight_sha256: str,
+    pipeline_schema_version: str = PIPELINE_SCHEMA_VERSION,
+    orientation_color_version: str = ORIENTATION_COLOR_VERSION,
+    rembg_version: str = REMBG_VERSION,
+) -> Mapping[str, object]:
+    """Return the sole recursively immutable input mapping for persistent cuts."""
     request = _validated_request(request)
     source_sha256 = _validated_sha256(source_sha256, "source_sha256")
-    model_weight_sha256 = _validated_sha256(
-        model_weight_sha256, "model_weight_sha256"
-    )
+    model_weight_sha256 = _validated_sha256(model_weight_sha256, "model_weight_sha256")
     pipeline_schema_version = _validated_version(
         pipeline_schema_version, "pipeline_schema_version"
     )
@@ -144,9 +191,8 @@ def cut_cache_key(
         orientation_color_version, "orientation_color_version"
     )
     rembg_version = _validated_version(rembg_version, "rembg_version")
-    return _canonical_hash(
+    return _freeze_mapping(
         {
-            **_schema("cut-cache-key"),
             "source_sha256": source_sha256,
             "sampling": _sampling(request.sampling),
             "crop": _crop(request.crop),
@@ -157,9 +203,20 @@ def cut_cache_key(
             "rembg_version": rembg_version,
             "pipeline_schema_version": pipeline_schema_version,
             "orientation_color_version": orientation_color_version,
-            "edge_settings": {"mode": request.segmentation.edge_mode.value},
+            "edge_settings": _edge_settings(request),
         }
     )
+
+
+def cut_cache_key_from_inputs(inputs: Mapping[str, object]) -> str:
+    """Hash already-resolved cut inputs with the one canonical JSON encoder."""
+    if not isinstance(inputs, Mapping):
+        raise ValidationError(
+            ErrorCode.INVALID_RENDER_REQUEST,
+            "fingerprint",
+            "cut cache key inputs must be a mapping",
+        )
+    return _canonical_hash({**_schema("cut-cache-key"), **dict(inputs)})
 
 
 def render_fingerprint(request: RenderRequest, *, cut_key: str) -> str:
@@ -176,6 +233,19 @@ def render_fingerprint(request: RenderRequest, *, cut_key: str) -> str:
     )
 
 
+def union_fingerprint(request: RenderRequest, *, cut_key: str) -> str:
+    """Identify the cut bytes and threshold consumed by range-union analysis."""
+    request = _validated_request(request)
+    cut_key = _validated_sha256(cut_key, "cut_key")
+    return _canonical_hash(
+        {
+            **_schema("cut-union"),
+            "cut_key": cut_key,
+            "alpha_threshold": _canonical_decimal(request.framing.alpha_threshold),
+        }
+    )
+
+
 def _update_digest(
     source_file: BinaryIO,
     digest: _Digest,
@@ -186,6 +256,29 @@ def _update_digest(
         digest.update(chunk)
         bytes_read += len(chunk)
     return bytes_read
+
+
+def _update_digest_cancellable(
+    source_file: BinaryIO,
+    digest: _Digest,
+    chunk_size: int,
+    is_cancelled: Callable[[], bool],
+) -> int:
+    bytes_read = 0
+    while True:
+        if is_cancelled():
+            raise AppError(
+                ErrorCode.JOB_CANCELLED,
+                "source-hash",
+                "error.job.cancelled",
+                "source hashing cancelled at a chunk boundary",
+                "retry-job",
+            )
+        chunk = source_file.read(chunk_size)
+        if not chunk:
+            return bytes_read
+        digest.update(chunk)
+        bytes_read += len(chunk)
 
 
 def _require_unchanged(before: os.stat_result, after: os.stat_result) -> None:
@@ -225,6 +318,10 @@ def _sampling(sampling: SamplingSpec) -> dict[str, object]:
     }
 
 
+def _fraction(value: Fraction) -> dict[str, int]:
+    return {"numerator": value.numerator, "denominator": value.denominator}
+
+
 def _crop(crop: CropSpec) -> dict[str, int]:
     return {"x": crop.x, "y": crop.y, "width": crop.width, "height": crop.height}
 
@@ -238,6 +335,38 @@ def _framing(framing: FramingSpec) -> dict[str, object]:
     }
 
 
+def _edge_settings(request: RenderRequest) -> dict[str, object]:
+    matting = request.segmentation.alpha_matting
+    return {
+        "mode": catalog_edge_mode(request.segmentation.edge_mode),
+        "alpha_matting": {
+            "foreground_threshold": matting.foreground_threshold,
+            "background_threshold": matting.background_threshold,
+            "erode_size": matting.erode_size,
+        },
+    }
+
+
+def _freeze_mapping(value: Mapping[str, object]) -> Mapping[str, object]:
+    frozen: dict[str, object] = {}
+    for key, item in value.items():
+        if isinstance(item, Mapping):
+            frozen[key] = _freeze_mapping(cast(Mapping[str, object], item))
+        elif isinstance(item, list):
+            frozen[key] = tuple(item)
+        else:
+            frozen[key] = item
+    return MappingProxyType(frozen)
+
+
+def _canonical_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(key): _canonical_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_canonical_value(item) for item in value]
+    return value
+
+
 def _canonical_decimal(value: Decimal) -> str:
     if value.is_zero():
         return "0"
@@ -249,7 +378,7 @@ def _canonical_decimal(value: Decimal) -> str:
 
 def _canonical_hash(payload: dict[str, object]) -> str:
     encoded = json.dumps(
-        payload,
+        _canonical_value(payload),
         ensure_ascii=False,
         allow_nan=False,
         separators=(",", ":"),

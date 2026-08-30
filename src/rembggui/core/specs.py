@@ -28,6 +28,13 @@ class EdgeMode(StrEnum):
     ALPHA_MATTING = "alpha_matting"
 
 
+_CATALOG_EDGE_MODES = {
+    EdgeMode.STANDARD: "standard",
+    EdgeMode.DECONTAMINATE_COLORS: "decontaminate",
+    EdgeMode.ALPHA_MATTING: "alpha_matting",
+}
+
+
 class CollisionPolicy(StrEnum):
     REPLACE = "replace"
     CHOOSE_ANOTHER_NAME = "choose_another_name"
@@ -139,11 +146,59 @@ class CropSpec:
 
 
 @dataclass(frozen=True)
+class AlphaMattingSpec:
+    """Pinned rembg 2.0.72 alpha-matting options."""
+
+    foreground_threshold: int = 240
+    background_threshold: int = 10
+    erode_size: int = 10
+
+    def __post_init__(self) -> None:
+        values = (
+            self.foreground_threshold,
+            self.background_threshold,
+            self.erode_size,
+        )
+        if any(
+            not isinstance(value, int) or isinstance(value, bool) for value in values
+        ):
+            raise ValidationError(
+                ErrorCode.INVALID_SEGMENTATION,
+                "segmentation",
+                "alpha-matting thresholds and erosion must be integers",
+            )
+        if (
+            not 1 <= self.foreground_threshold <= 255
+            or not 0 <= self.background_threshold <= 255
+            or self.background_threshold >= self.foreground_threshold
+            or self.erode_size < 0
+        ):
+            raise ValidationError(
+                ErrorCode.INVALID_SEGMENTATION,
+                "segmentation",
+                "alpha matting requires 0 <= background < foreground <= 255 "
+                "and non-negative erosion",
+            )
+
+
+def catalog_edge_mode(edge_mode: EdgeMode) -> str:
+    """Map domain wording to the exact pinned-catalog edge identifier."""
+    if not isinstance(edge_mode, EdgeMode):
+        raise ValidationError(
+            ErrorCode.INVALID_SEGMENTATION,
+            "segmentation",
+            "edge_mode must be an EdgeMode",
+        )
+    return _CATALOG_EDGE_MODES[edge_mode]
+
+
+@dataclass(frozen=True)
 class SegmentationSpec:
     """Model and edge-treatment selections for a segmentation worker."""
 
     model_id: str = "birefnet-portrait"
     edge_mode: EdgeMode = EdgeMode.STANDARD
+    alpha_matting: AlphaMattingSpec = field(default_factory=AlphaMattingSpec)
 
     def __post_init__(self) -> None:
         self.validate()
@@ -160,6 +215,12 @@ class SegmentationSpec:
                 ErrorCode.INVALID_SEGMENTATION,
                 "segmentation",
                 "edge_mode must be an EdgeMode",
+            )
+        if not isinstance(self.alpha_matting, AlphaMattingSpec):
+            raise ValidationError(
+                ErrorCode.INVALID_SEGMENTATION,
+                "segmentation",
+                "alpha_matting must be an AlphaMattingSpec",
             )
 
 
@@ -269,11 +330,7 @@ class OutputSpec:
         collision_policy: CollisionPolicy = CollisionPolicy.CANCEL,
     ) -> OutputSpec:
         """Create output settings from a GUI MiB value without binary float drift."""
-        if (
-            not isinstance(max_mib, Decimal)
-            or not max_mib.is_finite()
-            or max_mib < 0
-        ):
+        if not isinstance(max_mib, Decimal) or not max_mib.is_finite() or max_mib < 0:
             raise ValidationError(
                 ErrorCode.INVALID_OUTPUT,
                 "output",
@@ -303,13 +360,10 @@ class OutputSpec:
                 "output",
                 "filename must be a single non-empty .webp filename",
             )
-        if (
-            self.max_bytes is not None
-            and (
-                not isinstance(self.max_bytes, int)
-                or isinstance(self.max_bytes, bool)
-                or self.max_bytes < 0
-            )
+        if self.max_bytes is not None and (
+            not isinstance(self.max_bytes, int)
+            or isinstance(self.max_bytes, bool)
+            or self.max_bytes < 0
         ):
             raise ValidationError(
                 ErrorCode.INVALID_OUTPUT,
