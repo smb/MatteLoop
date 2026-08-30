@@ -7,6 +7,7 @@ import multiprocessing
 import os
 import threading
 import time
+from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import FrozenInstanceError
 from decimal import Decimal
@@ -79,6 +80,18 @@ def _cache_inputs(*, source: str = "a" * 64) -> dict[str, object]:
 
 def _image(index: int, *, size: tuple[int, int] = (8, 6)) -> Image.Image:
     return Image.new("RGBA", size, (index + 1, 40, 90, 128 + index))
+
+
+def _force_descriptor_reuse(
+    path: Path,
+    descriptor: int,
+    close_descriptor: Callable[[int], None],
+) -> int:
+    source = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    if source != descriptor:
+        assert os.dup2(source, descriptor) == descriptor
+        close_descriptor(source)
+    return descriptor
 
 
 def _completed_staging(
@@ -993,8 +1006,8 @@ def test_parent_anchored_locks_for_distinct_targets_are_independent(
         publication.close()
 
 
-@pytest.mark.skipif(os.name == "nt", reason="exercises POSIX descriptor cleanup")
-def test_parent_anchor_close_failure_retains_exact_retry_owner(
+@pytest.mark.skipif(os.name == "nt", reason="exercises POSIX descriptor reuse")
+def test_parent_anchor_close_then_raise_is_consumed_without_fd_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1008,22 +1021,32 @@ def test_parent_anchor_close_failure_retains_exact_retry_owner(
     anchor_descriptor = lock._anchor_descriptor
     assert anchor_descriptor is not None
     actual_close = os.close
-    fail_anchor = True
 
-    def fail_anchor_once(descriptor: int) -> None:
-        if fail_anchor and descriptor == anchor_descriptor:
-            raise OSError(errno.EIO, "synthetic anchor close failure")
+    def close_anchor_then_raise(descriptor: int) -> None:
         actual_close(descriptor)
+        if descriptor == anchor_descriptor:
+            raise OSError(errno.EIO, "synthetic post-close anchor failure")
 
-    monkeypatch.setattr(workspace_module.os, "close", fail_anchor_once)
-    with pytest.raises(AppError) as exc:
+    monkeypatch.setattr(workspace_module.os, "close", close_anchor_then_raise)
+    with pytest.raises(AppError, match="post-close anchor failure") as exc:
         lock.close()
 
     assert lock._descriptor is None
-    assert lock._anchor_descriptor == anchor_descriptor
-    fail_anchor = False
-    assert workspace_module._drain_attached_bound_directory_closes(exc.value) == 1
     assert lock._anchor_descriptor is None
+    reused = _force_descriptor_reuse(
+        tmp_path / "anchor-fd-reuse",
+        anchor_descriptor,
+        actual_close,
+    )
+    try:
+        lock.close()
+        os.fstat(reused)
+        assert workspace_module._drain_attached_bound_directory_closes(exc.value) == 0
+    finally:
+        try:
+            actual_close(reused)
+        except OSError:
+            pass
     private.close()
     publication.close()
 
@@ -1178,8 +1201,8 @@ def test_fixed_slot_lock_stays_exclusive_until_descriptor_close_completes(
         os.close(descriptor)
 
 
-@pytest.mark.skipif(os.name == "nt", reason="exercises POSIX descriptor cleanup")
-def test_locked_slot_close_failure_retains_exact_retry_owner(
+@pytest.mark.skipif(os.name == "nt", reason="exercises POSIX descriptor reuse")
+def test_locked_slot_close_then_raise_consumes_fd_without_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1193,43 +1216,45 @@ def test_locked_slot_close_failure_retains_exact_retry_owner(
     slot = private.open_locked_slot(f".{key}.publish-pending", lock)
     slot_descriptor = slot.descriptor
     actual_close = os.close
-    fail_slot = True
 
-    def fail_slot_once(descriptor: int) -> None:
-        if fail_slot and descriptor == slot_descriptor:
-            raise OSError(errno.EIO, "synthetic slot close failure")
+    def close_slot_then_raise(descriptor: int) -> None:
         actual_close(descriptor)
+        if descriptor == slot_descriptor:
+            raise OSError(errno.EIO, "synthetic post-close slot failure")
 
-    monkeypatch.setattr(workspace_module.os, "close", fail_slot_once)
-    with pytest.raises(AppError) as exc:
+    monkeypatch.setattr(workspace_module.os, "close", close_slot_then_raise)
+    with pytest.raises(AppError, match="post-close slot failure") as exc:
         slot.close()
 
-    assert slot.descriptor == slot_descriptor
-    contender = None
+    with pytest.raises(AppError, match="closed"):
+        _ = slot.descriptor
+    reused = _force_descriptor_reuse(
+        tmp_path / "slot-fd-reuse",
+        slot_descriptor,
+        actual_close,
+    )
     try:
+        slot.close()
+        os.fstat(reused)
+        assert workspace_module._drain_attached_bound_directory_closes(exc.value) == 0
         contender = private.open_locked_slot(
             slot.name,
             lock,
             create_if_missing=False,
         )
-    except BlockingIOError:
-        remained_busy = True
-    else:
-        remained_busy = False
         contender.close()
-    fail_slot = False
-    assert workspace_module._drain_attached_bound_directory_closes(exc.value) == 1
-    assert remained_busy
-    slot.close()
-    with pytest.raises(AppError, match="closed"):
-        _ = slot.descriptor
+    finally:
+        try:
+            actual_close(reused)
+        except OSError:
+            pass
     lock.close()
     private.close()
     publication.close()
 
 
-@pytest.mark.skipif(os.name == "nt", reason="exercises POSIX descriptor cleanup")
-def test_transaction_close_failure_keeps_lock_until_retry_close_succeeds(
+@pytest.mark.skipif(os.name == "nt", reason="exercises POSIX descriptor reuse")
+def test_transaction_close_then_raise_consumes_fd_without_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1242,34 +1267,35 @@ def test_transaction_close_failure_keeps_lock_until_retry_close_succeeds(
     lock = publication.acquire_output_lock(private, key)
     descriptor = lock._descriptor
     assert descriptor is not None
-    fail_close = True
     actual_close = workspace_module.os.close
 
-    def injected_close(value: int) -> None:
-        if fail_close and value == descriptor:
-            raise OSError(errno.EIO, "synthetic transaction-lock close failure")
+    def close_transaction_then_raise(value: int) -> None:
         actual_close(value)
+        if value == descriptor:
+            raise OSError(errno.EIO, "synthetic post-close transaction failure")
 
-    monkeypatch.setattr(workspace_module.os, "close", injected_close)
-    with pytest.raises(AppError, match="transaction-lock close failure") as exc:
+    monkeypatch.setattr(workspace_module.os, "close", close_transaction_then_raise)
+    with pytest.raises(AppError, match="post-close transaction failure") as exc:
         lock.close()
 
-    assert lock._descriptor == descriptor
+    assert lock._descriptor is None
     assert lock._anchor_descriptor is None
-    contender = None
+    reused = _force_descriptor_reuse(
+        tmp_path / "transaction-fd-reuse",
+        descriptor,
+        actual_close,
+    )
     try:
-        contender = publication.acquire_output_lock(private, key)
-    except BlockingIOError:
-        remained_busy = True
-    else:
-        remained_busy = False
-        contender.close()
-    fail_close = False
-    assert workspace_module._drain_attached_bound_directory_closes(exc.value) == 1
-    assert remained_busy
-    lock.close()
-    reused = publication.acquire_output_lock(private, key)
-    reused.close()
+        lock.close()
+        os.fstat(reused)
+        assert workspace_module._drain_attached_bound_directory_closes(exc.value) == 0
+        next_owner = publication.acquire_output_lock(private, key)
+        next_owner.close()
+    finally:
+        try:
+            actual_close(reused)
+        except OSError:
+            pass
     private.close()
     publication.close()
 
@@ -1330,14 +1356,13 @@ def test_fixed_slot_serializes_threads_even_if_platform_lock_reenters(
         publication.close()
 
 
-def test_contended_output_lock_retains_descriptor_when_close_fails(
+def test_contended_output_close_then_raise_is_consumed_without_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     private_path = tmp_path / ".rembggui-publish"
     private_path.mkdir(mode=0o700)
     blocked_descriptor: int | None = None
-    close_fails = True
     actual_close = workspace_module.os.close
 
     def report_platform_contention(_self, descriptor: int) -> bool:
@@ -1345,34 +1370,86 @@ def test_contended_output_lock_retains_descriptor_when_close_fails(
         blocked_descriptor = descriptor
         return False
 
-    def fail_lock_descriptor_close(descriptor: int) -> None:
-        if close_fails and descriptor == blocked_descriptor:
-            raise OSError(errno.EIO, "synthetic lock-descriptor close failure")
+    def close_lock_descriptor_then_raise(descriptor: int) -> None:
         actual_close(descriptor)
+        if descriptor == blocked_descriptor:
+            raise OSError(errno.EIO, "synthetic post-close lock failure")
 
     monkeypatch.setattr(
         workspace_module._SystemAdvisoryFileLock,
         "acquire_nonblocking",
         report_platform_contention,
     )
-    monkeypatch.setattr(workspace_module.os, "close", fail_lock_descriptor_close)
+    monkeypatch.setattr(
+        workspace_module.os,
+        "close",
+        close_lock_descriptor_then_raise,
+    )
     directory = RecoveryDirectory.open(tmp_path, private_path.name)
     try:
         with pytest.raises(BlockingIOError) as exc:
             directory.acquire_advisory_lock("target.transaction.lock")
 
-        owners = getattr(
-            exc.value,
-            "_rembggui_bound_directory_close_owners",
+        assert blocked_descriptor is not None
+        assert any(
+            "post-close lock failure" in note
+            for note in getattr(exc.value, "__notes__", ())
         )
-        assert len(owners) == 1
-        close_fails = False
-        assert workspace_module._drain_attached_bound_directory_closes(exc.value) == 1
+        reused = _force_descriptor_reuse(
+            tmp_path / "contended-fd-reuse",
+            blocked_descriptor,
+            actual_close,
+        )
+        try:
+            assert (
+                workspace_module._drain_attached_bound_directory_closes(exc.value) == 0
+            )
+            os.fstat(reused)
+        finally:
+            try:
+                actual_close(reused)
+            except OSError:
+                pass
     finally:
         directory.close()
 
 
-def test_slot_lock_acquisition_error_retains_unclosed_descriptor_owner(
+def test_transaction_adapter_construction_failure_closes_owned_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_path = tmp_path / ".rembggui-publish"
+    private_path.mkdir(mode=0o700)
+    directory = RecoveryDirectory.open(tmp_path, private_path.name)
+    opened_descriptor: int | None = None
+    directory_type = type(directory._directory)
+    actual_open = directory_type.open_new_publication_fd
+
+    def record_open(bound: object, name: str) -> int:
+        nonlocal opened_descriptor
+        descriptor = actual_open(bound, name)
+        opened_descriptor = descriptor
+        return descriptor
+
+    class BrokenAdapter:
+        def __init__(self) -> None:
+            raise RuntimeError("synthetic advisory adapter construction failure")
+
+    monkeypatch.setattr(directory_type, "open_new_publication_fd", record_open)
+    monkeypatch.setattr(workspace_module, "_SystemAdvisoryFileLock", BrokenAdapter)
+    try:
+        with pytest.raises(RuntimeError, match="adapter construction failure"):
+            directory.acquire_advisory_lock("target.transaction.lock")
+
+        assert opened_descriptor is not None
+        with pytest.raises(OSError) as closed:
+            os.fstat(opened_descriptor)
+        assert closed.value.errno == errno.EBADF
+    finally:
+        directory.close()
+
+
+def test_slot_acquisition_close_then_raise_is_consumed_without_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1384,7 +1461,6 @@ def test_slot_lock_acquisition_error_retains_unclosed_descriptor_owner(
     key = publication.target_key(tmp_path / "output.webp")
     transaction = publication.acquire_output_lock(private, key)
     failed_descriptor: int | None = None
-    close_fails = True
     actual_close = workspace_module.os.close
 
     def fail_acquisition(_self, descriptor: int) -> bool:
@@ -1392,45 +1468,67 @@ def test_slot_lock_acquisition_error_retains_unclosed_descriptor_owner(
         failed_descriptor = descriptor
         raise OSError(errno.EIO, "synthetic slot-lock acquisition failure")
 
-    def fail_descriptor_close(descriptor: int) -> None:
-        if close_fails and descriptor == failed_descriptor:
-            raise OSError(errno.EIO, "synthetic slot descriptor close failure")
+    def close_descriptor_then_raise(descriptor: int) -> None:
         actual_close(descriptor)
+        if descriptor == failed_descriptor:
+            raise OSError(errno.EIO, "synthetic post-close slot cleanup failure")
 
     monkeypatch.setattr(
         workspace_module._SystemAdvisoryFileLock,
         "acquire_nonblocking",
         fail_acquisition,
     )
-    monkeypatch.setattr(workspace_module.os, "close", fail_descriptor_close)
+    monkeypatch.setattr(workspace_module.os, "close", close_descriptor_then_raise)
     try:
         with pytest.raises(OSError, match="slot-lock acquisition failure") as exc:
             private.open_locked_slot(f".{key}.publish-pending", transaction)
 
-        owners = getattr(exc.value, "_rembggui_bound_directory_close_owners")
-        assert len(owners) == 1
-        close_fails = False
-        assert workspace_module._drain_attached_bound_directory_closes(exc.value) == 1
+        assert failed_descriptor is not None
+        assert any(
+            "post-close slot cleanup failure" in note
+            for note in getattr(exc.value, "__notes__", ())
+        )
+        reused = _force_descriptor_reuse(
+            tmp_path / "slot-cleanup-fd-reuse",
+            failed_descriptor,
+            actual_close,
+        )
+        try:
+            assert (
+                workspace_module._drain_attached_bound_directory_closes(exc.value) == 0
+            )
+            os.fstat(reused)
+        finally:
+            try:
+                actual_close(reused)
+            except OSError:
+                pass
     finally:
         transaction.close()
         private.close()
         publication.close()
 
 
-def test_windows_lock_owner_relies_on_descriptor_close_without_explicit_unlock(
+def test_windows_close_releases_range_and_ambiguous_fd_is_never_retried(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeMsvcrt:
         LK_NBLCK = 3
 
         def __init__(self) -> None:
             self.calls: list[tuple[int, int, int]] = []
-            self.busy = False
+            self.locked_descriptor: int | None = None
 
         def locking(self, descriptor: int, operation: int, size: int) -> None:
             self.calls.append((descriptor, operation, size))
-            if self.busy and operation == self.LK_NBLCK:
+            if self.locked_descriptor is not None:
                 raise OSError(errno.EACCES, "synthetic Windows lock contention")
+            self.locked_descriptor = descriptor
+
+        def closed(self, descriptor: int) -> None:
+            if descriptor == self.locked_descriptor:
+                self.locked_descriptor = None
 
     lock_path = tmp_path / "output.transaction.lock"
     lock_path.write_bytes(b"\0")
@@ -1450,14 +1548,40 @@ def test_windows_lock_owner_relies_on_descriptor_close_without_explicit_unlock(
         "windows-owner-close",
         local_lock,
     )
+    actual_close = workspace_module.os.close
+    fail_owner_close = True
+
+    def close_aware(descriptor_to_close: int) -> None:
+        nonlocal fail_owner_close
+        windows.closed(descriptor_to_close)
+        actual_close(descriptor_to_close)
+        if fail_owner_close and descriptor_to_close == descriptor:
+            fail_owner_close = False
+            raise OSError(errno.EIO, "synthetic Windows post-close failure")
+
+    monkeypatch.setattr(workspace_module.os, "close", close_aware)
+    with pytest.raises(AppError, match="Windows post-close failure"):
+        owner.close()
+
+    assert owner._descriptor is None
+    assert windows.locked_descriptor is None
+    reused = _force_descriptor_reuse(
+        tmp_path / "windows-fd-reuse",
+        descriptor,
+        actual_close,
+    )
     owner.close()
+    os.fstat(reused)
 
     contender_descriptor = os.open(lock_path, os.O_RDWR)
     try:
-        windows.busy = True
-        assert not adapter.acquire_nonblocking(contender_descriptor)
+        assert adapter.acquire_nonblocking(contender_descriptor)
     finally:
         os.close(contender_descriptor)
+        try:
+            actual_close(reused)
+        except OSError:
+            pass
 
     assert windows.calls == [
         (descriptor, windows.LK_NBLCK, 1),

@@ -390,8 +390,9 @@ its copy source, or any multiply linked stale copy target, is never truncated.
 If source and destination fixed names already identify the same locked inode,
 the bounded alias is retained: there is no portable unlink-if-inode operation,
 so the implementation deliberately avoids a pathname check followed by blind
-unlink. Close failures retain the exact slot owner for retry through the same
-bounded cleanup-owner mechanism as the surrounding directory handles.
+unlink. A slot-close error is surfaced (or attached as a cleanup note), while
+the now-ambiguous descriptor integer is consumed and never retained for retry;
+the bounded slot name remains available for safe inspection on a later run.
 
 The POSIX fork suite now covers coordinator replacement for REPLACE,
 no-clobber, recovery shadow, and rollback restore, plus anchor-payload rewrite,
@@ -412,20 +413,30 @@ owner held only an unlocked descriptor and no local exclusion.
 
 Close now provides the only lock-release linearization. A locked transaction or
 slot descriptor is passed directly to `os.close()` without an earlier adapter
-unlock. Only a confirmed successful close clears `_locked` and releases the
-in-process guard. If close raises, the same descriptor, kernel-lock state, and
-local guard remain attached to the retry owner; retry closes that exact held
-descriptor. Repeated close after success remains a no-op. Descriptors for which
-nonblocking acquisition returned contention were never locked, so their cleanup
-can close and release the local guard independently; an acquisition exception
-now transfers slot-descriptor ownership before the adapter call so a secondary
-close failure is retryable rather than leaked.
+unlock, and the in-process guard remains held until that call returns. POSIX does
+not reliably say whether an fd remains open after every `close()` error, however,
+so the integer is logically consumed before the call on both success and error.
+The owner releases its local guard only after return, surfaces a structured
+cleanup failure (or note on the preserved primary), and never attaches an unsafe
+retry owner for the ambiguous integer. Repeated close is therefore a no-op and
+cannot close a different file that later reused the same fd number. Deterministic
+REDs close the real fd, raise afterward, force that integer to be reused, and
+prove that a repeated owner close leaves the new file open for transaction,
+fixed-slot, contended, and Windows-adapter paths.
+
+Every transaction-lock and fixed-slot descriptor now transfers immediately from
+the native open into a small consuming owner, before identity inspection, local
+guard acquisition, or advisory-adapter construction. Partial acquisition cleanup
+uses that owner and follows the same consume-on-attempt rule. An adapter-
+construction RED previously leaked the raw transaction fd because cleanup tried
+to construct a second adapter; the cleanup path no longer depends on an adapter.
 
 The Windows adapter likewise no longer issues `LK_UNLCK` during normal owner
-cleanup. Its contract test observes acquisition only and descriptor close owns
-the release. Microsoft documents that outstanding byte-range locks are released
-when their file handle closes; the native timing remains a platform release-test
-item rather than something the macOS fork suite can prove:
+cleanup. Its stateful contract fake releases the simulated range lock only from
+the CRT descriptor-close hook, then injects a post-close error and verifies the
+integer is not retried. Microsoft documents that outstanding byte-range locks
+are released when their file handle closes; the native timing remains a platform
+release-test item rather than something the macOS fork suite can prove:
 <https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfileex>.
 
 ## Architecture and safety decisions
@@ -468,16 +479,17 @@ item rather than something the macOS fork suite can prove:
 
 ## Verification
 
-- `.venv/bin/pytest -q --tb=short` — **1000 passed in 51.02s** outside the
+- `.venv/bin/pytest -q --tb=short` — **1001 passed in 51.16s** outside the
   restricted shared-memory sandbox. The 15 warnings are Python 3.13's macOS warning for
   the deliberately forked cross-process lock repros in an already
   multi-threaded pytest process; no test failed or hung.
-- Focused native cache-filesystem, workspace, and render gate — **240 passed in
-  5.11s**. The slower WebP and Rebuild gate is separately **81 passed in
+- Focused native cache-filesystem, workspace, and render gate — **241 passed in
+  5.31s**. The slower WebP and Rebuild gate is separately **81 passed in
   33.03s**. Together they include canonical alias serialization,
   lock/private-directory/anchor replacement, fixed-slot inode ownership,
   crash-released stale-slot reuse, parent-namespace swaps, durable sync ordering,
-  retry-owner retention, and bidirectional Windows-sharing fakes.
+  consume-on-close fd reuse protection, and bidirectional Windows-sharing
+  fakes.
 - `ruff check .` — passed.
 - `ruff format --check` over both changed Python files — passed.
 - `mypy src` — passed for 29 source files.

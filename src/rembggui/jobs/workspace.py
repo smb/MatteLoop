@@ -2649,6 +2649,54 @@ class _SystemAdvisoryFileLock:
         return True
 
 
+class _OpenedDescriptorOwner:
+    """Own an fd immediately and consume its integer on every close attempt."""
+
+    __slots__ = ("_close_guard", "_descriptor")
+
+    def __init__(self, descriptor: int) -> None:
+        if type(descriptor) is not int or descriptor < 0:
+            raise ValueError("owned descriptor must be a non-negative int")
+        self._descriptor: int | None = descriptor
+        self._close_guard = Lock()
+
+    @property
+    def descriptor(self) -> int:
+        descriptor = self._descriptor
+        if descriptor is None:
+            raise _unsafe_error("owned descriptor was already consumed")
+        return descriptor
+
+    def transfer(self) -> int:
+        with self._close_guard:
+            descriptor = self.descriptor
+            self._descriptor = None
+            return descriptor
+
+    def close(
+        self,
+        primary: BaseException | None = None,
+        *,
+        detail: str,
+    ) -> None:
+        with self._close_guard:
+            descriptor = self._descriptor
+            if descriptor is None:
+                return
+            # A failed close leaves POSIX fd state unspecified.  Consume the
+            # integer before calling close so it can never be retried after
+            # the kernel may have made that integer reusable.
+            self._descriptor = None
+            try:
+                os.close(descriptor)
+            except BaseException as error:
+                if primary is not None:
+                    primary.add_note(f"additional {detail} cleanup failure: {error}")
+                    return
+                structured = _unsafe_error(f"cannot close {detail}: {error}")
+                raise structured from error
+
+
 class AdvisoryFileLock:
     """Owned advisory lock, optionally bound to an output-parent anchor."""
 
@@ -2657,6 +2705,7 @@ class AdvisoryFileLock:
         "_anchor_descriptor",
         "_anchor_identity",
         "_anchor_name",
+        "_close_guard",
         "_descriptor",
         "_directory",
         "_directory_identity",
@@ -2688,6 +2737,7 @@ class AdvisoryFileLock:
         self.name = name
         self._descriptor: int | None = descriptor
         self._adapter = adapter
+        self._close_guard = Lock()
         self._locked = locked
         self._local_key = local_key
         self._local_lock: Lock | None = local_lock
@@ -2756,48 +2806,45 @@ class AdvisoryFileLock:
             raise _unsafe_error("output transaction lock changed while checked")
 
     def close(self, primary: BaseException | None = None) -> None:
-        descriptor = self._descriptor
-        if descriptor is None and self._anchor_descriptor is None:
-            return
-        failures: list[BaseException] = []
-        if self._locked and descriptor is None:
-            failures.append(
-                _unsafe_error("output transaction lost its locked descriptor")
-            )
-        for attribute in ("_descriptor", "_anchor_descriptor"):
-            owned_descriptor = getattr(self, attribute)
-            if owned_descriptor is None:
-                continue
-            try:
-                os.close(owned_descriptor)
-            except BaseException as error:
-                failures.append(error)
-            else:
+        with self._close_guard:
+            descriptor = self._descriptor
+            if descriptor is None and self._anchor_descriptor is None:
+                return
+            failures: list[BaseException] = []
+            if self._locked and descriptor is None:
+                failures.append(
+                    _unsafe_error("output transaction lost its locked descriptor")
+                )
+                self._locked = False
+            for attribute in ("_descriptor", "_anchor_descriptor"):
+                owned_descriptor = getattr(self, attribute)
+                if owned_descriptor is None:
+                    continue
+                # POSIX does not define whether an fd remains open after every
+                # close error.  Consume the integer before the attempt so no
+                # retry can close an unrelated descriptor that reused it.
                 setattr(self, attribute, None)
-                if attribute == "_descriptor":
-                    # The descriptor close is the lock-release linearization.
-                    # Never unlock first: a failed/blocked close must retain
-                    # both kernel and local ownership for its retry owner.
-                    self._locked = False
-        if not self._locked or self._descriptor is None:
+                try:
+                    os.close(owned_descriptor)
+                except BaseException as error:
+                    failures.append(error)
+                finally:
+                    if attribute == "_descriptor":
+                        self._locked = False
             local_lock = self._local_lock
             if local_lock is not None:
                 _release_local_advisory_lock(self._local_key, local_lock)
                 self._local_lock = None
-        if not failures:
-            return
-        detail = "; ".join(str(error) for error in failures)
-        if primary is not None:
-            primary.add_note(
-                f"additional output-transaction lock cleanup failure: {detail}"
-            )
-            if self._descriptor is not None or self._anchor_descriptor is not None:
-                _attach_close_owner(primary, self)
-            return
-        failure = _unsafe_error(f"cannot close output-transaction lock: {detail}")
-        if self._descriptor is not None or self._anchor_descriptor is not None:
-            _attach_close_owner(failure, self)
-        raise failure from failures[0]
+            if not failures:
+                return
+            detail = "; ".join(str(error) for error in failures)
+            if primary is not None:
+                primary.add_note(
+                    f"additional output-transaction lock cleanup failure: {detail}"
+                )
+                return
+            failure = _unsafe_error(f"cannot close output-transaction lock: {detail}")
+            raise failure from failures[0]
 
 
 class LockedSlotFile:
@@ -2805,6 +2852,7 @@ class LockedSlotFile:
 
     __slots__ = (
         "_adapter",
+        "_close_guard",
         "_descriptor",
         "_directory",
         "_identity",
@@ -2831,6 +2879,7 @@ class LockedSlotFile:
         self._descriptor: int | None = descriptor
         self._identity = identity
         self._adapter = adapter
+        self._close_guard = Lock()
         self._local_key = local_key
         self._local_lock: Lock | None = local_lock
         self._locked = locked
@@ -2884,36 +2933,29 @@ class LockedSlotFile:
         self.assert_owned()
 
     def close(self, primary: BaseException | None = None) -> None:
-        descriptor = self._descriptor
-        if descriptor is None:
-            return
-        failures: list[BaseException] = []
-        try:
-            os.close(descriptor)
-        except BaseException as error:
-            failures.append(error)
-        else:
+        with self._close_guard:
+            descriptor = self._descriptor
+            if descriptor is None:
+                return
             self._descriptor = None
-            # As with the transaction lock, close—not an earlier explicit
-            # unlock—is the ownership-release linearization.
-            self._locked = False
-        if not self._locked or self._descriptor is None:
+            failure: BaseException | None = None
+            try:
+                os.close(descriptor)
+            except BaseException as error:
+                failure = error
+            finally:
+                self._locked = False
             local_lock = self._local_lock
             if local_lock is not None:
                 _release_local_advisory_lock(self._local_key, local_lock)
                 self._local_lock = None
-        if not failures:
-            return
-        detail = "; ".join(str(error) for error in failures)
-        if primary is not None:
-            primary.add_note(f"additional output-slot cleanup failure: {detail}")
-            if self._descriptor is not None:
-                _attach_close_owner(primary, self)
-            return
-        failure = _unsafe_error(f"cannot close output private slot: {detail}")
-        if self._descriptor is not None:
-            _attach_close_owner(failure, self)
-        raise failure from failures[0]
+            if failure is None:
+                return
+            if primary is not None:
+                primary.add_note(f"additional output-slot cleanup failure: {failure}")
+                return
+            structured = _unsafe_error(f"cannot close output private slot: {failure}")
+            raise structured from failure
 
 
 class RecoveryDirectory:
@@ -3090,22 +3132,26 @@ class RecoveryDirectory:
         if not isinstance(owner, AdvisoryFileLock) or not owner.anchored:
             raise _unsafe_error("output private slot requires an anchored owner")
         owner.assert_owned()
-        descriptor: int | None = None
+        descriptor_owner: _OpenedDescriptorOwner | None = None
         held: LockedSlotFile | None = None
         local_lock: Lock | None = None
         local_key = ""
         try:
             if create_if_missing:
                 try:
-                    descriptor = self._directory.open_new_publication_fd(name)
+                    descriptor_owner = _OpenedDescriptorOwner(
+                        self._directory.open_new_publication_fd(name)
+                    )
                 except FileExistsError:
-                    descriptor = None
-            if descriptor is None:
+                    descriptor_owner = None
+            if descriptor_owner is None:
                 before = self._directory.publication_lstat(name)
                 if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
                     raise _unsafe_error("output private slot is redirected")
-                descriptor = self._directory.open_publication_read_write(name)
-                opened = os.fstat(descriptor)
+                descriptor_owner = _OpenedDescriptorOwner(
+                    self._directory.open_publication_read_write(name)
+                )
+                opened = os.fstat(descriptor_owner.descriptor)
                 after = self._directory.publication_lstat(name)
                 if not (
                     _directory_identity(before)
@@ -3113,7 +3159,7 @@ class RecoveryDirectory:
                     == _directory_identity(after)
                 ):
                     raise _unsafe_error("output private slot changed while opened")
-            identity = _directory_identity(os.fstat(descriptor))
+            identity = _directory_identity(os.fstat(descriptor_owner.descriptor))
             local_key = f"output-slot:{identity[0]}:{identity[1]}"
             local_lock = _acquire_local_advisory_lock(local_key)
             if local_lock is None:
@@ -3125,14 +3171,15 @@ class RecoveryDirectory:
             held = LockedSlotFile(
                 self,
                 name,
-                descriptor,
+                descriptor_owner.descriptor,
                 identity,
                 adapter,
                 local_key,
                 local_lock,
                 locked=False,
             )
-            descriptor = None
+            descriptor_owner.transfer()
+            descriptor_owner = None
             local_lock = None
             if not adapter.acquire_nonblocking(held.descriptor):
                 raise BlockingIOError(
@@ -3146,13 +3193,8 @@ class RecoveryDirectory:
         except BaseException as error:
             if held is not None:
                 held.close(error)
-            elif descriptor is not None:
-                try:
-                    os.close(descriptor)
-                except BaseException as close_error:
-                    error.add_note(
-                        f"additional output-slot handle cleanup failure: {close_error}"
-                    )
+            elif descriptor_owner is not None:
+                descriptor_owner.close(error, detail="output-slot handle")
             if local_lock is not None:
                 _release_local_advisory_lock(local_key, local_lock)
             raise
@@ -3200,8 +3242,8 @@ class RecoveryDirectory:
             if anchor_name is None:
                 raise AssertionError("validated output-lock anchor is missing")
             _validate_component(anchor_name)
-        descriptor: int | None = None
-        anchor_descriptor: int | None = None
+        descriptor_owner: _OpenedDescriptorOwner | None = None
+        anchor_owner: _OpenedDescriptorOwner | None = None
         held: AdvisoryFileLock | None = None
         local_path = (
             publication.path_for(anchor_name)
@@ -3229,9 +3271,11 @@ class RecoveryDirectory:
                         before_anchor.st_mode
                     ):
                         raise _unsafe_error("output transaction anchor is redirected")
-                    anchor_descriptor = publication.open_read(anchor_name)
-                    opened_anchor = os.fstat(anchor_descriptor)
-                    payload = _read_small_descriptor(anchor_descriptor)
+                    anchor_owner = _OpenedDescriptorOwner(
+                        publication.open_read(anchor_name)
+                    )
+                    opened_anchor = os.fstat(anchor_owner.descriptor)
+                    payload = _read_small_descriptor(anchor_owner.descriptor)
                     after_anchor = publication.lstat(anchor_name)
                     if not (
                         _directory_identity(before_anchor)
@@ -3251,15 +3295,17 @@ class RecoveryDirectory:
                             "output transaction private directory does not match anchor"
                         )
                 except FileNotFoundError:
-                    anchor_descriptor = None
+                    anchor_owner = None
 
             try:
                 if expected_lock_identity is not None:
                     before = self._directory.publication_lstat(name)
                     if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
                         raise _unsafe_error("output transaction lock is redirected")
-                    descriptor = self._directory.open_publication_read_write(name)
-                    opened = os.fstat(descriptor)
+                    descriptor_owner = _OpenedDescriptorOwner(
+                        self._directory.open_publication_read_write(name)
+                    )
+                    opened = os.fstat(descriptor_owner.descriptor)
                     after_open = self._directory.publication_lstat(name)
                     if not (
                         _directory_identity(before)
@@ -3271,14 +3317,18 @@ class RecoveryDirectory:
                             "output transaction lock does not match anchor"
                         )
                 else:
-                    descriptor = self._directory.open_new_publication_fd(name)
+                    descriptor_owner = _OpenedDescriptorOwner(
+                        self._directory.open_new_publication_fd(name)
+                    )
                     created = True
             except FileExistsError:
                 before = self._directory.publication_lstat(name)
                 if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
                     raise _unsafe_error("output transaction lock is redirected")
-                descriptor = self._directory.open_publication_read_write(name)
-                opened = os.fstat(descriptor)
+                descriptor_owner = _OpenedDescriptorOwner(
+                    self._directory.open_publication_read_write(name)
+                )
+                opened = os.fstat(descriptor_owner.descriptor)
                 after_open = self._directory.publication_lstat(name)
                 if not (
                     _directory_identity(before)
@@ -3288,41 +3338,42 @@ class RecoveryDirectory:
                     raise _unsafe_error("output transaction lock changed while opened")
 
             adapter = _SystemAdvisoryFileLock()
-            if not adapter.acquire_nonblocking(descriptor):
-                held = AdvisoryFileLock(
-                    name,
-                    descriptor,
-                    adapter,
-                    local_key,
-                    local_lock,
-                    locked=False,
-                )
-                descriptor = None
-                raise BlockingIOError(
-                    errno.EWOULDBLOCK,
-                    "output transaction is already active",
-                )
+            if descriptor_owner is None:
+                raise RuntimeError("output transaction descriptor was not opened")
+            lock_identity = _directory_identity(os.fstat(descriptor_owner.descriptor))
             held = AdvisoryFileLock(
                 name,
-                descriptor,
+                descriptor_owner.descriptor,
                 adapter,
                 local_key,
                 local_lock,
+                locked=False,
                 directory=self,
-                lock_identity=_directory_identity(os.fstat(descriptor)),
+                lock_identity=lock_identity,
                 publication=publication,
                 anchor_name=anchor_name,
-                anchor_descriptor=anchor_descriptor,
+                anchor_descriptor=(
+                    anchor_owner.descriptor if anchor_owner is not None else None
+                ),
                 anchor_identity=anchor_identity,
                 directory_identity=self.identity if publication is not None else None,
             )
-            descriptor = None
-            anchor_descriptor = None
+            descriptor_owner.transfer()
+            if anchor_owner is not None:
+                anchor_owner.transfer()
+            descriptor_owner = None
+            anchor_owner = None
             locked_descriptor = held._descriptor
             if locked_descriptor is None:
                 raise RuntimeError(
                     "acquired output-transaction lock lost its descriptor"
                 )
+            if not adapter.acquire_nonblocking(locked_descriptor):
+                raise BlockingIOError(
+                    errno.EWOULDBLOCK,
+                    "output transaction is already active",
+                )
+            held._locked = True
             locked_info = os.fstat(locked_descriptor)
             if locked_info.st_size == 0:
                 os.ftruncate(locked_descriptor, 1)
@@ -3343,11 +3394,13 @@ class RecoveryDirectory:
                         self.identity,
                         _directory_identity(os.fstat(locked_descriptor)),
                     )
-                    new_anchor = publication.open_new(anchor_name)
+                    new_anchor_owner = _OpenedDescriptorOwner(
+                        publication.open_new(anchor_name)
+                    )
                     try:
-                        _write_all(new_anchor, payload)
-                        os.fsync(new_anchor)
-                        new_anchor_info = os.fstat(new_anchor)
+                        _write_all(new_anchor_owner.descriptor, payload)
+                        os.fsync(new_anchor_owner.descriptor)
+                        new_anchor_info = os.fstat(new_anchor_owner.descriptor)
                         current_anchor = publication.lstat(anchor_name)
                         if not stat.S_ISREG(
                             current_anchor.st_mode
@@ -3358,10 +3411,13 @@ class RecoveryDirectory:
                                 "output transaction anchor changed while created"
                             )
                         publication.fsync()
-                    except BaseException:
-                        os.close(new_anchor)
+                    except BaseException as error:
+                        new_anchor_owner.close(
+                            error,
+                            detail="output-transaction anchor handle",
+                        )
                         raise
-                    held._anchor_descriptor = new_anchor
+                    held._anchor_descriptor = new_anchor_owner.transfer()
                     held._anchor_identity = _directory_identity(new_anchor_info)
                 held.assert_owned()
             else:
@@ -3370,28 +3426,16 @@ class RecoveryDirectory:
         except BaseException as error:
             if held is not None:
                 held.close(error)
-            elif descriptor is not None:
-                cleanup = AdvisoryFileLock(
-                    name,
-                    descriptor,
-                    _SystemAdvisoryFileLock(),
-                    local_key,
-                    local_lock,
-                    locked=False,
-                    directory=self,
-                    lock_identity=_directory_identity(os.fstat(descriptor)),
+            elif descriptor_owner is not None:
+                descriptor_owner.close(
+                    error,
+                    detail="output-transaction lock handle",
                 )
-                descriptor = None
-                cleanup.close(error)
-                held = cleanup
-            if anchor_descriptor is not None:
-                try:
-                    os.close(anchor_descriptor)
-                except BaseException as close_error:
-                    error.add_note(
-                        "additional output-transaction anchor cleanup failure: "
-                        f"{close_error}"
-                    )
+            if anchor_owner is not None:
+                anchor_owner.close(
+                    error,
+                    detail="output-transaction anchor handle",
+                )
             if held is None:
                 _release_local_advisory_lock(local_key, local_lock)
             raise
