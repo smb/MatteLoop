@@ -2011,6 +2011,17 @@ class _BoundDirectory:
             )
         return (self.path / name).lstat()
 
+    def publication_lstat(self, name: str) -> os.stat_result:
+        _validate_component(name)
+        if self.descriptor is not None:
+            return os.stat(name, dir_fd=self.descriptor, follow_symlinks=False)
+        if self._windows_handles:
+            return cast(
+                os.stat_result,
+                self._windows_api.publication_lstat_at(self._windows_handles[-1], name),
+            )
+        return (self.path / name).lstat()
+
     def mkdir(self, name: str, *, exist_ok: bool) -> None:
         _validate_component(name)
         try:
@@ -2104,6 +2115,29 @@ class _BoundDirectory:
                 ) from error
             raise
 
+    def open_publication_read(self, name: str) -> int:
+        _validate_component(name)
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            if self.descriptor is not None:
+                return os.open(name, flags, dir_fd=self.descriptor)
+            if self._windows_handles:
+                return cast(
+                    int,
+                    self._windows_api.open_publication_read_at(
+                        self._windows_handles[-1], name
+                    ),
+                )
+            return os.open(self.path / name, flags)
+        except OSError as error:
+            if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+                raise _unsafe_error(
+                    f"workspace entry {name!r} is redirected"
+                ) from error
+            raise
+
     def open_read_write(self, name: str) -> int:
         _validate_component(name)
         flags = os.O_RDWR
@@ -2136,6 +2170,22 @@ class _BoundDirectory:
             )
         return os.open(self.path / name, flags, 0o600)
 
+    def open_new_publication_fd(self, name: str) -> int:
+        _validate_component(name)
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        if self.descriptor is not None:
+            return os.open(name, flags, 0o600, dir_fd=self.descriptor)
+        if self._windows_handles:
+            return cast(
+                int,
+                self._windows_api.open_new_publication_read_write_at(
+                    self._windows_handles[-1], name
+                ),
+            )
+        return os.open(self.path / name, flags, 0o600)
+
     def open_new(self, name: str) -> BinaryIO:
         descriptor = self.open_new_fd(name)
         return _fdopen_owned(descriptor, "wb")
@@ -2152,6 +2202,23 @@ class _BoundDirectory:
             )
         elif self._windows_handles:
             self._windows_api.replace_at(self._windows_handles[-1], source, destination)
+        else:
+            os.replace(self.path / source, self.path / destination)
+
+    def replace_publication(self, source: str, destination: str) -> None:
+        _validate_component(source)
+        _validate_component(destination)
+        if self.descriptor is not None:
+            os.replace(
+                source,
+                destination,
+                src_dir_fd=self.descriptor,
+                dst_dir_fd=self.descriptor,
+            )
+        elif self._windows_handles:
+            self._windows_api.replace_publication_at(
+                self._windows_handles[-1], source, destination
+            )
         else:
             os.replace(self.path / source, self.path / destination)
 
@@ -2224,57 +2291,28 @@ class _BoundDirectory:
             self._windows_api.flush_directory_strict(self._windows_handles[-1])
 
 
-class RecoveryDirectory:
-    """A narrow handle-bound directory used by output recovery transactions.
+class PublicationDirectory:
+    """One handle-bound output parent for an entire publication transaction."""
 
-    All names are resolved relative to the same Task-11 bound directory handles.
-    ``path_for`` is diagnostic-only and must never be used for filesystem I/O.
-    """
+    __slots__ = ("_directory", "_stack", "path")
 
-    __slots__ = ("_directory", "_parent", "_stack", "name", "path")
-
-    def __init__(
-        self,
-        path: Path,
-        name: str,
-        parent: _BoundDirectory,
-        directory: _BoundDirectory,
-        stack: ExitStack,
-    ) -> None:
-        self.path = path
-        self.name = name
-        self._parent = parent
+    def __init__(self, directory: _BoundDirectory, stack: ExitStack) -> None:
         self._directory = directory
         self._stack = stack
+        self.path = directory.path
 
     @classmethod
-    def open(cls, parent_path: Path, name: str) -> RecoveryDirectory:
-        _validate_component(name)
+    def open(cls, path: Path) -> PublicationDirectory:
         stack = ExitStack()
         try:
-            parent = stack.enter_context(_BoundDirectory.open(parent_path))
-            try:
-                info = parent.lstat(name)
-            except FileNotFoundError:
-                parent.mkdir(name, exist_ok=False)
-                parent.fsync()
-                info = parent.lstat(name)
-            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-                raise _unsafe_error("output recovery namespace is redirected")
-            if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
-                raise _unsafe_error(
-                    "output recovery namespace must have mode 0700 or stricter"
-                )
-            directory = stack.enter_context(parent.open_child(name))
-            result = cls(parent_path / name, name, parent, directory, stack)
-            result.assert_still_bound()
-            return result
+            directory = stack.enter_context(_BoundDirectory.open(path))
+            return cls(directory, stack)
         except BaseException as error:
             try:
                 stack.close()
             except BaseException as cleanup_error:
                 error.add_note(
-                    f"additional recovery-directory cleanup failure: {cleanup_error}"
+                    f"additional publication-parent cleanup failure: {cleanup_error}"
                 )
             raise
 
@@ -2282,7 +2320,178 @@ class RecoveryDirectory:
         self._stack.close()
 
     def assert_still_bound(self) -> None:
-        self._parent.assert_still_named()
+        self._directory.assert_still_named()
+
+    def name_for(self, path: Path) -> str:
+        _validate_path_value(path)
+        parent = Path(os.path.abspath(path.parent))
+        if parent != self.path:
+            raise _unsafe_error("output entry is outside the bound publication parent")
+        _validate_component(path.name)
+        return path.name
+
+    def path_for(self, name: str) -> Path:
+        _validate_component(name)
+        return self.path / name
+
+    def lstat(self, name: str) -> os.stat_result:
+        return self._directory.publication_lstat(name)
+
+    def open_read(self, name: str) -> int:
+        return self._directory.open_publication_read(name)
+
+    def replace(self, source: str, destination: str) -> None:
+        self._directory.replace_publication(source, destination)
+
+    def replace_from(
+        self,
+        source_directory: RecoveryDirectory,
+        source: str,
+        destination: str,
+    ) -> None:
+        _rename_bound_publication(
+            source_directory._directory,
+            source,
+            self._directory,
+            destination,
+            replace=True,
+        )
+
+    def rename_no_replace_from(
+        self,
+        source_directory: RecoveryDirectory,
+        source: str,
+        destination: str,
+    ) -> None:
+        _rename_bound_publication(
+            source_directory._directory,
+            source,
+            self._directory,
+            destination,
+            replace=False,
+        )
+
+    def fsync(self) -> None:
+        self._directory.fsync()
+
+    def open_private_directory(self, name: str, purpose: str) -> RecoveryDirectory:
+        return RecoveryDirectory.open_from(self, name, purpose)
+
+
+class RecoveryDirectory:
+    """A private child resolved from one already-bound publication parent.
+
+    All names are handle-relative. ``path_for`` is diagnostic-only.
+    """
+
+    __slots__ = (
+        "_directory",
+        "_owned_parent",
+        "_parent",
+        "_stack",
+        "name",
+        "path",
+    )
+
+    def __init__(
+        self,
+        path: Path,
+        name: str,
+        parent: PublicationDirectory,
+        directory: _BoundDirectory,
+        stack: ExitStack,
+        owned_parent: PublicationDirectory | None,
+    ) -> None:
+        self.path = path
+        self.name = name
+        self._parent = parent
+        self._directory = directory
+        self._stack = stack
+        self._owned_parent = owned_parent
+
+    @classmethod
+    def open(cls, parent_path: Path, name: str) -> RecoveryDirectory:
+        parent = PublicationDirectory.open(parent_path)
+        try:
+            result = cls.open_from(parent, name, "recovery")
+        except BaseException as error:
+            try:
+                parent.close()
+            except BaseException as cleanup_error:
+                error.add_note(
+                    f"additional recovery-parent cleanup failure: {cleanup_error}"
+                )
+            raise
+        result._owned_parent = parent
+        return result
+
+    @classmethod
+    def open_from(
+        cls,
+        parent: PublicationDirectory,
+        name: str,
+        purpose: str,
+    ) -> RecoveryDirectory:
+        _validate_component(name)
+        if not isinstance(purpose, str) or not purpose:
+            raise TypeError("private output-directory purpose is required")
+        stack = ExitStack()
+        try:
+            try:
+                info = parent._directory.lstat(name)
+            except FileNotFoundError:
+                parent._directory.mkdir(name, exist_ok=False)
+                parent.fsync()
+                info = parent._directory.lstat(name)
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                raise _unsafe_error(f"output {purpose} namespace is redirected")
+            if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
+                raise _unsafe_error(
+                    f"output {purpose} namespace must have mode 0700 or stricter"
+                )
+            directory = stack.enter_context(parent._directory.open_child(name))
+            result = cls(
+                parent.path / name,
+                name,
+                parent,
+                directory,
+                stack,
+                None,
+            )
+            result.assert_still_bound()
+            return result
+        except BaseException as error:
+            try:
+                stack.close()
+            except BaseException as cleanup_error:
+                error.add_note(
+                    f"additional private-directory cleanup failure: {cleanup_error}"
+                )
+            raise
+
+    def close(self) -> None:
+        primary: BaseException | None = None
+        try:
+            self._stack.close()
+        except BaseException as error:
+            primary = error
+        owned_parent = self._owned_parent
+        self._owned_parent = None
+        if owned_parent is not None:
+            try:
+                owned_parent.close()
+            except BaseException as error:
+                if primary is not None:
+                    primary.add_note(
+                        f"additional recovery-parent cleanup failure: {error}"
+                    )
+                else:
+                    raise
+        if primary is not None:
+            raise primary
+
+    def assert_still_bound(self) -> None:
+        self._parent.assert_still_bound()
         self._directory.assert_still_named()
 
     def path_for(self, name: str) -> Path:
@@ -2290,32 +2499,33 @@ class RecoveryDirectory:
         return self.path / name
 
     def lstat(self, name: str) -> os.stat_result:
-        return self._directory.lstat(name)
+        return self._directory.publication_lstat(name)
 
     def open_read(self, name: str) -> int:
-        return self._directory.open_read(name)
+        return self._directory.open_publication_read(name)
 
     def open_fixed_pending(self, name: str) -> int:
         """Create or handle-relatively replace one bounded pending file."""
         try:
-            return self._directory.open_new_fd(name)
+            return self._directory.open_new_publication_fd(name)
         except FileExistsError:
-            info = self._directory.lstat(name)
+            info = self._directory.publication_lstat(name)
             if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-                raise _unsafe_error("output recovery pending entry is redirected")
+                raise _unsafe_error("output private pending entry is redirected")
             self._directory.unlink(name)
             self._directory.fsync()
-            return self._directory.open_new_fd(name)
+            return self._directory.open_new_publication_fd(name)
 
     def link_parent_file(self, source: str, destination: str) -> bool:
         _validate_component(source)
         _validate_component(destination)
-        if self._parent.descriptor is None or self._directory.descriptor is None:
+        parent_descriptor = self._parent._directory.descriptor
+        if parent_descriptor is None or self._directory.descriptor is None:
             return False
         os.link(
             source,
             destination,
-            src_dir_fd=self._parent.descriptor,
+            src_dir_fd=parent_descriptor,
             dst_dir_fd=self._directory.descriptor,
             follow_symlinks=False,
         )
@@ -2336,10 +2546,112 @@ class RecoveryDirectory:
         return True
 
     def replace(self, source: str, destination: str) -> None:
-        self._directory.replace(source, destination)
+        self._directory.replace_publication(source, destination)
 
     def fsync(self) -> None:
         self._directory.fsync()
+
+
+def _rename_bound_publication(
+    source_directory: _BoundDirectory,
+    source: str,
+    destination_directory: _BoundDirectory,
+    destination: str,
+    *,
+    replace: bool,
+) -> None:
+    _validate_component(source)
+    _validate_component(destination)
+    if (
+        source_directory.descriptor is not None
+        and destination_directory.descriptor is not None
+    ):
+        if replace:
+            os.replace(
+                source,
+                destination,
+                src_dir_fd=source_directory.descriptor,
+                dst_dir_fd=destination_directory.descriptor,
+            )
+            return
+        _rename_no_replace_bound(
+            source_directory.descriptor,
+            source,
+            destination_directory.descriptor,
+            destination,
+        )
+        return
+    if source_directory._windows_handles and destination_directory._windows_handles:
+        if source_directory._windows_api is not destination_directory._windows_api:
+            raise _unsafe_error("publication directories have different handle owners")
+        source_directory._windows_api.rename_publication_at(
+            source_directory._windows_handles[-1],
+            source,
+            destination_directory._windows_handles[-1],
+            destination,
+            replace=replace,
+        )
+        return
+    raise _unsafe_error("handle-relative output rename is unavailable")
+
+
+def _rename_no_replace_bound(
+    source_descriptor: int,
+    source: str,
+    destination_descriptor: int,
+    destination: str,
+) -> None:
+    if sys.platform == "darwin":
+        libc = ctypes.CDLL(None, use_errno=True)
+        renamex = getattr(libc, "renameatx_np", None)
+        if renamex is None:
+            raise OSError(errno.ENOTSUP, "renameatx_np is unavailable")
+        renamex.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renamex.restype = ctypes.c_int
+        result = renamex(
+            source_descriptor,
+            os.fsencode(source),
+            destination_descriptor,
+            os.fsencode(destination),
+            0x00000004,
+        )
+    elif sys.platform.startswith("linux"):
+        libc = ctypes.CDLL(None, use_errno=True)
+        renameat2 = getattr(libc, "renameat2", None)
+        if renameat2 is None:
+            raise OSError(errno.ENOTSUP, "renameat2 is unavailable")
+        renameat2.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameat2.restype = ctypes.c_int
+        result = renameat2(
+            source_descriptor,
+            os.fsencode(source),
+            destination_descriptor,
+            os.fsencode(destination),
+            0x00000001,
+        )
+    else:
+        raise OSError(
+            errno.ENOTSUP,
+            "atomic handle-relative no-replace rename is unsupported",
+        )
+    if result == 0:
+        return
+    code = ctypes.get_errno()
+    if code == errno.EEXIST:
+        raise FileExistsError(code, os.strerror(code), destination)
+    raise OSError(code, os.strerror(code), destination)
 
 
 def _workspace_layout(

@@ -16,6 +16,7 @@ _FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 _FILE_SHARE_READ = 0x00000001
 _FILE_SHARE_WRITE = 0x00000002
+_FILE_SHARE_DELETE = 0x00000004
 _FILE_WRITE_DATA = 0x00000002
 _FILE_WRITE_ATTRIBUTES = 0x00000100
 _GENERIC_READ = 0x80000000
@@ -674,6 +675,194 @@ def test_windows_native_replace_uses_bound_source_handle_and_simple_name() -> No
         "model.onnx".encode("utf-16-le")
     )
     assert calls == [(321, None, 10, "model.onnx", expected_size)]
+    assert closed == [321]
+
+
+def test_windows_native_publication_file_ops_share_read_write_and_delete() -> None:
+    opened: list[tuple[str, int, int, int]] = []
+    closed: list[int] = []
+    regular = os.stat_result((0o100600, 1, 1, 1, 0, 0, 7, 0, 0, 0))
+
+    class TestApi(cache_fs._CtypesWindowsDirectoryApi):
+        def _open_relative(
+            self,
+            _parent_handle: int,
+            name: str,
+            *,
+            desired_access: int,
+            share_mode: int,
+            disposition: int,
+            options: int,
+        ) -> int:
+            del options
+            opened.append((name, desired_access, share_mode, disposition))
+            return 321
+
+        def _require_regular_file_handle(self, handle: int) -> None:
+            assert handle == 321
+
+        def _handle_to_fd(self, handle: int, flags: int) -> int:
+            assert handle == 321
+            assert flags in {os.O_RDONLY, os.O_RDWR}
+            return 322 if flags == os.O_RDWR else 323
+
+        def _stat_handle(self, handle: int) -> os.stat_result:
+            assert handle == 321
+            return regular
+
+        def close_handle(self, handle: int) -> None:
+            closed.append(handle)
+
+    api = object.__new__(TestApi)
+
+    assert api.open_new_publication_read_write_at(123, "pending") == 322
+    assert api.publication_lstat_at(123, "pending") == regular
+    assert api.open_publication_read_at(123, "pending") == 323
+
+    publication_share = _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE
+    assert opened == [
+        (
+            "pending",
+            _GENERIC_READ | _GENERIC_WRITE,
+            publication_share,
+            2,
+        ),
+        ("pending", 0x00100080, publication_share, 1),
+        ("pending", _GENERIC_READ, publication_share, 1),
+    ]
+    assert closed == [321]
+
+
+def test_windows_native_publication_replace_uses_bidirectional_share() -> None:
+    opened: list[tuple[int, str, int, int]] = []
+    destination_roots: list[int] = []
+    closed: list[int] = []
+
+    class TestApi(cache_fs._CtypesWindowsDirectoryApi):
+        def _open_relative(
+            self,
+            parent_handle: int,
+            name: str,
+            *,
+            desired_access: int,
+            share_mode: int,
+            disposition: int,
+            options: int,
+        ) -> int:
+            del options
+            opened.append((parent_handle, name, desired_access, share_mode))
+            assert disposition == 1
+            return 321
+
+        def _require_regular_file_handle(self, handle: int) -> None:
+            assert handle == 321
+
+        def close_handle(self, handle: int) -> None:
+            closed.append(handle)
+
+    class FileRenameInformation(ctypes.Structure):
+        _fields_ = (
+            ("ReplaceIfExists", ctypes.c_ubyte),
+            ("RootDirectory", ctypes.c_void_p),
+            ("FileNameLength", ctypes.c_uint32),
+            ("FileName", ctypes.c_uint16 * 1),
+        )
+
+    def nt_set_information_file(*args: object) -> int:
+        raw = ctypes.cast(args[2], ctypes.POINTER(FileRenameInformation)).contents
+        destination_roots.append(int(raw.RootDirectory))
+        return 0
+
+    api = object.__new__(TestApi)
+    api._nt_set_information_file = nt_set_information_file
+
+    api.replace_publication_at(123, "pending", "recovery")
+
+    assert opened == [
+        (
+            123,
+            "pending",
+            0x00010000 | 0x00000080 | 0x00100000,
+            _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
+        )
+    ]
+    assert destination_roots == [123]
+    assert closed == [321]
+
+
+@pytest.mark.parametrize("replace_existing", [False, True])
+def test_windows_native_publication_rename_binds_both_directory_handles(
+    replace_existing: bool,
+) -> None:
+    opened: list[tuple[int, str, int]] = []
+    renamed: list[tuple[int, bool, int, str]] = []
+    closed: list[int] = []
+
+    class TestApi(cache_fs._CtypesWindowsDirectoryApi):
+        def _open_relative(
+            self,
+            parent_handle: int,
+            name: str,
+            *,
+            desired_access: int,
+            share_mode: int,
+            disposition: int,
+            options: int,
+        ) -> int:
+            del desired_access, disposition, options
+            opened.append((parent_handle, name, share_mode))
+            return 321
+
+        def _require_regular_file_handle(self, handle: int) -> None:
+            assert handle == 321
+
+        def close_handle(self, handle: int) -> None:
+            closed.append(handle)
+
+    class FileRenameInformation(ctypes.Structure):
+        _fields_ = (
+            ("ReplaceIfExists", ctypes.c_ubyte),
+            ("RootDirectory", ctypes.c_void_p),
+            ("FileNameLength", ctypes.c_uint32),
+            ("FileName", ctypes.c_uint16 * 1),
+        )
+
+    def nt_set_information_file(*args: object) -> int:
+        raw = ctypes.cast(args[2], ctypes.POINTER(FileRenameInformation)).contents
+        buffer_address = ctypes.addressof(args[2])
+        name_bytes = ctypes.string_at(
+            buffer_address + FileRenameInformation.FileName.offset,
+            raw.FileNameLength,
+        )
+        renamed.append(
+            (
+                int(args[0]),
+                bool(raw.ReplaceIfExists),
+                int(raw.RootDirectory),
+                name_bytes.decode("utf-16-le"),
+            )
+        )
+        return 0
+
+    api = object.__new__(TestApi)
+    api._nt_set_information_file = nt_set_information_file
+
+    api.rename_publication_at(
+        123,
+        "source.publish",
+        456,
+        "output.webp",
+        replace=replace_existing,
+    )
+
+    assert opened == [
+        (
+            123,
+            "source.publish",
+            _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
+        )
+    ]
+    assert renamed == [(321, replace_existing, 456, "output.webp")]
     assert closed == [321]
 
 

@@ -21,6 +21,7 @@ _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 _WINDOWS_DIRECTORY_ACCESS = 0x80000000
 _WINDOWS_WRITABLE_DIRECTORY_ACCESS = 0xC0000000
 _WINDOWS_DIRECTORY_SHARE = 0x00000001
+_WINDOWS_PUBLICATION_SHARE = 0x00000001 | 0x00000002 | 0x00000004
 _WINDOWS_DIRECTORY_FLAGS = 0x02000000 | 0x00200000
 
 
@@ -51,11 +52,21 @@ class _WindowsDirectoryApi(Protocol):
 
     def lstat_at(self, directory_handle: int, filename: str) -> os.stat_result: ...
 
+    def publication_lstat_at(
+        self, directory_handle: int, filename: str
+    ) -> os.stat_result: ...
+
     def open_read_at(self, directory_handle: int, filename: str) -> int: ...
+
+    def open_publication_read_at(self, directory_handle: int, filename: str) -> int: ...
 
     def open_new_at(self, directory_handle: int, filename: str) -> int: ...
 
     def open_new_read_write_at(self, directory_handle: int, filename: str) -> int: ...
+
+    def open_new_publication_read_write_at(
+        self, directory_handle: int, filename: str
+    ) -> int: ...
 
     def mkdir_at(self, directory_handle: int, name: str, *, exist_ok: bool) -> None: ...
 
@@ -69,6 +80,20 @@ class _WindowsDirectoryApi(Protocol):
 
     def replace_at(
         self, directory_handle: int, source: str, destination: str
+    ) -> None: ...
+
+    def replace_publication_at(
+        self, directory_handle: int, source: str, destination: str
+    ) -> None: ...
+
+    def rename_publication_at(
+        self,
+        source_directory_handle: int,
+        source: str,
+        destination_directory_handle: int,
+        destination: str,
+        *,
+        replace: bool,
     ) -> None: ...
 
     def replace_directory_at(
@@ -660,12 +685,34 @@ class _CtypesWindowsDirectoryApi:
         )
 
     def lstat_at(self, directory_handle: int, filename: str) -> os.stat_result:
+        return self._lstat_at(
+            directory_handle,
+            filename,
+            share_mode=_WINDOWS_DIRECTORY_SHARE,
+        )
+
+    def publication_lstat_at(
+        self, directory_handle: int, filename: str
+    ) -> os.stat_result:
+        return self._lstat_at(
+            directory_handle,
+            filename,
+            share_mode=_WINDOWS_PUBLICATION_SHARE,
+        )
+
+    def _lstat_at(
+        self,
+        directory_handle: int,
+        filename: str,
+        *,
+        share_mode: int,
+    ) -> os.stat_result:
         _validate_windows_component(filename)
         handle = self._open_relative(
             directory_handle,
             filename,
             desired_access=0x00000080 | 0x00100000,
-            share_mode=0x00000001,
+            share_mode=share_mode,
             disposition=1,
             options=0x00000020 | 0x00200000,
         )
@@ -675,12 +722,32 @@ class _CtypesWindowsDirectoryApi:
             self.close_handle(handle)
 
     def open_read_at(self, directory_handle: int, filename: str) -> int:
+        return self._open_read_at(
+            directory_handle,
+            filename,
+            share_mode=_WINDOWS_DIRECTORY_SHARE,
+        )
+
+    def open_publication_read_at(self, directory_handle: int, filename: str) -> int:
+        return self._open_read_at(
+            directory_handle,
+            filename,
+            share_mode=_WINDOWS_PUBLICATION_SHARE,
+        )
+
+    def _open_read_at(
+        self,
+        directory_handle: int,
+        filename: str,
+        *,
+        share_mode: int,
+    ) -> int:
         _validate_windows_component(filename)
         handle = self._open_relative(
             directory_handle,
             filename,
             desired_access=0x80000000,
-            share_mode=0x00000001,
+            share_mode=share_mode,
             disposition=1,
             options=0x00000020 | 0x00000040 | 0x00200000,
         )
@@ -692,10 +759,30 @@ class _CtypesWindowsDirectoryApi:
             raise
 
     def open_new_at(self, directory_handle: int, filename: str) -> int:
-        return self._open_new_at(directory_handle, filename, os.O_WRONLY)
+        return self._open_new_at(
+            directory_handle,
+            filename,
+            os.O_WRONLY,
+            share_mode=_WINDOWS_DIRECTORY_SHARE,
+        )
 
     def open_new_read_write_at(self, directory_handle: int, filename: str) -> int:
-        return self._open_new_at(directory_handle, filename, os.O_RDWR)
+        return self._open_new_at(
+            directory_handle,
+            filename,
+            os.O_RDWR,
+            share_mode=_WINDOWS_DIRECTORY_SHARE,
+        )
+
+    def open_new_publication_read_write_at(
+        self, directory_handle: int, filename: str
+    ) -> int:
+        return self._open_new_at(
+            directory_handle,
+            filename,
+            os.O_RDWR,
+            share_mode=_WINDOWS_PUBLICATION_SHARE,
+        )
 
     def mkdir_at(self, directory_handle: int, name: str, *, exist_ok: bool) -> None:
         _validate_windows_component(name)
@@ -817,14 +904,19 @@ class _CtypesWindowsDirectoryApi:
                     )
 
     def _open_new_at(
-        self, directory_handle: int, filename: str, descriptor_flags: int
+        self,
+        directory_handle: int,
+        filename: str,
+        descriptor_flags: int,
+        *,
+        share_mode: int,
     ) -> int:
         _validate_windows_component(filename)
         handle = self._open_relative(
             directory_handle,
             filename,
             desired_access=0x40000000 | 0x80000000,
-            share_mode=0x00000001,
+            share_mode=share_mode,
             disposition=2,
             options=0x00000020 | 0x00000040 | 0x00200000,
         )
@@ -877,12 +969,60 @@ class _CtypesWindowsDirectoryApi:
             self.close_handle(handle)
 
     def replace_at(self, directory_handle: int, source: str, destination: str) -> None:
-        self._replace_at(directory_handle, source, destination, require_directory=False)
+        self._replace_at(
+            directory_handle,
+            source,
+            destination,
+            require_directory=False,
+            share_mode=_WINDOWS_DIRECTORY_SHARE,
+            destination_directory_handle=None,
+            replace=True,
+        )
+
+    def replace_publication_at(
+        self, directory_handle: int, source: str, destination: str
+    ) -> None:
+        self._replace_at(
+            directory_handle,
+            source,
+            destination,
+            require_directory=False,
+            share_mode=_WINDOWS_PUBLICATION_SHARE,
+            destination_directory_handle=directory_handle,
+            replace=True,
+        )
+
+    def rename_publication_at(
+        self,
+        source_directory_handle: int,
+        source: str,
+        destination_directory_handle: int,
+        destination: str,
+        *,
+        replace: bool,
+    ) -> None:
+        self._replace_at(
+            source_directory_handle,
+            source,
+            destination,
+            require_directory=False,
+            share_mode=_WINDOWS_PUBLICATION_SHARE,
+            destination_directory_handle=destination_directory_handle,
+            replace=replace,
+        )
 
     def replace_directory_at(
         self, directory_handle: int, source: str, destination: str
     ) -> None:
-        self._replace_at(directory_handle, source, destination, require_directory=True)
+        self._replace_at(
+            directory_handle,
+            source,
+            destination,
+            require_directory=True,
+            share_mode=_WINDOWS_DIRECTORY_SHARE,
+            destination_directory_handle=None,
+            replace=True,
+        )
 
     def _replace_at(
         self,
@@ -891,6 +1031,9 @@ class _CtypesWindowsDirectoryApi:
         destination: str,
         *,
         require_directory: bool,
+        share_mode: int,
+        destination_directory_handle: int | None,
+        replace: bool,
     ) -> None:
         import ctypes
 
@@ -900,7 +1043,7 @@ class _CtypesWindowsDirectoryApi:
             directory_handle,
             source,
             desired_access=0x00010000 | 0x00000080 | 0x00100000,
-            share_mode=0x00000001,
+            share_mode=share_mode,
             disposition=1,
             options=(
                 0x00000020
@@ -940,11 +1083,11 @@ class _CtypesWindowsDirectoryApi:
                 ctypes.sizeof(FileRenameInformation) + len(encoded)
             )
             info = ctypes.cast(buffer, ctypes.POINTER(FileRenameInformation)).contents
-            info.ReplaceIfExists = True
-            # A NULL root plus a validated simple name renames within the opened
-            # source file's existing directory. That source was itself opened
-            # relative to ``directory_handle``, so no pathname is reparsed.
-            info.RootDirectory = None
+            info.ReplaceIfExists = replace
+            # Publication callers always supply an explicitly bound destination
+            # directory handle. Legacy cache renames use NULL only for their
+            # established same-directory contract.
+            info.RootDirectory = destination_directory_handle
             info.FileNameLength = len(encoded)
             ctypes.memmove(
                 ctypes.addressof(buffer) + filename_offset,

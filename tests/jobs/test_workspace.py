@@ -272,8 +272,14 @@ class _ExclusiveWindowsCutsApi:
     def lstat_at(self, handle: int, name: str) -> os.stat_result:
         return (self.handle_paths[handle] / name).lstat()
 
+    def publication_lstat_at(self, handle: int, name: str) -> os.stat_result:
+        return self.lstat_at(handle, name)
+
     def open_read_at(self, handle: int, name: str) -> int:
         return os.open(self.handle_paths[handle] / name, os.O_RDONLY)
+
+    def open_publication_read_at(self, handle: int, name: str) -> int:
+        return self.open_read_at(handle, name)
 
     def open_new_read_write_at(self, handle: int, name: str) -> int:
         return os.open(
@@ -282,11 +288,34 @@ class _ExclusiveWindowsCutsApi:
             0o600,
         )
 
+    def open_new_publication_read_write_at(self, handle: int, name: str) -> int:
+        return self.open_new_read_write_at(handle, name)
+
     def replace_at(self, handle: int, source: str, destination: str) -> None:
         if self.fail_journal_replace and destination.startswith(".replace-"):
             raise OSError("injected handle-relative journal failure")
         root = self.handle_paths[handle]
         os.replace(root / source, root / destination)
+
+    def replace_publication_at(
+        self, handle: int, source: str, destination: str
+    ) -> None:
+        self.replace_at(handle, source, destination)
+
+    def rename_publication_at(
+        self,
+        source_handle: int,
+        source: str,
+        destination_handle: int,
+        destination: str,
+        *,
+        replace: bool,
+    ) -> None:
+        source_path = self.handle_paths[source_handle] / source
+        destination_path = self.handle_paths[destination_handle] / destination
+        if not replace and destination_path.exists():
+            raise FileExistsError(destination_path)
+        os.replace(source_path, destination_path)
 
     def replace_directory_at(self, handle: int, source: str, destination: str) -> None:
         root = self.handle_paths[handle]
@@ -320,10 +349,15 @@ def _install_exclusive_windows_cuts_api(
     cuts_root: Path,
     *,
     fail_journal_replace: bool = False,
+    api: _ExclusiveWindowsCutsApi | None = None,
 ) -> _ExclusiveWindowsCutsApi:
-    api = _ExclusiveWindowsCutsApi(
-        cuts_root,
-        fail_journal_replace=fail_journal_replace,
+    active_api = (
+        api
+        if api is not None
+        else _ExclusiveWindowsCutsApi(
+            cuts_root,
+            fail_journal_replace=fail_journal_replace,
+        )
     )
     original_open = workspace_module._BoundDirectory.open
 
@@ -334,7 +368,7 @@ def _install_exclusive_windows_cuts_api(
             relative_parts = path.relative_to(cuts_root).parts
             handles: list[int] = []
             try:
-                handle = api.open_directory(
+                handle = active_api.open_directory(
                     cuts_root,
                     desired_access=(
                         0x80000000 if relative_parts else 0x80000000 | 0x40000000
@@ -344,7 +378,7 @@ def _install_exclusive_windows_cuts_api(
                 )
                 handles.append(handle)
                 for index, component in enumerate(relative_parts):
-                    handle = api.open_child_directory(
+                    handle = active_api.open_child_directory(
                         handle,
                         component,
                         create=False,
@@ -359,20 +393,187 @@ def _install_exclusive_windows_cuts_api(
                     handles.append(handle)
             except BaseException:
                 for opened in reversed(handles):
-                    api.close_handle(opened)
+                    active_api.close_handle(opened)
                 raise
             return cls(
                 path,
                 None,
                 windows_handles=tuple(handles),
-                windows_api=api,
+                windows_api=active_api,
             )
         return original_open(path)
 
     monkeypatch.setattr(
         workspace_module._BoundDirectory, "open", classmethod(injected_open)
     )
-    return api
+    return active_api
+
+
+class _PublicationSharingWindowsApi(_ExclusiveWindowsCutsApi):
+    _SHARE_READ = 0x00000001
+    _SHARE_WRITE = 0x00000002
+    _SHARE_DELETE = 0x00000004
+    _GENERIC_READ = 0x80000000
+    _GENERIC_WRITE = 0x40000000
+    _DELETE = 0x00010000
+
+    def __init__(self, cuts_root: Path) -> None:
+        super().__init__(cuts_root)
+        self.file_opens: dict[int, tuple[tuple[int, int], int, int]] = {}
+
+    @classmethod
+    def _allows(cls, share: int, access: int) -> bool:
+        return bool(
+            (not access & cls._GENERIC_READ or share & cls._SHARE_READ)
+            and (not access & cls._GENERIC_WRITE or share & cls._SHARE_WRITE)
+            and (not access & cls._DELETE or share & cls._SHARE_DELETE)
+        )
+
+    def _require_compatible(self, path: Path, access: int, share: int) -> None:
+        info = path.stat()
+        identity = (info.st_dev, info.st_ino)
+        for opened_identity, opened_access, opened_share in self.file_opens.values():
+            if opened_identity != identity:
+                continue
+            if not self._allows(opened_share, access) or not self._allows(
+                share, opened_access
+            ):
+                raise OSError(32, "synthetic bidirectional sharing violation")
+
+    def _open_file(
+        self,
+        handle: int,
+        name: str,
+        *,
+        access: int,
+        share: int,
+        flags: int,
+    ) -> int:
+        path = self.handle_paths[handle] / name
+        self._require_compatible(path, access, share)
+        descriptor = os.open(path, flags, 0o600)
+        info = os.fstat(descriptor)
+        self.file_opens[descriptor] = ((info.st_dev, info.st_ino), access, share)
+        return descriptor
+
+    def release_file(self, descriptor: int) -> None:
+        self.file_opens.pop(descriptor)
+        os.close(descriptor)
+
+    def lstat_at(self, handle: int, name: str) -> os.stat_result:
+        path = self.handle_paths[handle] / name
+        self._require_compatible(path, 0x00100080, self._SHARE_READ)
+        return path.lstat()
+
+    def publication_lstat_at(self, handle: int, name: str) -> os.stat_result:
+        path = self.handle_paths[handle] / name
+        self._require_compatible(
+            path,
+            0x00100080,
+            self._SHARE_READ | self._SHARE_WRITE | self._SHARE_DELETE,
+        )
+        return path.lstat()
+
+    def open_new_read_write_at(self, handle: int, name: str) -> int:
+        path = self.handle_paths[handle] / name
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+        info = os.fstat(descriptor)
+        self.file_opens[descriptor] = (
+            (info.st_dev, info.st_ino),
+            self._GENERIC_READ | self._GENERIC_WRITE,
+            self._SHARE_READ,
+        )
+        return descriptor
+
+    def open_new_publication_read_write_at(self, handle: int, name: str) -> int:
+        path = self.handle_paths[handle] / name
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+        info = os.fstat(descriptor)
+        self.file_opens[descriptor] = (
+            (info.st_dev, info.st_ino),
+            self._GENERIC_READ | self._GENERIC_WRITE,
+            self._SHARE_READ | self._SHARE_WRITE | self._SHARE_DELETE,
+        )
+        return descriptor
+
+    def open_publication_read_at(self, handle: int, name: str) -> int:
+        return self._open_file(
+            handle,
+            name,
+            access=self._GENERIC_READ,
+            share=self._SHARE_READ | self._SHARE_WRITE | self._SHARE_DELETE,
+            flags=os.O_RDONLY,
+        )
+
+    def replace_at(self, handle: int, source: str, destination: str) -> None:
+        path = self.handle_paths[handle] / source
+        self._require_compatible(path, self._DELETE, self._SHARE_READ)
+        super().replace_at(handle, source, destination)
+
+    def replace_publication_at(
+        self, handle: int, source: str, destination: str
+    ) -> None:
+        path = self.handle_paths[handle] / source
+        self._require_compatible(
+            path,
+            self._DELETE,
+            self._SHARE_READ | self._SHARE_WRITE | self._SHARE_DELETE,
+        )
+        super().replace_at(handle, source, destination)
+
+
+def test_windows_recovery_lstat_is_compatible_with_held_writable_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recovery_path = tmp_path / ".rembggui-recovery"
+    recovery_path.mkdir(mode=0o700)
+    sharing_api = _PublicationSharingWindowsApi(tmp_path)
+    _install_exclusive_windows_cuts_api(
+        monkeypatch,
+        tmp_path,
+        api=sharing_api,
+    )
+    recovery = RecoveryDirectory.open(tmp_path, recovery_path.name)
+    descriptor = recovery.open_fixed_pending(".pending")
+    try:
+        os.write(descriptor, b"old-output")
+
+        assert recovery.lstat(".pending").st_size == len(b"old-output")
+    finally:
+        sharing_api.release_file(descriptor)
+        recovery.close()
+
+
+def test_windows_recovery_replace_is_compatible_with_held_writable_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recovery_path = tmp_path / ".rembggui-recovery"
+    recovery_path.mkdir(mode=0o700)
+    sharing_api = _PublicationSharingWindowsApi(tmp_path)
+    _install_exclusive_windows_cuts_api(
+        monkeypatch,
+        tmp_path,
+        api=sharing_api,
+    )
+    recovery = RecoveryDirectory.open(tmp_path, recovery_path.name)
+    descriptor = recovery.open_fixed_pending(".pending")
+    reopened: int | None = None
+    try:
+        os.write(descriptor, b"old-output")
+
+        recovery.replace(".pending", "output.recovery")
+        reopened = recovery.open_read("output.recovery")
+
+        assert os.fstat(descriptor).st_size == len(b"old-output")
+        assert os.fstat(reopened).st_size == len(b"old-output")
+        assert (recovery_path / "output.recovery").read_bytes() == b"old-output"
+    finally:
+        if reopened is not None:
+            sharing_api.release_file(reopened)
+        sharing_api.release_file(descriptor)
+        recovery.close()
 
 
 def test_windows_recovery_directory_uses_bound_copy_replace_and_flush(

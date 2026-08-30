@@ -394,7 +394,10 @@ def test_atomic_replace_maps_real_publish_failures_without_clobbering(
     actual_replace = os.replace
 
     def fail_replace(source, destination, **kwargs):
-        if Path(source) == candidate.path and Path(destination) == target:
+        if (
+            Path(source).name == candidate.path.name
+            and Path(destination).name == target.name
+        ):
             raise OSError(error_number, "synthetic publication failure")
         return actual_replace(source, destination, **kwargs)
 
@@ -425,9 +428,19 @@ def test_no_clobber_policies_lose_atomic_collision_race_safely(
     candidate_bytes = candidate.path.read_bytes()
     actual_rename = render_module._rename_no_replace
 
-    def create_racer_then_rename(source, destination):
-        Path(destination).write_bytes(b"racer")
-        actual_rename(source, destination)
+    def create_racer_then_rename(
+        source_directory,
+        source,
+        destination_directory,
+        destination,
+    ):
+        destination_directory.path_for(destination).write_bytes(b"racer")
+        actual_rename(
+            source_directory,
+            source,
+            destination_directory,
+            destination,
+        )
 
     monkeypatch.setattr(render_module, "_rename_no_replace", create_racer_then_rename)
 
@@ -547,7 +560,10 @@ def test_replace_rolls_back_if_validated_candidate_is_swapped_at_commit(
 
     def swap_candidate_then_replace(source_path, destination_path, **kwargs):
         nonlocal swapped
-        if Path(source_path) == candidate.path and Path(destination_path) == target:
+        if (
+            Path(source_path).name == candidate.path.name
+            and Path(destination_path).name == target.name
+        ):
             actual_replace(attacker, candidate.path)
             swapped = True
         return actual_replace(source_path, destination_path, **kwargs)
@@ -624,7 +640,7 @@ def test_replace_without_previous_output_never_unlinks_a_foreign_commit_mismatch
         nonlocal swapped
         source = Path(source_path)
         destination = Path(destination_path)
-        if source == candidate.path and destination == target:
+        if source.name == candidate.path.name and destination.name == target.name:
             actual_replace(foreign, candidate.path)
             swapped = True
         return actual_replace(source, destination, **kwargs)
@@ -654,29 +670,26 @@ def test_replace_retains_precommit_recovery_when_restore_cannot_allocate(
     foreign = tmp_path / ".foreign-commit"
     foreign.write_bytes(b"foreign-commit")
     actual_replace = os.replace
-    actual_stage = render_module._stage_descriptor_copy
-    actual_mkstemp = render_module.tempfile.mkstemp
+    actual_stage = render_module._stage_bound_recovery_copy
 
     def swap_candidate_at_commit(source_path, destination_path, **kwargs):
         source = Path(source_path)
         destination = Path(destination_path)
-        if source == candidate.path and destination == target:
+        if source.name == candidate.path.name and destination.name == target.name:
             actual_replace(foreign, candidate.path)
         return actual_replace(source, destination, **kwargs)
 
-    def fail_restore_copy(*args, **kwargs):
-        if kwargs.get("suffix") == ".restore":
+    def fail_restore_copy(directory, name, *args, **kwargs):
+        if ".restore-" in name:
             raise OSError(failure_errno, "synthetic restore allocation failure")
-        return actual_stage(*args, **kwargs)
-
-    def fail_late_recovery(*args, **kwargs):
-        if kwargs.get("suffix") == ".recovery":
-            raise OSError(errno.ENOSPC, "synthetic recovery ENOSPC")
-        return actual_mkstemp(*args, **kwargs)
+        return actual_stage(directory, name, *args, **kwargs)
 
     monkeypatch.setattr(os, "replace", swap_candidate_at_commit)
-    monkeypatch.setattr(render_module, "_stage_descriptor_copy", fail_restore_copy)
-    monkeypatch.setattr(render_module.tempfile, "mkstemp", fail_late_recovery)
+    monkeypatch.setattr(
+        render_module,
+        "_stage_bound_recovery_copy",
+        fail_restore_copy,
+    )
 
     try:
         with pytest.raises(AppError) as exc:
@@ -726,7 +739,10 @@ def test_recovery_preparation_failure_aborts_before_destructive_replace(
 
     def observe_replace(source_path, destination_path, **kwargs):
         nonlocal candidate_commit_attempted
-        if Path(source_path) == candidate.path and Path(destination_path) == target:
+        if (
+            Path(source_path).name == candidate.path.name
+            and Path(destination_path).name == target.name
+        ):
             candidate_commit_attempted = True
         return actual_replace(source_path, destination_path, **kwargs)
 
@@ -771,7 +787,10 @@ def test_hard_linked_recovery_file_is_fsynced_before_destructive_replace(
         actual_fsync(descriptor)
 
     def observe_replace(source, destination, **kwargs):
-        if Path(source) == candidate.path and Path(destination) == target:
+        if (
+            Path(source).name == candidate.path.name
+            and Path(destination).name == target.name
+        ):
             events.append("destructive-commit")
         return actual_replace(source, destination, **kwargs)
 
@@ -873,6 +892,144 @@ def test_recovery_namespace_swap_never_modifies_the_foreign_replacement(
     assert (recovery_directory / "sentinel").read_bytes() == sentinel_bytes
 
 
+def test_replace_parent_swap_restores_original_and_never_modifies_foreign_parent(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_parent = tmp_path / "output-parent"
+    output_parent.mkdir()
+    target = output_parent / "output.webp"
+    old_bytes = b"old-output"
+    target.write_bytes(old_bytes)
+    publisher = AtomicOutputPublisher()
+    candidate = _validated_candidate(
+        publisher,
+        target,
+        output_parent,
+        "parent-swap-replace",
+    )
+    foreign_parent = tmp_path / "foreign-parent"
+    foreign_parent.mkdir()
+    foreign_output_bytes = b"foreign-output"
+    (foreign_parent / target.name).write_bytes(foreign_output_bytes)
+    foreign_candidate_bytes = b"foreign-candidate"
+    (foreign_parent / candidate.path.name).write_bytes(foreign_candidate_bytes)
+    moved_parent = tmp_path / "moved-output-parent"
+    actual_replace = os.replace
+    swapped = False
+
+    def swap_parent_at_candidate_commit(source, destination, **kwargs):
+        nonlocal swapped
+        if (
+            not swapped
+            and Path(source).name == candidate.path.name
+            and Path(destination).name == target.name
+        ):
+            actual_replace(output_parent, moved_parent)
+            actual_replace(foreign_parent, output_parent)
+            swapped = True
+        return actual_replace(source, destination, **kwargs)
+
+    monkeypatch.setattr(os, "replace", swap_parent_at_candidate_commit)
+
+    try:
+        with pytest.raises(AppError) as exc:
+            publisher.publish(candidate, target, CollisionPolicy.REPLACE)
+    finally:
+        candidate.close()
+
+    assert swapped
+    assert exc.value.code is ErrorCode.INVALID_OUTPUT
+    assert (output_parent / target.name).read_bytes() == foreign_output_bytes
+    assert (output_parent / candidate.path.name).read_bytes() == foreign_candidate_bytes
+    assert (moved_parent / target.name).read_bytes() == old_bytes
+
+
+def test_no_clobber_parent_swap_never_consumes_foreign_stage_or_creates_output(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_parent = tmp_path / "output-parent"
+    output_parent.mkdir()
+    target = output_parent / "output.webp"
+    publisher = AtomicOutputPublisher()
+    candidate = _validated_candidate(
+        publisher,
+        target,
+        output_parent,
+        "parent-swap-no-clobber",
+    )
+    foreign_parent = tmp_path / "foreign-parent"
+    foreign_parent.mkdir()
+    moved_parent = tmp_path / "moved-output-parent"
+    foreign_stage_bytes = b"foreign-private-stage"
+    actual_rename = render_module._rename_no_replace
+    actual_replace = os.replace
+    swapped = False
+    foreign_stage_name: str | None = None
+
+    def swap_parent_at_no_clobber_commit(*args):
+        nonlocal foreign_stage_name, swapped
+        original_stages = tuple((output_parent / ".rembggui-publish").glob("*.publish"))
+        assert len(original_stages) == 1
+        foreign_stage_name = original_stages[0].name
+        foreign_stages = foreign_parent / ".rembggui-publish"
+        foreign_stages.mkdir(mode=0o700)
+        (foreign_stages / foreign_stage_name).write_bytes(foreign_stage_bytes)
+        actual_replace(output_parent, moved_parent)
+        actual_replace(foreign_parent, output_parent)
+        swapped = True
+        return actual_rename(*args)
+
+    monkeypatch.setattr(
+        render_module,
+        "_rename_no_replace",
+        swap_parent_at_no_clobber_commit,
+    )
+
+    try:
+        with pytest.raises(AppError) as exc:
+            publisher.publish(
+                candidate,
+                target,
+                CollisionPolicy.CHOOSE_ANOTHER_NAME,
+            )
+    finally:
+        candidate.close()
+
+    assert swapped
+    assert foreign_stage_name is not None
+    assert exc.value.code is ErrorCode.INVALID_OUTPUT
+    assert not (output_parent / target.name).exists()
+    assert (
+        output_parent / ".rembggui-publish" / foreign_stage_name
+    ).read_bytes() == foreign_stage_bytes
+
+
+def test_unsafe_recovery_namespace_is_reported_as_an_output_error(tmp_path) -> None:
+    target = tmp_path / "output.webp"
+    old_bytes = b"old-output"
+    target.write_bytes(old_bytes)
+    recovery_directory = tmp_path / ".rembggui-recovery"
+    recovery_directory.mkdir(mode=0o755)
+    publisher = AtomicOutputPublisher()
+    candidate = _validated_candidate(
+        publisher,
+        target,
+        tmp_path,
+        "unsafe-recovery-error",
+    )
+
+    try:
+        with pytest.raises(AppError) as exc:
+            publisher.publish(candidate, target, CollisionPolicy.REPLACE)
+    finally:
+        candidate.close()
+
+    assert exc.value.code is ErrorCode.INVALID_OUTPUT
+    assert exc.value.stage == "output"
+    assert exc.value.retry_action == "retry-output"
+    assert target.read_bytes() == old_bytes
+
+
 def test_recovery_descriptor_closes_when_shadow_preparation_fails(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -913,7 +1070,7 @@ def test_current_recovery_slot_is_reused_without_a_pending_hardlink(
     actual_require = render_module._require_candidate_current
     require_calls = 0
 
-    def fail_after_recovery(candidate: ValidatedCandidate) -> None:
+    def fail_after_recovery(candidate: ValidatedCandidate, *args) -> None:
         nonlocal require_calls
         require_calls += 1
         if require_calls == 2:
@@ -924,7 +1081,7 @@ def test_current_recovery_slot_is_reused_without_a_pending_hardlink(
                 "synthetic post-recovery failure",
                 "retry-output",
             )
-        actual_require(candidate)
+        actual_require(candidate, *args)
 
     monkeypatch.setattr(
         render_module,
@@ -978,7 +1135,7 @@ def test_replace_retries_when_restored_output_is_swapped_during_held_sha(
         nonlocal commit_swapped
         source = Path(source_path)
         destination = Path(destination_path)
-        if source == candidate.path and destination == target:
+        if source.name == candidate.path.name and destination.name == target.name:
             actual_replace(commit_attacker, candidate.path)
             commit_swapped = True
         return actual_replace(source, destination, **kwargs)
@@ -1031,7 +1188,7 @@ def test_rollback_reports_when_recovery_path_is_swapped_during_held_sha(
     recovery_attacker_bytes = b"foreign-recovery"
     recovery_attacker.write_bytes(recovery_attacker_bytes)
     actual_prepare = render_module._prepare_durable_recovery
-    actual_stage = render_module._stage_descriptor_copy
+    actual_stage = render_module._stage_bound_recovery_copy
     actual_replace = os.replace
     actual_sha = render_module._sha256_descriptor
     recovery = None
@@ -1044,15 +1201,15 @@ def test_rollback_reports_when_recovery_path_is_swapped_during_held_sha(
         recovery_ready = True
         return recovery
 
-    def fail_restore_copy(*args, **kwargs):
-        if kwargs.get("suffix") == ".restore":
+    def fail_restore_copy(directory, name, *args, **kwargs):
+        if ".restore-" in name:
             raise OSError(errno.ENOSPC, "synthetic restore ENOSPC")
-        return actual_stage(*args, **kwargs)
+        return actual_stage(directory, name, *args, **kwargs)
 
     def swap_candidate_at_commit(source_path, destination_path, **kwargs):
         source = Path(source_path)
         destination = Path(destination_path)
-        if source == candidate.path and destination == target:
+        if source.name == candidate.path.name and destination.name == target.name:
             actual_replace(commit_attacker, candidate.path)
         return actual_replace(source, destination, **kwargs)
 
@@ -1074,7 +1231,11 @@ def test_rollback_reports_when_recovery_path_is_swapped_during_held_sha(
         "_prepare_durable_recovery",
         capture_recovery,
     )
-    monkeypatch.setattr(render_module, "_stage_descriptor_copy", fail_restore_copy)
+    monkeypatch.setattr(
+        render_module,
+        "_stage_bound_recovery_copy",
+        fail_restore_copy,
+    )
     monkeypatch.setattr(os, "replace", swap_candidate_at_commit)
     monkeypatch.setattr(render_module, "_sha256_descriptor", swap_recovery_after_hash)
 
@@ -1112,17 +1273,18 @@ def test_replace_recreates_rollback_from_held_old_output_after_temp_swaps(
         attacker.write_bytes(f"rollback-attacker-{index}".encode())
         rollback_attackers.append(attacker)
     actual_replace = os.replace
-    actual_open = render_module._open_held_file
+    actual_stage = render_module._stage_bound_recovery_copy
     actual_close = os.close
     publisher_descriptors: list[int] = []
     closed_descriptors: list[int] = []
     candidate_swapped = False
     rollback_swap_count = 0
 
-    def observe_open(path: Path) -> int:
-        descriptor = actual_open(path)
-        publisher_descriptors.append(descriptor)
-        return descriptor
+    def observe_stage(directory, name, *args, **kwargs):
+        descriptor, identity = actual_stage(directory, name, *args, **kwargs)
+        if ".restore-" in name:
+            publisher_descriptors.append(descriptor)
+        return descriptor, identity
 
     def observe_close(descriptor: int) -> None:
         closed_descriptors.append(descriptor)
@@ -1132,19 +1294,24 @@ def test_replace_recreates_rollback_from_held_old_output_after_temp_swaps(
         nonlocal candidate_swapped, rollback_swap_count
         source = Path(source_path)
         destination = Path(destination_path)
-        if source == candidate.path and destination == target:
+        if source.name == candidate.path.name and destination.name == target.name:
             actual_replace(candidate_attacker, candidate.path)
             candidate_swapped = True
         elif (
-            destination == target
-            and source.suffix in {".rollback", ".restore"}
+            destination.name == target.name
+            and ".restore-" in source.name
             and rollback_swap_count < rollback_swaps
         ):
-            actual_replace(rollback_attackers[rollback_swap_count], source)
+            recovery_path = tmp_path / ".rembggui-recovery" / source.name
+            actual_replace(rollback_attackers[rollback_swap_count], recovery_path)
             rollback_swap_count += 1
         return actual_replace(source, destination, **kwargs)
 
-    monkeypatch.setattr(render_module, "_open_held_file", observe_open)
+    monkeypatch.setattr(
+        render_module,
+        "_stage_bound_recovery_copy",
+        observe_stage,
+    )
     monkeypatch.setattr(render_module.os, "close", observe_close)
     monkeypatch.setattr(os, "replace", swap_publication_and_rollback)
 
@@ -1177,11 +1344,21 @@ def test_no_clobber_publishes_held_copy_when_candidate_path_is_swapped(
     swapped = False
     notes: list[str] = []
 
-    def swap_candidate_then_rename(source_path, destination_path):
+    def swap_candidate_then_rename(
+        source_directory,
+        source,
+        destination_directory,
+        destination,
+    ):
         nonlocal swapped
         os.replace(attacker, candidate.path)
         swapped = True
-        return actual_rename(source_path, destination_path)
+        return actual_rename(
+            source_directory,
+            source,
+            destination_directory,
+            destination,
+        )
 
     monkeypatch.setattr(
         render_module,
@@ -1205,9 +1382,7 @@ def test_no_clobber_publishes_held_copy_when_candidate_path_is_swapped(
     assert swapped
     assert target.read_bytes() == candidate_bytes
     assert candidate.path.read_bytes() == attacker_bytes
-    assert any(
-        "foreign or unverified output-candidate retained" in note for note in notes
-    )
+    assert any("verified output-candidate retained" in note for note in notes)
     assert not tuple((tmp_path / ".rembggui-publish").glob("*.publish"))
 
 
@@ -1222,21 +1397,31 @@ def test_no_clobber_never_unlinks_a_concurrent_output_after_reservation(
     foreign.write_bytes(foreign_bytes)
     actual_rename = render_module._rename_no_replace
     actual_replace = os.replace
-    actual_stage = render_module._stage_descriptor_copy
+    actual_prepare = render_module._prepare_publication_stage
     staged_descriptors: list[int] = []
 
     def observe_stage(*args, **kwargs):
-        staged = actual_stage(*args, **kwargs)
+        staged = actual_prepare(*args, **kwargs)
         staged_descriptors.append(staged.descriptor)
         return staged
 
-    def replace_reserved_output(source_path, destination_path):
-        result = actual_rename(source_path, destination_path)
+    def replace_reserved_output(
+        source_directory,
+        source,
+        destination_directory,
+        destination,
+    ):
+        result = actual_rename(
+            source_directory,
+            source,
+            destination_directory,
+            destination,
+        )
         actual_replace(foreign, target)
         return result
 
     monkeypatch.setattr(render_module, "_rename_no_replace", replace_reserved_output)
-    monkeypatch.setattr(render_module, "_stage_descriptor_copy", observe_stage)
+    monkeypatch.setattr(render_module, "_prepare_publication_stage", observe_stage)
 
     try:
         with pytest.raises(AppError) as exc:
@@ -1335,141 +1520,19 @@ def test_no_clobber_success_never_unlinks_a_staged_path(
     assert not attempted_stage_unlink
 
 
-@pytest.mark.parametrize(
-    ("platform", "expected_helper"),
-    [
-        ("darwin", "macos"),
-        ("linux", "linux"),
-        ("win32", "windows"),
-    ],
-)
-def test_no_replace_dispatches_to_the_platform_atomic_rename_contract(
-    monkeypatch: pytest.MonkeyPatch,
-    platform: str,
-    expected_helper: str,
-) -> None:
-    calls: list[tuple[str, Path, Path]] = []
-
-    def helper(name: str):
-        def invoke(source: Path, destination: Path) -> None:
-            calls.append((name, source, destination))
-
-        return invoke
-
-    monkeypatch.setattr(render_module.sys, "platform", platform)
-    monkeypatch.setattr(
-        render_module,
-        "_rename_no_replace_macos",
-        helper("macos"),
-    )
-    monkeypatch.setattr(
-        render_module,
-        "_rename_no_replace_linux",
-        helper("linux"),
-    )
-    monkeypatch.setattr(
-        render_module,
-        "_rename_no_replace_windows",
-        helper("windows"),
-    )
-
-    render_module._rename_no_replace(Path("source"), Path("destination"))
-
-    assert calls == [(expected_helper, Path("source"), Path("destination"))]
-
-
-@pytest.mark.parametrize(
-    ("helper_name", "native_name", "expected_flag"),
-    [
-        ("_rename_no_replace_macos", "renamex_np", 0x00000004),
-        ("_rename_no_replace_linux", "renameat2", 0x00000001),
-        ("_rename_no_replace_windows", "MoveFileExW", 0),
-    ],
-)
-def test_no_replace_platform_helpers_use_exclusive_native_flags(
-    monkeypatch: pytest.MonkeyPatch,
-    helper_name: str,
-    native_name: str,
-    expected_flag: int,
-) -> None:
-    class NativeCall:
-        argtypes = None
-        restype = None
-
-        def __init__(self) -> None:
-            self.calls: list[tuple[object, ...]] = []
-
-        def __call__(self, *args):
-            self.calls.append(args)
-            return 1 if native_name == "MoveFileExW" else 0
-
-    native = NativeCall()
-
-    class Library:
-        renamex_np = native
-        renameat2 = native
-        MoveFileExW = native
-
-    class FakeCtypes:
-        c_char_p = object
-        c_wchar_p = object
-        c_int = int
-        c_uint = int
-        c_uint32 = int
-
-        @staticmethod
-        def CDLL(*args, **kwargs):
-            del args, kwargs
-            return Library()
-
-        @staticmethod
-        def WinDLL(*args, **kwargs):
-            del args, kwargs
-            return Library()
-
-        @staticmethod
-        def get_last_error():
-            return 0
-
-    actual_import = render_module.importlib.import_module
-
-    def import_fake_ctypes(name: str):
-        if name == "ctypes":
-            return FakeCtypes()
-        return actual_import(name)
-
-    monkeypatch.setattr(render_module.importlib, "import_module", import_fake_ctypes)
-
-    getattr(render_module, helper_name)(Path("source"), Path("destination"))
-
-    assert len(native.calls) == 1
-    assert native.calls[0][-1] == expected_flag
-
-
-def test_candidate_cleanup_never_unlinks_a_path_swapped_after_identity_check(
+def test_candidate_cleanup_never_reopens_the_diagnostic_path(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     publisher = AtomicOutputPublisher()
     target = tmp_path / "output.webp"
     candidate = _validated_candidate(publisher, target, tmp_path, "cleanup-swap")
     candidate_bytes = candidate.path.read_bytes()
-    foreign = tmp_path / ".foreign-candidate"
-    foreign_bytes = b"foreign-candidate"
-    foreign.write_bytes(foreign_bytes)
-    actual_identity = render_module._path_identity
-    actual_replace = os.replace
-    swapped = False
     notes: list[str] = []
 
-    def swap_after_identity(path: Path):
-        nonlocal swapped
-        identity = actual_identity(path)
-        if path == candidate.path and target.exists() and not swapped:
-            actual_replace(foreign, candidate.path)
-            swapped = True
-        return identity
+    def reject_path_reopen(_path: Path):
+        raise AssertionError("post-publication candidate paths are diagnostic-only")
 
-    monkeypatch.setattr(render_module, "_path_identity", swap_after_identity)
+    monkeypatch.setattr(render_module, "_path_identity", reject_path_reopen)
 
     try:
         assert (
@@ -1484,9 +1547,8 @@ def test_candidate_cleanup_never_unlinks_a_path_swapped_after_identity_check(
     finally:
         candidate.close()
 
-    assert swapped
     assert target.read_bytes() == candidate_bytes
-    assert candidate.path.read_bytes() == foreign_bytes
+    assert candidate.path.read_bytes() == candidate_bytes
     assert any("retained" in note for note in notes)
 
 
@@ -1513,7 +1575,7 @@ def test_no_clobber_candidate_retention_is_returned_as_a_note(tmp_path) -> None:
     assert candidate.path.read_bytes() == candidate_bytes
     assert len(notes) == 1
     assert "verified output-candidate retained" in notes[0]
-    assert "identity-bound pathname deletion is unavailable" in notes[0]
+    assert "diagnostic-only" in notes[0]
     assert not tuple((tmp_path / ".rembggui-publish").glob("*.publish"))
 
 

@@ -155,8 +155,10 @@ still contains old bytes.
 
 No-clobber publication now consumes a private fsynced stage with the platform's
 native exclusive rename: `renamex_np(RENAME_EXCL)` on macOS,
-`renameat2(RENAME_NOREPLACE)` on Linux, and `MoveFileExW` without replace flags
-on Windows. A concurrent target wins without being modified. Private
+`renameat2(RENAME_NOREPLACE)` on Linux, and Windows
+`FILE_RENAME_INFORMATION` with `ReplaceIfExists=false` against an explicitly
+bound destination-directory handle. A concurrent target wins without being
+modified. Private
 publication and recovery slots are fixed per destination, so collisions and
 subsequent jobs reuse bounded storage. On POSIX there is no portable
 identity-conditional unlink; ambiguous or still-addressable candidate/temp
@@ -194,6 +196,38 @@ preserving the original exception and attaching any cleanup failure as a note.
 Recovery-descriptor ownership transfers to the returned artifact only after
 shadow preparation succeeds, so that branch also closes every held descriptor
 on failure.
+
+A final output-publication review found that the copied Windows recovery file
+used Task 11's intentionally restrictive cache-sharing contract, and that the
+outer output parent was still reparsed for candidate commit, no-clobber commit,
+and rollback. The review's deterministic RED fakes modelled Windows sharing in
+both directions: a held writable pending descriptor rejected subsequent stat,
+read, or delete access without reciprocal sharing. POSIX parent-swap REDs then
+showed a lexical REPLACE consuming a same-named foreign candidate and a lexical
+no-clobber rename consuming a foreign private stage. A redirected private
+namespace also surfaced the internal `CUT_WORKSPACE_UNSAFE` error domain.
+
+The final GREEN publisher opens one `PublicationDirectory` before its first
+candidate check and keeps that exact parent handle through existing-output
+snapshot, recovery-child creation, candidate revalidation, commit, post-commit
+verification, no-clobber, rollback, and cleanup. Recovery and publication
+children are opened from that already-bound parent; they never reopen the
+parent path. POSIX operations use source and destination `dir_fd`s. Windows
+publication files use a separate, narrowly scoped READ|WRITE|DELETE sharing
+contract, including the held pending descriptor, stable read handles, lstat,
+and delete-access rename handles. Existing cache file methods retain their
+READ-only sharing and lock guarantees. Windows rename supplies both bound
+directory handles to native `FILE_RENAME_INFORMATION`, including the
+same-directory REPLACE case; no close-before-rename workaround exists.
+
+Every operational candidate, destination, stage, recovery, and rollback access
+inside the transaction is handle-relative. Lexical paths remain only for API
+validation and diagnostics. If the parent name is exchanged during a POSIX
+transaction, publication either aborts before commit or operates exclusively in
+the originally bound directory and detects the renamed parent at postverify;
+rollback then restores the original directory without touching the foreign
+replacement. Unsafe private-output namespaces are translated at the public
+publisher boundary to `INVALID_OUTPUT` / `output` with `retry-output`.
 
 ## Architecture and safety decisions
 
@@ -234,14 +268,14 @@ on failure.
 
 ## Verification
 
-- `uv run pytest -q` — **947 passed in 49.17s** outside the restricted
+- `.venv/bin/python -m pytest -q` — **950 passed in 48.31s** outside the restricted
   shared-memory sandbox.
-- Focused WebP, render, and workspace contract gate — **227 passed in
-  35.23s**, including the POSIX recovery races and injected Windows
-  handle-relative adapter contract.
-- `uv run ruff check .` — passed.
-- `uv run ruff format --check` over all 6 changed Python files — passed.
-- `uv run mypy src` — passed for 29 source files.
+- Focused WebP, render, workspace, and native Windows cache-filesystem contract
+  gate — **263 passed in 35.41s**, including parent-namespace swaps and the
+  bidirectional Windows-sharing fakes.
+- `ruff check .` — passed.
+- `ruff format --check` over all 6 changed Python files — passed.
+- `mypy src` — passed for 29 source files.
 - `git diff --check` — passed.
 
 ## Residual risk
