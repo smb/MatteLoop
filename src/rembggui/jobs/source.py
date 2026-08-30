@@ -1246,6 +1246,7 @@ class _ColorProfile:
     transfer: int
     primaries: int
     rgb_input: bool
+    assumptions: tuple[tuple[str, int], ...] = ()
 
 
 def _profile_contract(profile: _ColorProfile) -> tuple[int, int, int, int, bool]:
@@ -1274,71 +1275,69 @@ def _color_profile(stream: Any, frame: Any) -> _ColorProfile:
     codec = stream.codec_context
     pixel_format = _pixel_format(frame, codec).lower()
     rgb_input = pixel_format.startswith(("rgb", "rgba", "gbr", "bgr"))
-    primaries = _resolved_color_value(
-        "primaries",
-        getattr(frame, "color_primaries", None),
-        getattr(codec, "color_primaries", None),
-        unspecified=2,
-    )
-    transfer = _resolved_color_value(
-        "transfer",
-        getattr(frame, "color_trc", None),
-        getattr(codec, "color_trc", None),
-        unspecified=2,
-    )
-    matrix = _resolved_color_value(
-        "matrix",
-        getattr(frame, "colorspace", None),
-        getattr(codec, "colorspace", None),
-        unspecified=2,
-    )
-    color_range = _resolved_color_value(
-        "range",
-        getattr(frame, "color_range", None),
-        getattr(codec, "color_range", None),
-        unspecified=0,
-    )
+    primaries = _resolved_color_value("color_primaries", frame, codec, unspecified=2)
+    transfer = _resolved_color_value("color_trc", frame, codec, unspecified=2)
+    matrix = _resolved_color_value("colorspace", frame, codec, unspecified=2)
+    color_range = _resolved_color_value("color_range", frame, codec, unspecified=0)
+    assumptions: list[tuple[str, int]] = []
+    if primaries == 2:
+        primaries = 1
+        assumptions.append(("primaries", primaries))
+    if transfer == 2:
+        transfer = 1
+        assumptions.append(("transfer", transfer))
+    if matrix == 2:
+        height = int(getattr(frame, "height", 0) or 0)
+        matrix = 0 if rgb_input else 1 if height >= 720 else 6
+        assumptions.append(("matrix", matrix))
+    if color_range == 0:
+        color_range = 2 if rgb_input else 1
+        assumptions.append(("range", color_range))
     if primaries != 1:
         raise _unsupported_color(
-            f"color primaries {primaries} cannot be proven as BT.709/sRGB"
+            f"BT.2020 color primaries {primaries} are unsupported"
+            if primaries == 9
+            else f"unknown color primaries value {primaries}"
         )
     if transfer not in {1, 6, 13}:
-        raise _unsupported_color(f"unsupported transfer characteristic {transfer}")
-    if matrix not in {0, 1, 2, 5, 6}:
-        raise _unsupported_color(f"unsupported YUV matrix {matrix}")
+        raise _unsupported_color(
+            f"HDR transfer characteristic {transfer} is unsupported"
+            if transfer in {16, 18}
+            else f"unknown transfer characteristic value {transfer}"
+        )
+    if matrix not in {0, 1, 5, 6}:
+        raise _unsupported_color(
+            f"BT.2020 YUV matrix {matrix} is unsupported"
+            if matrix in {9, 10}
+            else f"unknown YUV matrix value {matrix}"
+        )
     if color_range not in {0, 1, 2}:
-        raise _unsupported_color(f"unsupported color range {color_range}")
+        raise _unsupported_color(f"unknown color range value {color_range}")
     if rgb_input and matrix not in {0, 2}:
         raise _unsupported_color("RGB input declares a YUV matrix")
-    if not rgb_input and matrix == 2:
-        raise _unsupported_color("YUV input has no declared conversion matrix")
     if not rgb_input and matrix == 0:
         raise _unsupported_color("YUV input declares the RGB identity matrix")
-    if matrix == 2:
-        matrix = 0
-    if color_range == 0:
-        if not rgb_input:
-            raise _unsupported_color("YUV input has no declared color range")
-        color_range = 2
-    return _ColorProfile(matrix, color_range, transfer, primaries, rgb_input)
+    return _ColorProfile(
+        matrix, color_range, transfer, primaries, rgb_input, tuple(assumptions)
+    )
 
 
 def _resolved_color_value(
-    name: str,
-    frame_value: object,
-    codec_value: object,
+    attribute: str,
+    frame: Any,
+    codec: Any,
     *,
     unspecified: int,
 ) -> int:
-    frame_int = _metadata_int(frame_value)
-    codec_int = _metadata_int(codec_value)
+    frame_int = _metadata_int(getattr(frame, attribute, None))
+    codec_int = _metadata_int(getattr(codec, attribute, None))
     explicit = {
         value
         for value in (frame_int, codec_int)
         if value is not None and value != unspecified
     }
     if len(explicit) > 1:
-        raise _unsupported_color(f"frame and codec {name} metadata conflict")
+        raise _unsupported_color(f"frame and codec {attribute} metadata conflict")
     if frame_int is not None and frame_int != unspecified:
         return frame_int
     if codec_int is not None and codec_int != unspecified:

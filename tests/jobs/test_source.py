@@ -20,6 +20,7 @@ from rembggui.jobs.source import (
     DecodedFrame,
     SourceRevision,
     SourceValidationProof,
+    _color_profile,
     _decodable_video_stream,
     _derive_timeline,
     _display_dimensions,
@@ -838,8 +839,17 @@ def test_real_metadata_rotation_pixel_aspect_and_lossless_rgba_are_normalized(
     assert green.image.getpixel((0, 0)) == (0, 255, 0, 255)
 
 
-def _yuv_frame(y: int, u: int, v: int, *, matrix: int, color_range: int):
-    frame = av.VideoFrame(2, 2, "yuv420p")
+def _yuv_frame(
+    y: int,
+    u: int,
+    v: int,
+    *,
+    matrix: int,
+    color_range: int,
+    width: int = 2,
+    height: int = 2,
+):
+    frame = av.VideoFrame(width, height, "yuv420p")
     frame.colorspace = matrix
     frame.color_range = color_range
     for plane, value in zip(frame.planes, (y, u, v)):
@@ -893,6 +903,103 @@ def test_yuv_matrix_selection_changes_literal_rgba_conversion():
     assert _normalized_image(bt601, _color_stream(matrix=5), bt601).getpixel(
         (0, 0)
     ) == (252, 0, 0, 255)
+
+
+def test_untagged_hd_yuv_assumes_bt709_defaults():
+    frame = _yuv_frame(
+        81, 90, 240, matrix=2, color_range=0, width=4, height=720
+    )
+    stream = _color_stream(matrix=2, transfer=2, primaries=2)
+    profile = _color_profile(stream, frame)
+
+    assert (
+        profile.matrix,
+        profile.color_range,
+        profile.transfer,
+        profile.primaries,
+    ) == (
+        1,
+        1,
+        1,
+        1,
+    )
+    assert dict(profile.assumptions) == {
+        "primaries": 1,
+        "transfer": 1,
+        "matrix": 1,
+        "range": 1,
+    }
+    assert _normalized_image(frame, stream, frame).size == (4, 720)
+
+
+def test_untagged_sd_yuv_assumes_bt601_matrix():
+    frame = _yuv_frame(
+        81, 90, 240, matrix=2, color_range=0, width=4, height=480
+    )
+    stream = _color_stream(matrix=2, transfer=2, primaries=2)
+
+    profile = _color_profile(stream, frame)
+
+    assert profile.matrix == 6
+    assert profile.color_range == 1
+    assert dict(profile.assumptions)["matrix"] == 6
+
+
+@pytest.mark.parametrize("transfer", [16, 18])
+def test_hdr_transfer_characteristics_are_rejected(transfer):
+    frame = _yuv_frame(81, 90, 240, matrix=1, color_range=1)
+    stream = _color_stream(matrix=1, transfer=transfer)
+
+    with pytest.raises(AppError) as error:
+        _color_profile(stream, frame)
+
+    assert error.value.code is ErrorCode.SOURCE_HDR_UNSUPPORTED
+    assert f"{transfer}" in error.value.technical_detail
+
+
+def test_bt2020_primaries_are_rejected():
+    frame = _yuv_frame(81, 90, 240, matrix=1, color_range=1)
+    stream = _color_stream(matrix=1, primaries=9)
+
+    with pytest.raises(AppError) as error:
+        _color_profile(stream, frame)
+
+    assert error.value.code is ErrorCode.SOURCE_HDR_UNSUPPORTED
+    assert "BT.2020" in error.value.technical_detail
+
+
+@pytest.mark.parametrize("matrix", [9, 10])
+def test_bt2020_matrices_are_rejected(matrix):
+    frame = _yuv_frame(81, 90, 240, matrix=matrix, color_range=1)
+    stream = _color_stream(matrix=matrix)
+
+    with pytest.raises(AppError) as error:
+        _color_profile(stream, frame)
+
+    assert error.value.code is ErrorCode.SOURCE_HDR_UNSUPPORTED
+    assert "BT.2020" in error.value.technical_detail
+    assert str(matrix) in error.value.technical_detail
+
+
+def test_explicit_bt709_yuv_metadata_keeps_declared_profile():
+    frame = _yuv_frame(81, 90, 240, matrix=1, color_range=1, width=4, height=720)
+    stream = _color_stream(matrix=1, transfer=1, primaries=1)
+    stream.codec_context.color_range = 1
+
+    profile = _color_profile(stream, frame)
+
+    assert (
+        profile.matrix,
+        profile.color_range,
+        profile.transfer,
+        profile.primaries,
+    ) == (
+        1,
+        1,
+        1,
+        1,
+    )
+    assert profile.assumptions == ()
 
 
 def test_bt709_transfer_is_converted_to_srgb_with_deterministic_lut():
@@ -987,15 +1094,13 @@ def test_per_frame_p3_or_other_wide_gamut_metadata_is_rejected(primaries):
 @pytest.mark.parametrize(
     ("primaries", "transfer", "matrix", "color_range"),
     [
-        (2, 13, 1, 1),
-        (1, 2, 1, 1),
-        (5, 13, 5, 1),
-        (6, 13, 6, 1),
-        (1, 13, 2, 1),
-        (1, 13, 1, 0),
+        (8, 13, 1, 1),
+        (1, 4, 1, 1),
+        (1, 13, 3, 1),
+        (1, 13, 1, 3),
     ],
 )
-def test_unproven_srgb_color_metadata_is_rejected(
+def test_unknown_color_metadata_is_rejected(
     primaries, transfer, matrix, color_range
 ):
     frame = _yuv_frame(81, 90, 240, matrix=matrix, color_range=color_range)
