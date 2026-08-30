@@ -76,6 +76,21 @@ class TimelineState:
         )
         return replace(self, end=timestamp)
 
+    def set_duration(self, duration: Fraction) -> TimelineState:
+        if not isinstance(duration, Fraction) or duration <= 0:
+            raise ValueError("duration must be a positive Fraction")
+        end = min(self.duration, self.start + duration)
+        if end - self.start < self.output_frame_interval:
+            raise ValueError("duration must retain at least one output frame")
+        return replace(self, end=end)
+
+    def set_fps(self, fps: int) -> TimelineState:
+        if not isinstance(fps, int) or isinstance(fps, bool) or not 1 <= fps <= 240:
+            raise ValueError("timeline fps must be between 1 and 240")
+        if self.end - self.start < Fraction(1, fps):
+            raise ValueError("timeline range must retain at least one output frame")
+        return replace(self, fps=fps)
+
     def reset_range(self) -> TimelineState:
         """Restore the export interval to the complete source duration."""
         return replace(self, start=Fraction(0), end=self.duration)
@@ -99,6 +114,11 @@ class StartChanged:
 @dataclass(frozen=True, slots=True)
 class EndChanged:
     timestamp: Fraction
+
+
+@dataclass(frozen=True)
+class DurationChanged:
+    duration: Fraction
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +151,7 @@ TimelineEvent = (
     | StepFrame
     | StartChanged
     | EndChanged
+    | DurationChanged
     | SetStartToPlayhead
     | SetEndToPlayhead
     | ResetRange
@@ -150,6 +171,8 @@ def update_timeline(
             updated, category = timeline.set_start(event.timestamp), "Export range"
         elif isinstance(event, EndChanged):
             updated, category = timeline.set_end(event.timestamp), "Export range"
+        elif isinstance(event, DurationChanged):
+            updated, category = timeline.set_duration(event.duration), "Export range"
         elif isinstance(event, SetStartToPlayhead):
             updated, category = timeline.set_start(timeline.playhead), "Export range"
         elif isinstance(event, SetEndToPlayhead):
@@ -169,13 +192,15 @@ def update_timeline(
     return updated, category
 
 
-def timeline_from_metadata(metadata: object) -> TimelineState | None:
+def timeline_from_metadata(
+    metadata: object, requested_fps: int = 15
+) -> TimelineState | None:
     """Build the default editor range from source metadata when available."""
     duration = getattr(metadata, "duration", None)
     if not isinstance(duration, Fraction) or duration <= 0:
         return None
     source_fps = _metadata_rate(metadata)
-    fps = 15
+    fps = requested_fps
     if duration < Fraction(1, fps):
         fps = min(240, max(1, ceil(1 / float(duration))))
     try:

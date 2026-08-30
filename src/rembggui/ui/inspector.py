@@ -5,9 +5,12 @@ from __future__ import annotations
 from PySide6.QtCore import QSettings, QSignalBlocker, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
+    QDoubleSpinBox,
     QFormLayout,
     QFrame,
     QLabel,
+    QLineEdit,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -17,8 +20,29 @@ from PySide6.QtWidgets import (
 )
 
 from rembggui.core.crop_state import CropChanged, CropToggleChanged, ResetCrop
-from rembggui.core.specs import CropSpec
+from rembggui.core.parameters import (
+    V1_MODEL_DISPLAY_NAMES,
+    V1_MODEL_IDS,
+    AlphaThresholdChanged,
+    EdgeModeChanged,
+    GlobalTrimChanged,
+    ModelChanged,
+    OutputFilenameChanged,
+    OutputFpsChanged,
+    OutputMaxSizeChanged,
+    PaddingChanged,
+    StretchChanged,
+    is_valid_output_filename,
+)
+from rembggui.core.specs import CropSpec, EdgeMode
+from rembggui.core.timeline import DurationChanged, EndChanged, StartChanged
 from rembggui.ui.crop_presentation import CropPresentation
+from rembggui.ui.parameter_presentation import (
+    ParameterPresentation,
+    decimal_from_widget_value,
+    fraction_from_widget_value,
+)
+from rembggui.ui.ports import OutputDirectoryRequested
 
 _DISCLOSURES = (
     ("segmentation", "Segmentation", True),
@@ -32,11 +56,18 @@ _DISCLOSURES = (
 class Inspector(QFrame):
     command_requested = Signal(object)
 
-    def __init__(self, settings: QSettings, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        settings: QSettings,
+        model_options: tuple[tuple[str, bool], ...] | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("inspector")
         self.setAccessibleName("Processing settings")
         self._settings = settings
+        self._model_options = dict(model_options or ())
+        self._build_parameter_controls()
         self._build_crop_controls()
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -76,6 +107,279 @@ class Inspector(QFrame):
         content_layout.addStretch(1)
         self.scroll_area.setWidget(content)
         outer.addWidget(self.scroll_area)
+
+    def _build_parameter_controls(self) -> None:
+        self._parameter_syncing = False
+        self._build_segmentation_parameter_controls()
+        self._build_sampling_parameter_controls()
+        self._build_cleanup_parameter_controls()
+        self._build_output_parameter_controls()
+        self._connect_parameter_controls()
+
+    def _build_segmentation_parameter_controls(self) -> None:
+        self.model_picker = QComboBox()
+        self.model_picker.setObjectName("model_picker")
+        self.model_picker.setAccessibleName("Segmentation model")
+        for model_id in V1_MODEL_IDS:
+            availability = self._model_options.get(model_id, False)
+            status = "available locally" if availability else "not downloaded"
+            self.model_picker.addItem(
+                f"{V1_MODEL_DISPLAY_NAMES[model_id]} — {status}", model_id
+            )
+            self.model_picker.setItemData(
+                self.model_picker.count() - 1,
+                f"{V1_MODEL_DISPLAY_NAMES[model_id]} ({status})",
+                Qt.ItemDataRole.ToolTipRole,
+            )
+        self.edge_picker = QComboBox()
+        self.edge_picker.setObjectName("edge_picker")
+        self.edge_picker.setAccessibleName("Edge treatment")
+        self.edge_picker.addItem("Standard", EdgeMode.STANDARD)
+        self.edge_picker.addItem("Decontaminate colors", EdgeMode.DECONTAMINATE_COLORS)
+
+    def _build_sampling_parameter_controls(self) -> None:
+        self.fps_spinbox = QSpinBox()
+        self.fps_spinbox.setObjectName("output_fps")
+        self.fps_spinbox.setAccessibleName("Output FPS")
+        self.fps_spinbox.setRange(1, 240)
+        self.fps_spinbox.setSuffix(" fps")
+        self.fps_warning = QLabel("High output FPS may increase render cost")
+        self.fps_warning.setObjectName("fps_warning")
+        self.fps_warning.setProperty("warning", True)
+        self.fps_warning.setAccessibleName("Output FPS cost warning")
+        self.fps_warning.hide()
+        self.start_spinbox = self._time_spinbox("start")
+        self.end_spinbox = self._time_spinbox("end")
+        self.duration_spinbox = self._time_spinbox("duration")
+
+    def _build_cleanup_parameter_controls(self) -> None:
+        self.trim_checkbox = QCheckBox("Global trim")
+        self.trim_checkbox.setObjectName("global_trim")
+        self.trim_checkbox.setAccessibleName("Global alpha trim")
+        self.alpha_threshold_spinbox = self._decimal_spinbox(
+            "alpha_threshold", 0.0, 100.0, 1
+        )
+        self.alpha_threshold_spinbox.setSuffix(" %")
+        self.padding_spinbox = QSpinBox()
+        self.padding_spinbox.setObjectName("padding")
+        self.padding_spinbox.setAccessibleName("Padding pixels")
+        self.padding_spinbox.setRange(0, 2_147_483_647)
+        self.stretch_spinbox = self._decimal_spinbox(
+            "horizontal_stretch", 0.000001, 1_000_000_000.0, 6
+        )
+        self.stretch_spinbox.setAccessibleName("Horizontal stretch")
+
+    def _build_output_parameter_controls(self) -> None:
+        self.output_directory_edit = QLineEdit()
+        self.output_directory_edit.setObjectName("output_directory")
+        self.output_directory_edit.setAccessibleName("Output directory")
+        self.output_directory_edit.setReadOnly(True)
+        self.output_directory_button = QPushButton("Choose…")
+        self.output_directory_button.setObjectName("choose_output_directory")
+        self.output_directory_button.setAccessibleName("Choose output directory")
+        self.output_filename_edit = QLineEdit()
+        self.output_filename_edit.setObjectName("output_filename")
+        self.output_filename_edit.setAccessibleName("Output filename")
+        self.output_filename_edit.setPlaceholderText("filename.webp")
+        self.output_filename_edit.setToolTip(
+            "Use one non-empty filename ending in .webp; "
+            "path separators are not allowed."
+        )
+        self.max_size_spinbox = self._decimal_spinbox(
+            "maximum_size", 0.0, 1_000_000_000.0, 3
+        )
+        self.max_size_spinbox.setAccessibleName("Maximum file size in MiB")
+        self.max_size_spinbox.setSuffix(" MiB")
+
+    def _connect_parameter_controls(self) -> None:
+        self.model_picker.currentIndexChanged.connect(self._model_changed)
+        self.edge_picker.currentIndexChanged.connect(self._edge_changed)
+        self.fps_spinbox.valueChanged.connect(
+            lambda value: self._emit_if_editable(OutputFpsChanged(value))
+        )
+        self.start_spinbox.valueChanged.connect(self._start_changed)
+        self.end_spinbox.valueChanged.connect(self._end_changed)
+        self.duration_spinbox.valueChanged.connect(self._duration_changed)
+        self.trim_checkbox.toggled.connect(
+            lambda value: self._emit_if_editable(GlobalTrimChanged(value))
+        )
+        self.alpha_threshold_spinbox.valueChanged.connect(
+            lambda value: self._emit_if_editable(
+                AlphaThresholdChanged(decimal_from_widget_value(value))
+            )
+        )
+        self.padding_spinbox.valueChanged.connect(
+            lambda value: self._emit_if_editable(PaddingChanged(value))
+        )
+        self.stretch_spinbox.valueChanged.connect(
+            lambda value: self._emit_if_editable(
+                StretchChanged(decimal_from_widget_value(value))
+            )
+        )
+        self.output_directory_button.clicked.connect(
+            lambda: self.command_requested.emit(OutputDirectoryRequested())
+        )
+        self.output_filename_edit.editingFinished.connect(self._filename_changed)
+        self.max_size_spinbox.valueChanged.connect(
+            lambda value: self._emit_if_editable(
+                OutputMaxSizeChanged(decimal_from_widget_value(value))
+            )
+        )
+
+    def _emit_if_editable(self, command: object) -> None:
+        if not self._parameter_syncing:
+            self.command_requested.emit(command)
+
+    def _model_changed(self, _index: int) -> None:
+        model_id = self.model_picker.currentData()
+        if isinstance(model_id, str):
+            self._emit_if_editable(ModelChanged(model_id))
+
+    def _edge_changed(self, _index: int) -> None:
+        try:
+            edge_mode = EdgeMode(self.edge_picker.currentData())
+        except (TypeError, ValueError):
+            return
+        if edge_mode in {EdgeMode.STANDARD, EdgeMode.DECONTAMINATE_COLORS}:
+            self._emit_if_editable(EdgeModeChanged(edge_mode))
+
+    def _start_changed(self, value: float) -> None:
+        self._emit_if_editable(StartChanged(fraction_from_widget_value(value)))
+
+    def _end_changed(self, value: float) -> None:
+        self._emit_if_editable(EndChanged(fraction_from_widget_value(value)))
+
+    def _duration_changed(self, value: float) -> None:
+        self._emit_if_editable(DurationChanged(fraction_from_widget_value(value)))
+
+    def _filename_changed(self) -> None:
+        if self._parameter_syncing:
+            return
+        filename = self.output_filename_edit.text()
+        if not is_valid_output_filename(filename):
+            self._show_filename_error()
+            return
+        self._clear_filename_error()
+        self.command_requested.emit(OutputFilenameChanged(filename))
+
+    def _show_filename_error(self) -> None:
+        message = "Filename must be a single non-empty .webp filename."
+        self.output_filename_edit.setProperty("invalid", True)
+        self.output_filename_edit.setToolTip(message)
+        self.output_filename_edit.setAccessibleDescription(message)
+        self.output_filename_edit.style().unpolish(self.output_filename_edit)
+        self.output_filename_edit.style().polish(self.output_filename_edit)
+
+    def _clear_filename_error(self) -> None:
+        self.output_filename_edit.setProperty("invalid", False)
+        self.output_filename_edit.setToolTip(
+            "Use one non-empty filename ending in .webp; "
+            "path separators are not allowed."
+        )
+        self.output_filename_edit.setAccessibleDescription("")
+        self.output_filename_edit.style().unpolish(self.output_filename_edit)
+        self.output_filename_edit.style().polish(self.output_filename_edit)
+
+    def apply_parameters(
+        self, presentation: ParameterPresentation, editable: bool
+    ) -> None:
+        """Render reducer-owned parameters into standard inspector widgets."""
+        self._parameter_syncing = True
+        widgets = (
+            self.model_picker,
+            self.edge_picker,
+            self.fps_spinbox,
+            self.start_spinbox,
+            self.end_spinbox,
+            self.duration_spinbox,
+            self.trim_checkbox,
+            self.alpha_threshold_spinbox,
+            self.padding_spinbox,
+            self.stretch_spinbox,
+            self.output_filename_edit,
+            self.max_size_spinbox,
+        )
+        blockers = [QSignalBlocker(widget) for widget in widgets]
+        try:
+            model_index = self.model_picker.findData(presentation.model_id)
+            if model_index >= 0:
+                self.model_picker.setCurrentIndex(model_index)
+            edge_index = self.edge_picker.findData(presentation.edge_mode.value)
+            if edge_index >= 0:
+                self.edge_picker.setCurrentIndex(edge_index)
+            self.fps_spinbox.setValue(presentation.fps)
+            self.trim_checkbox.setChecked(presentation.trim)
+            self.alpha_threshold_spinbox.setValue(float(presentation.alpha_threshold))
+            self.padding_spinbox.setValue(presentation.padding)
+            self.stretch_spinbox.setValue(float(presentation.stretch_x))
+            self.output_filename_edit.setText(presentation.output_filename)
+            self.max_size_spinbox.setValue(float(presentation.max_mib))
+            self._apply_time_values(presentation)
+            self.output_directory_edit.setText(
+                str(presentation.output_directory or "")
+            )
+            self._clear_filename_error()
+        finally:
+            del blockers
+            self._parameter_syncing = False
+        available = editable and presentation.duration is not None
+        for widget in (
+            self.model_picker,
+            self.edge_picker,
+            self.fps_spinbox,
+            self.start_spinbox,
+            self.end_spinbox,
+            self.duration_spinbox,
+            self.trim_checkbox,
+            self.alpha_threshold_spinbox,
+            self.padding_spinbox,
+            self.stretch_spinbox,
+            self.output_directory_button,
+            self.output_filename_edit,
+            self.max_size_spinbox,
+        ):
+            widget.setEnabled(available)
+        self.fps_warning.setVisible(available and presentation.fps > 60)
+
+    def _apply_time_values(self, presentation: ParameterPresentation) -> None:
+        duration = presentation.source_duration
+        if duration is None or presentation.start is None or presentation.end is None:
+            for widget in (self.start_spinbox, self.end_spinbox, self.duration_spinbox):
+                widget.setRange(0.0, 1.0)
+                widget.setValue(0.0)
+            return
+        maximum = float(duration)
+        interval = 1.0 / presentation.fps
+        self.start_spinbox.setRange(0.0, max(0.0, float(presentation.end) - interval))
+        self.end_spinbox.setRange(
+            min(maximum, float(presentation.start) + interval), maximum
+        )
+        self.duration_spinbox.setRange(
+            interval, max(interval, maximum - float(presentation.start))
+        )
+        self.start_spinbox.setValue(float(presentation.start))
+        self.end_spinbox.setValue(float(presentation.end))
+        self.duration_spinbox.setValue(float(presentation.duration or 0))
+
+    def _time_spinbox(self, name: str) -> QDoubleSpinBox:
+        field = QDoubleSpinBox()
+        field.setObjectName(f"{name}_time")
+        field.setAccessibleName(name.capitalize())
+        field.setDecimals(3)
+        field.setRange(0.0, 1.0)
+        field.setSingleStep(0.001)
+        field.setSuffix(" s")
+        return field
+
+    def _decimal_spinbox(
+        self, name: str, minimum: float, maximum: float, decimals: int
+    ) -> QDoubleSpinBox:
+        field = QDoubleSpinBox()
+        field.setObjectName(name)
+        field.setDecimals(decimals)
+        field.setRange(minimum, maximum)
+        field.setSingleStep(1.0 if decimals == 0 else 0.1)
+        return field
 
     def _build_crop_controls(self) -> None:
         self._crop_syncing = False
@@ -179,9 +483,15 @@ class Inspector(QFrame):
         copy.setProperty("secondary", True)
         body_layout.addWidget(copy)
         if key == "segmentation":
+            body_layout.addWidget(self._segmentation_controls())
             body_layout.addWidget(self.manage_models)
+        if key == "time_sampling":
+            body_layout.addWidget(self._time_controls())
         if key == "crop_cleanup":
+            body_layout.addWidget(self._cleanup_controls())
             body_layout.addWidget(self._crop_controls())
+        if key == "output":
+            body_layout.addWidget(self._output_controls())
         if key == "workspace":
             body_layout.addWidget(self.edited_cut_recovery)
             body_layout.addWidget(self.rebuild_button)
@@ -208,6 +518,95 @@ class Inspector(QFrame):
         layout.addRow("Width", self.crop_width_spinbox)
         layout.addRow("Height", self.crop_height_spinbox)
         return controls
+
+    def _segmentation_controls(self) -> QWidget:
+        controls = QWidget()
+        layout = QFormLayout(controls)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addRow("Model", self.model_picker)
+        layout.addRow("Edge treatment", self.edge_picker)
+        return controls
+
+    def _time_controls(self) -> QWidget:
+        controls = QWidget()
+        layout = QFormLayout(controls)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addRow("Output FPS", self.fps_spinbox)
+        layout.addRow(self.fps_warning)
+        layout.addRow("Start", self.start_spinbox)
+        layout.addRow("End", self.end_spinbox)
+        layout.addRow("Duration", self.duration_spinbox)
+        return controls
+
+    def _cleanup_controls(self) -> QWidget:
+        controls = QWidget()
+        layout = QFormLayout(controls)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addRow(self.trim_checkbox)
+        layout.addRow("Alpha threshold", self.alpha_threshold_spinbox)
+        layout.addRow("Padding", self.padding_spinbox)
+        layout.addRow("Horizontal stretch", self.stretch_spinbox)
+        return controls
+
+    def _output_controls(self) -> QWidget:
+        controls = QWidget()
+        layout = QFormLayout(controls)
+        layout.setContentsMargins(0, 0, 0, 0)
+        directory = QWidget()
+        directory_layout = QVBoxLayout(directory)
+        directory_layout.setContentsMargins(0, 0, 0, 0)
+        directory_layout.addWidget(self.output_directory_edit)
+        directory_layout.addWidget(self.output_directory_button)
+        layout.addRow("Directory", directory)
+        layout.addRow("Filename", self.output_filename_edit)
+        layout.addRow("Maximum size", self.max_size_spinbox)
+        return controls
+
+    def parameter_tab_widgets(self) -> tuple[QWidget, ...]:
+        """Return standard parameter controls in consequence order."""
+        return (
+            self.model_picker,
+            self.edge_picker,
+            self.fps_spinbox,
+            self.start_spinbox,
+            self.end_spinbox,
+            self.duration_spinbox,
+            self.trim_checkbox,
+            self.alpha_threshold_spinbox,
+            self.padding_spinbox,
+            self.stretch_spinbox,
+            self.output_directory_button,
+            self.output_filename_edit,
+            self.max_size_spinbox,
+        )
+
+    def tab_widgets(self) -> tuple[QWidget, ...]:
+        """Return the full inspector tab route in consequence order."""
+        return (
+            self.disclosures["segmentation"][0],
+            self.model_picker,
+            self.edge_picker,
+            self.manage_models,
+            self.disclosures["time_sampling"][0],
+            self.fps_spinbox,
+            self.start_spinbox,
+            self.end_spinbox,
+            self.duration_spinbox,
+            self.disclosures["crop_cleanup"][0],
+            *self.crop_tab_widgets(),
+            self.trim_checkbox,
+            self.alpha_threshold_spinbox,
+            self.padding_spinbox,
+            self.stretch_spinbox,
+            self.disclosures["output"][0],
+            self.output_directory_button,
+            self.output_filename_edit,
+            self.max_size_spinbox,
+            self.disclosures["workspace"][0],
+            self.edited_cut_recovery,
+            self.rebuild_button,
+            self.manage_workspaces,
+        )
 
     def crop_tab_widgets(self) -> tuple[QWidget, ...]:
         """Return the crop controls in their keyboard navigation order."""

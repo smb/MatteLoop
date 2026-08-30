@@ -45,12 +45,8 @@ from rembggui.ui.ports import (
     RenderVideoRequested,
     StateStore,
 )
-from rembggui.ui.preview_controller import (
-    PreviewJobDialog,
-    PreviewRuntime,
-    _preview_inputs,
-    _render_request,
-)
+from rembggui.ui.preview_controller import PreviewJobDialog, PreviewRuntime
+from rembggui.ui.request_builder import _preview_inputs, _render_request
 
 
 class RenderRuntime(Protocol):
@@ -217,13 +213,10 @@ class RenderController(QObject):
         if source_id is None or state.source is not SourceState.READY:
             return
         try:
-            inputs = _preview_inputs(state.source_value, state.timeline, state.crop)
-            request = _render_request(
-                inputs,
-                "birefnet-portrait",
-                fps=15,
-                filename=f"{inputs.source.stem}.webp",
+            inputs = _preview_inputs(
+                state.source_value, state.timeline, state.crop, state.parameters
             )
+            request = _render_request(inputs)
         except BaseException:
             return
         if state.preview in {

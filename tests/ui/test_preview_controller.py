@@ -172,7 +172,7 @@ def test_preview_request_prepares_model_and_displays_the_first_frame_cutout(
     assert request.source == path
     assert request.sampling.start == Fraction(0)
     assert request.sampling.end == Fraction(2)
-    assert request.sampling.fps == 1
+    assert request.sampling.fps == 15
     assert (request.crop.x, request.crop.y) == (0, 0)
     assert (request.crop.width, request.crop.height) == (128, 128)
     assert request.segmentation.model_id == "birefnet-portrait"

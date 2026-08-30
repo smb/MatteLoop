@@ -34,7 +34,8 @@ from rembggui.ui.ports import (
     VideoDropped,
     WindowServices,
 )
-from rembggui.ui.presenter import PresentationModel, present
+from rembggui.ui.presentation_model import PresentationModel
+from rembggui.ui.presenter import present
 from rembggui.ui.preview_canvas import PreviewStage
 from rembggui.ui.source_strip import SourceDropSurface, SourceStrip
 from rembggui.ui.timeline import TimelineWidget
@@ -49,6 +50,8 @@ class MainWindow(QMainWindow):
         services: WindowServices,
         settings: QSettings,
         parent: QWidget | None = None,
+        *,
+        model_options: tuple[tuple[str, bool], ...] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("main_window")
@@ -58,6 +61,7 @@ class MainWindow(QMainWindow):
         self._store = store
         self._services = services
         self._settings = settings
+        self._model_options = model_options
         self._unsubscribe: Callable[[], None] | None = None
         self._last_focus: FocusTarget | None = None
         self._build()
@@ -114,7 +118,7 @@ class MainWindow(QMainWindow):
         inspector_layout = QVBoxLayout(inspector_column)
         inspector_layout.setContentsMargins(0, 0, 0, 0)
         inspector_layout.setSpacing(0)
-        self.inspector = Inspector(self._settings)
+        self.inspector = Inspector(self._settings, model_options=self._model_options)
         self.inspector_scroll = self.inspector.scroll_area
         self.inspector_content = self.inspector.scroll_area.widget()
         self.action_shelf = ActionShelf()
@@ -214,16 +218,7 @@ class MainWindow(QMainWindow):
         ]
         widgets.extend(
             [
-                self.inspector.disclosures["segmentation"][0],
-                self.manage_models_button,
-                self.inspector.disclosures["time_sampling"][0],
-                self.inspector.disclosures["crop_cleanup"][0],
-                *self.inspector.crop_tab_widgets(),
-                self.inspector.disclosures["output"][0],
-                self.inspector.disclosures["workspace"][0],
-                self.edited_cut_recovery,
-                self.rebuild_button,
-                self.manage_workspaces_button,
+                *self.inspector.tab_widgets(),
                 self.success_banner,
                 self.open_output_button,
                 self.open_folder_button,

@@ -18,8 +18,10 @@ def _run_gui() -> int:
     from PySide6.QtCore import QSettings
     from PySide6.QtWidgets import QApplication
 
+    from rembggui.core.state import AppState, ModelAvailabilityChanged
     from rembggui.ui.controller import SourceController
     from rembggui.ui.main_window import MainWindow
+    from rembggui.ui.preferences import load_parameters
     from rembggui.ui.store import ReducerStore
     from rembggui.ui.theme import install_theme
 
@@ -32,9 +34,15 @@ def _run_gui() -> int:
     application.setApplicationVersion(__version__)
     install_theme(application)
     settings = QSettings()
-    store = ReducerStore()
-    controller = SourceController(store, parent=application)
-    window = MainWindow(store, controller, settings)
+    store = ReducerStore(AppState(parameters=load_parameters(settings)))
+    controller = SourceController(store, settings=settings, parent=application)
+    availability = dict(controller.model_options).get(
+        store.state.parameters.model_id, False
+    )
+    store.dispatch(ModelAvailabilityChanged(availability))
+    window = MainWindow(
+        store, controller, settings, model_options=controller.model_options
+    )
     controller.set_dialog_parent(window)
     application.aboutToQuit.connect(controller.shutdown)
     window.show()

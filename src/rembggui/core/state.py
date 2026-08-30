@@ -6,8 +6,11 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
 from rembggui.core import crop_state as _crop_state
+from rembggui.core import parameters as _parameters
 from rembggui.core import specs
+from rembggui.core.parameters import ParameterState
 from rembggui.core.timeline import (
+    DurationChanged,
     SourceFrameDecoded,
     TimelineEvent,
     TimelineState,
@@ -17,7 +20,9 @@ from rembggui.core.timeline_reducer import reduce_timeline
 
 
 def __getattr__(name: str) -> object:
-    return getattr(_crop_state, name)
+    if hasattr(_crop_state, name):
+        return getattr(_crop_state, name)
+    return getattr(_parameters, name)
 
 
 class SourceState(StrEnum):
@@ -26,14 +31,12 @@ class SourceState(StrEnum):
     READY = "ready"
     ERROR = "error"
 
-
 class PreviewState(StrEnum):
     NONE = "none"
     RUNNING = "running"
     CURRENT = "current"
     STALE = "stale"
     ERROR = "error"
-
 
 class JobState(StrEnum):
     IDLE = "idle"
@@ -42,18 +45,15 @@ class JobState(StrEnum):
     RENDERING = "rendering"
     CANCELLING = "cancelling"
 
-
 class ArtifactState(StrEnum):
     NONE = "none"
     VALID = "valid"
     ERROR = "error"
 
-
 class JobKind(StrEnum):
     PREVIEW = "preview"
     RENDER = "render"
     REBUILD = "rebuild"
-
 
 class FocusTarget(StrEnum):
     NONE = "none"
@@ -68,7 +68,6 @@ class FocusTarget(StrEnum):
     SUCCESS_BANNER = "success_banner"
     EDITED_CUT_RECOVERY = "edited_cut_recovery"
 
-
 @dataclass(frozen=True)
 class PreviewResult:
     """A preview payload bound to the source and request that produced it."""
@@ -77,7 +76,6 @@ class PreviewResult:
     request_id: str
     value: object
 
-
 @dataclass(frozen=True)
 class ArtifactResult:
     """A rendered artifact bound to the source and request that produced it."""
@@ -85,7 +83,6 @@ class ArtifactResult:
     source_id: str
     request_id: str
     value: object
-
 
 @dataclass(frozen=True)
 class PreviewSnapshot:
@@ -98,7 +95,6 @@ class PreviewSnapshot:
     attempt_error: object | None
     stale_category: str | None
 
-
 @dataclass(frozen=True)
 class ActiveJob:
     """Exclusive job identity retained unchanged while cancellation is pending."""
@@ -109,7 +105,6 @@ class ActiveJob:
     stage: str = ""
     initiator_focus: FocusTarget = FocusTarget.NONE
 
-
 @dataclass(frozen=True)
 class AppState:
     source: SourceState = SourceState.EMPTY
@@ -118,6 +113,7 @@ class AppState:
     source_value: object | None = None
     source_frame: object | None = None
     timeline: TimelineState | None = None
+    parameters: ParameterState = field(default_factory=ParameterState)
     crop: specs.CropSpec | None = None
     crop_enabled: bool = True
     source_error: object | None = None
@@ -195,7 +191,6 @@ class AppState:
             )
         if self.edited_cuts and self.artifact is not ArtifactState.VALID:
             raise ValueError("edited cuts require a valid artifact")
-
 
 @dataclass(frozen=True)
 class Capabilities:
@@ -351,6 +346,8 @@ type Event = (
     | SourceFrameDecoded
     | SourceLoadFailed
     | ModelAvailabilityChanged
+    | _parameters.ParameterEvent
+    | DurationChanged
     | PreviewRequested
     | ModelPrepared
     | JobStageChanged
@@ -379,6 +376,7 @@ def reduce(state: AppState, event: Event) -> AppState:
         return AppState(
             source=SourceState.LOADING, source_id=event.source_id,
             source_request_id=event.request_id,
+            parameters=state.parameters,
             model_available=state.model_available,
             model_supports_render=state.model_supports_render,
             focus_target=FocusTarget.NONE,
@@ -391,12 +389,14 @@ def reduce(state: AppState, event: Event) -> AppState:
             source=SourceState.READY,
             source_value=event.value,
             source_frame=event.frame,
-            timeline=timeline_from_metadata(event.value),
+            timeline=timeline_from_metadata(event.value, state.parameters.fps),
             crop=_crop_state.default_crop_for_source(event.value), source_error=None,
             focus_target=FocusTarget.PREVIEW_ACTION,
         )
     if isinstance(event, _crop_state.CropEvent):
         return _crop_state.reduce_crop(state, event)
+    if isinstance(event, _parameters.ParameterEvent):
+        return _parameters.reduce_parameters(state, event)
     if isinstance(event, (SourceFrameDecoded, TimelineEvent)):
         return reduce_timeline(state, event)
     if isinstance(event, SourceLoadFailed):

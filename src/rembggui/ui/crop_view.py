@@ -6,7 +6,7 @@ from PySide6.QtGui import QImage
 
 from rembggui.ui.crop_canvas import CropCanvas
 from rembggui.ui.inspector import Inspector
-from rembggui.ui.presenter import PresentationModel
+from rembggui.ui.presentation_model import PresentationModel
 
 
 def render_source_editor(
@@ -21,3 +21,4 @@ def render_source_editor(
     )
     canvas.apply_presentation(model.crop, active=model.crop_enabled, editable=editable)
     inspector.apply_crop(model.crop, model.crop_enabled, editable)
+    inspector.apply_parameters(model.parameters, editable)

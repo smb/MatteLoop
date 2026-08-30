@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
-from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 from threading import Thread
@@ -24,16 +22,8 @@ from PySide6.QtWidgets import (
 )
 
 from rembggui.core.errors import AppError, ErrorCode
-from rembggui.core.specs import (
-    CollisionPolicy,
-    CropSpec,
-    EdgeMode,
-    FramingSpec,
-    OutputSpec,
-    RenderRequest,
-    SamplingSpec,
-    SegmentationSpec,
-)
+from rembggui.core.parameters import V1_MODEL_IDS
+from rembggui.core.specs import RenderRequest
 from rembggui.core.state import (
     CancelAcknowledged,
     CancelRequested,
@@ -49,7 +39,6 @@ from rembggui.core.state import (
     capabilities,
 )
 from rembggui.core.state import PreviewResult as StatePreviewResult
-from rembggui.core.timeline import TimelineState
 from rembggui.jobs.context import (
     CancellationState,
     ExclusiveJobScheduler,
@@ -75,6 +64,11 @@ from rembggui.ui.download_transport import (
     QtNetworkDownloadTransport as _QtNetworkDownloadTransport,
 )
 from rembggui.ui.ports import PreviewFrameRequested, StateStore
+from rembggui.ui.request_builder import (
+    _preview_inputs,
+    _PreviewInputs,
+    _render_request,
+)
 from rembggui.ui.source_presentation import (
     DownloadRateEstimator,
     format_model_download_detail,
@@ -143,6 +137,23 @@ class ProductionPreviewRuntime:
     @property
     def default_model_id(self) -> str:
         return self.catalog.default_id
+
+    @property
+    def model_options(self) -> tuple[tuple[str, bool], ...]:
+        """Expose the V1 picker IDs with truthful local-cache availability."""
+        return tuple(
+            (
+                model_id,
+                self._model_cached(model_id),
+            )
+            for model_id in V1_MODEL_IDS
+        )
+
+    def _model_cached(self, model_id: str) -> bool:
+        artifact = self.catalog.get(model_id).artifact
+        return artifact is not None and self._cached(
+            model_id, artifact.runtime_filename
+        )
 
     def prepare(
         self, model_id: str, extras: dict[str, object], context: JobContext
@@ -350,18 +361,6 @@ class PreviewJobDialog(QDialog):
         self.cancel_requested.emit()
 
 
-@dataclass(frozen=True)
-class _PreviewInputs:
-    source: Path
-    width: int
-    height: int
-    duration: Fraction
-    start: Fraction
-    end: Fraction
-    playhead: Fraction
-    crop: CropSpec
-
-
 class _PreviewWorker(QObject):
     notification = Signal(object)
     finished = Signal(str)
@@ -390,10 +389,7 @@ class _PreviewWorker(QObject):
     def run(self) -> None:
         try:
             self._emit_stage("Preparing model")
-            request = _render_request(
-                self._inputs,
-                getattr(self._runtime, "default_model_id", "birefnet-portrait"),
-            )
+            request = _render_request(self._inputs)
             prepared = self._runtime.prepare(
                 request.segmentation.model_id, {}, self._context
             )
@@ -496,6 +492,19 @@ class PreviewController(QObject):
         return self._scheduler
 
     @property
+    def model_options(self) -> tuple[tuple[str, bool], ...]:
+        options = getattr(self._runtime, "model_options", ())
+        if isinstance(options, tuple) and all(
+            isinstance(item, tuple)
+            and len(item) == 2
+            and isinstance(item[0], str)
+            and isinstance(item[1], bool)
+            for item in options
+        ):
+            return options
+        return tuple((model_id, False) for model_id in V1_MODEL_IDS)
+
+    @property
     def active_preview_count(self) -> int:
         return sum(thread.isRunning() for thread, _worker in self._threads.values())
 
@@ -514,7 +523,9 @@ class PreviewController(QObject):
         metadata = state.source_value
         if source_id is None or state.source is not SourceState.READY:
             return
-        inputs = _preview_inputs(metadata, state.timeline, state.crop)
+        inputs = _preview_inputs(
+            metadata, state.timeline, state.crop, state.parameters
+        )
         job_id = uuid4().hex
         request_id = uuid4().hex
         self._store.dispatch(
@@ -665,76 +676,6 @@ class PreviewController(QObject):
     def _thread_finished(self, job_id: str) -> None:
         self._contexts.pop(job_id, None)
         self._threads.pop(job_id, None)
-
-
-def _preview_inputs(
-    metadata: object,
-    timeline: TimelineState | None = None,
-    crop: CropSpec | None = None,
-) -> _PreviewInputs:
-    source = getattr(metadata, "path", None)
-    width = getattr(metadata, "width", None)
-    height = getattr(metadata, "height", None)
-    duration = getattr(metadata, "duration", None)
-    if (
-        not isinstance(source, Path)
-        or type(width) is not int
-        or type(height) is not int
-        or not isinstance(duration, Fraction)
-    ):
-        raise ValueError("loaded source metadata cannot build a preview request")
-    if timeline is None:
-        return _PreviewInputs(
-            source,
-            width,
-            height,
-            duration,
-            Fraction(0),
-            duration,
-            Fraction(0),
-            crop or CropSpec(0, 0, width, height),
-        )
-    if timeline.duration != duration:
-        raise ValueError("timeline duration does not match loaded source metadata")
-    return _PreviewInputs(
-        source,
-        width,
-        height,
-        duration,
-        timeline.start,
-        timeline.end,
-        timeline.playhead,
-        crop or CropSpec(0, 0, width, height),
-    )
-
-
-def _render_request(
-    inputs: _PreviewInputs,
-    model_id: str,
-    *,
-    fps: int = 1,
-    filename: str = "preview.webp",
-    collision_policy: CollisionPolicy = CollisionPolicy.CANCEL,
-) -> RenderRequest:
-    return RenderRequest(
-        source=inputs.source,
-        sampling=SamplingSpec(inputs.start, inputs.end, fps=fps),
-        crop=inputs.crop,
-        segmentation=SegmentationSpec(
-            model_id=model_id, edge_mode=EdgeMode.STANDARD
-        ),
-        framing=FramingSpec(
-            trim=False,
-            alpha_threshold=Decimal("2.0"),
-            padding=0,
-            stretch_x=Decimal("1.0"),
-        ),
-        output=OutputSpec(
-            inputs.source.parent,
-            filename,
-            collision_policy=collision_policy,
-        ),
-    )
 
 
 def _qimage_from_rgba(value: ImmutableRgba) -> QImage:

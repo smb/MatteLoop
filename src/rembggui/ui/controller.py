@@ -10,12 +10,17 @@ from typing import Protocol
 from uuid import uuid4
 
 from PIL import Image
-from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, QSettings, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QFileDialog, QWidget
 
 from rembggui.core.crop_state import CropEvent
 from rembggui.core.errors import AppError, ErrorCode
+from rembggui.core.parameters import (
+    OutputDirectoryChanged,
+    ParameterEvent,
+    output_directory_for_source,
+)
 from rembggui.core.state import (
     SourceLoaded,
     SourceLoadFailed,
@@ -23,6 +28,7 @@ from rembggui.core.state import (
     SourceState,
 )
 from rembggui.core.timeline import (
+    DurationChanged,
     EndChanged,
     PlayheadChanged,
     ResetRange,
@@ -44,6 +50,7 @@ from rembggui.ui.ports import (
     ManageWorkspacesRequested,
     OpenOutputFolderRequested,
     OpenOutputRequested,
+    OutputDirectoryRequested,
     PreviewFrameRequested,
     RebuildEditedCutsRequested,
     RenderVideoRequested,
@@ -51,6 +58,7 @@ from rembggui.ui.ports import (
     VideoDropped,
     WindowCommand,
 )
+from rembggui.ui.preferences import persist_parameters
 from rembggui.ui.preview_controller import PreviewController, PreviewRuntime
 from rembggui.ui.render_controller import RenderController
 from rembggui.ui.timeline import SourceFrameWorker
@@ -146,6 +154,7 @@ class SourceController(QObject):
         source_adapter: SourceAdapter | None = None,
         preview_controller: PreviewController | None = None,
         preview_runtime: PreviewRuntime | None = None,
+        settings: QSettings | None = None,
         dialog_parent: QWidget | None = None,
         parent: QObject | None = None,
     ) -> None:
@@ -153,6 +162,7 @@ class SourceController(QObject):
         self._store = store
         self._source_adapter = source_adapter or PyAVSourceAdapter()
         self._dialog_parent = dialog_parent
+        self._settings = settings
         self._preview_controller = preview_controller or PreviewController(
             store,
             runtime=preview_runtime,
@@ -200,6 +210,11 @@ class SourceController(QObject):
         """Expose the render command owner for lifecycle and UI integration tests."""
         return self._render_controller
 
+    @property
+    def model_options(self) -> tuple[tuple[str, bool], ...]:
+        """Expose runtime model availability for the passive inspector view."""
+        return self._preview_controller.model_options
+
     def dispatch(self, command: WindowCommand) -> None:
         if self._closed:
             return
@@ -213,6 +228,10 @@ class SourceController(QObject):
             self._render_controller.dispatch(command)
         elif isinstance(command, CropEvent):
             self._store.dispatch(command)
+        elif isinstance(command, ParameterEvent):
+            self._dispatch_parameter(command)
+        elif isinstance(command, OutputDirectoryRequested):
+            self._choose_output_directory()
         elif isinstance(
             command,
             (
@@ -220,6 +239,7 @@ class SourceController(QObject):
                 StepFrame,
                 StartChanged,
                 EndChanged,
+                DurationChanged,
                 SetStartToPlayhead,
                 SetEndToPlayhead,
                 ResetRange,
@@ -350,6 +370,31 @@ class SourceController(QObject):
         elif isinstance(event, PlayheadChanged):
             self._cancel_frame_threads()
             self._frame_timer.start()
+
+    def _dispatch_parameter(self, event: ParameterEvent) -> None:
+        before = self._store.state
+        self._store.dispatch(event)
+        after = self._store.state
+        if after is not before and self._settings is not None:
+            persist_parameters(self._settings, after.parameters)
+
+    def _choose_output_directory(self) -> None:
+        state = self._store.state
+        metadata = state.source_value
+        source = getattr(metadata, "path", None)
+        if (
+            state.source is not SourceState.READY
+            or not isinstance(source, Path)
+        ):
+            return
+        current = output_directory_for_source(state.parameters, source)
+        selected = QFileDialog.getExistingDirectory(
+            self._dialog_parent,
+            "Choose output directory",
+            str(current),
+        )
+        if selected:
+            self._dispatch_parameter(OutputDirectoryChanged(Path(selected)))
 
     @Slot()
     def _decode_current_playhead(self) -> None:
