@@ -166,6 +166,42 @@ Success: no issues found in 38 source files
 No production files changed in this matrix-only follow-up. Native platform
 builds remain unexecuted.
 
+## Task 13 focus and action-contract matrix follow-up
+
+The final test-only pass extends every one of the 22 literal reducer rows with
+an actual `QApplication.focusWidget()` expectation after queued focus events.
+Task15-only `JOB_DIALOG` and `PREFLIGHT_DIALOG` targets remain requested in the
+model while their literal safe prior focus (`None` or
+`segmentation_disclosure`) is asserted; no fake dialog widget was introduced.
+Each row now also asserts Choose/Replace visibility and enabled state, output
+action visibility and enablement, recovery enablement, the dynamic Preview
+action name, all source/drop/result accessible names, success artifact path
+description, and output action names.
+
+### Final matrix verification
+
+```text
+QT_QPA_PLATFORM=offscreen .venv/bin/pytest -q tests/ui/test_task13_review_fixes.py -k complete_literal
+22 passed, 59 deselected
+
+QT_QPA_PLATFORM=offscreen .venv/bin/pytest -q tests/ui
+115 passed
+
+QT_QPA_PLATFORM=offscreen .venv/bin/pytest -q tests/ui/test_task13_review_fixes.py tests/ui/test_state_presentation.py
+94 passed
+
+.venv/bin/ruff check tests/ui/test_task13_review_fixes.py
+All checks passed
+
+.venv/bin/ruff format --check tests/ui/test_task13_review_fixes.py
+1 file already formatted
+
+.venv/bin/mypy src
+Success: no issues found in 38 source files
+```
+
+No production files changed. Native platform builds remain unexecuted.
+
 ## Task 13 application-shell re-review follow-up
 
 The second Sol re-review follow-up keeps failed re-previews with an existing

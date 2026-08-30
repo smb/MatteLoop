@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -807,6 +807,26 @@ class LiteralPresentationRow:
     focus: str
     editor_locked: bool
     inspector_enabled: bool
+    actual_focus: str | None = None
+    choose_visible: bool = False
+    choose_enabled: bool = False
+    replace_visible: bool = False
+    replace_enabled: bool = False
+    open_output_visible: bool = False
+    open_output_enabled: bool = False
+    open_folder_visible: bool = False
+    open_folder_enabled: bool = False
+    recovery_enabled: bool = False
+    preview_name: str = "Preview Frame"
+    drop_name: str = "Video drop area"
+    choose_name: str = "Choose Video"
+    source_name: str = "Source video"
+    replace_name: str = "Replace video"
+    result_name: str = "Background-removed result"
+    success_description: str = "Render complete"
+    artifact_description: str = ""
+    open_output_name: str = "Open output"
+    open_folder_name: str = "Open folder"
 
 
 def _literal_presentation_rows() -> list[LiteralPresentationRow]:
@@ -826,7 +846,7 @@ def _literal_presentation_rows() -> list[LiteralPresentationRow]:
     preflight = reduce(_ready(), RenderPreflightRequested())
     render = reduce(_ready(), RenderRequested("render", "render-request"))
     cancelling = reduce(render, CancelRequested("render"))
-    return [
+    rows = [
         LiteralPresentationRow(
             "empty",
             AppState(),
@@ -1382,14 +1402,295 @@ def _literal_presentation_rows() -> list[LiteralPresentationRow]:
         ),
     ]
 
+    def contract(
+        actual_focus: str | None,
+        *,
+        choose_visible: bool,
+        choose_enabled: bool,
+        replace_visible: bool,
+        replace_enabled: bool,
+        output_visible: bool,
+        output_enabled: bool,
+        recovery_enabled: bool,
+        preview_name: str = "Preview Frame",
+        success_description: str = "Render complete",
+        artifact_description: str = "",
+    ) -> dict[str, object]:
+        return {
+            "actual_focus": actual_focus,
+            "choose_visible": choose_visible,
+            "choose_enabled": choose_enabled,
+            "replace_visible": replace_visible,
+            "replace_enabled": replace_enabled,
+            "open_output_visible": output_visible,
+            "open_output_enabled": output_enabled,
+            "open_folder_visible": output_visible,
+            "open_folder_enabled": output_enabled,
+            "recovery_enabled": recovery_enabled,
+            "preview_name": preview_name,
+            "drop_name": "Video drop area",
+            "choose_name": "Choose Video",
+            "source_name": "Source video",
+            "replace_name": "Replace video",
+            "result_name": "Background-removed result",
+            "success_description": success_description,
+            "artifact_description": artifact_description,
+            "open_output_name": "Open output",
+            "open_folder_name": "Open folder",
+        }
+
+    expectations = {
+        "empty": contract(
+            "choose_video",
+            choose_visible=True,
+            choose_enabled=True,
+            replace_visible=False,
+            replace_enabled=False,
+            output_visible=False,
+            output_enabled=False,
+            recovery_enabled=True,
+        ),
+        "loading": contract(
+            None,
+            choose_visible=False,
+            choose_enabled=False,
+            replace_visible=True,
+            replace_enabled=False,
+            output_visible=False,
+            output_enabled=False,
+            recovery_enabled=False,
+        ),
+        "source_error": contract(
+            "source_error_heading",
+            choose_visible=True,
+            choose_enabled=True,
+            replace_visible=False,
+            replace_enabled=False,
+            output_visible=False,
+            output_enabled=False,
+            recovery_enabled=False,
+        ),
+        "ready": contract(
+            "preview_action",
+            choose_visible=False,
+            choose_enabled=False,
+            replace_visible=True,
+            replace_enabled=True,
+            output_visible=False,
+            output_enabled=False,
+            recovery_enabled=True,
+        ),
+        "unavailable": contract(
+            "preview_action",
+            choose_visible=False,
+            choose_enabled=False,
+            replace_visible=True,
+            replace_enabled=True,
+            output_visible=False,
+            output_enabled=False,
+            recovery_enabled=True,
+            preview_name="Prepare & Preview",
+        ),
+        "preparing": contract(
+            None,
+            choose_visible=False,
+            choose_enabled=False,
+            replace_visible=True,
+            replace_enabled=False,
+            output_visible=False,
+            output_enabled=False,
+            recovery_enabled=False,
+            preview_name="Prepare & Preview",
+        ),
+        "previewing": contract(
+            None,
+            choose_visible=False,
+            choose_enabled=False,
+            replace_visible=True,
+            replace_enabled=False,
+            output_visible=False,
+            output_enabled=False,
+            recovery_enabled=False,
+        ),
+        "previewing_old": contract(
+            None,
+            choose_visible=False,
+            choose_enabled=False,
+            replace_visible=True,
+            replace_enabled=False,
+            output_visible=False,
+            output_enabled=False,
+            recovery_enabled=False,
+        ),
+        "current": contract(
+            "result_canvas",
+            choose_visible=False,
+            choose_enabled=False,
+            replace_visible=True,
+            replace_enabled=True,
+            output_visible=False,
+            output_enabled=False,
+            recovery_enabled=True,
+        ),
+        "stale": contract(
+            "preview_action",
+            choose_visible=False,
+            choose_enabled=False,
+            replace_visible=True,
+            replace_enabled=True,
+            output_visible=False,
+            output_enabled=False,
+            recovery_enabled=True,
+        ),
+        "failed_repreview_available": contract(
+            "preview_action",
+            choose_visible=False,
+            choose_enabled=False,
+            replace_visible=True,
+            replace_enabled=True,
+            output_visible=False,
+            output_enabled=False,
+            recovery_enabled=True,
+        ),
+        "failed_repreview_unavailable": contract(
+            "preview_action",
+            choose_visible=False,
+            choose_enabled=False,
+            replace_visible=True,
+            replace_enabled=True,
+            output_visible=False,
+            output_enabled=False,
+            recovery_enabled=True,
+            preview_name="Prepare & Preview",
+        ),
+        "first_error": contract(
+            "preview_action",
+            choose_visible=False,
+            choose_enabled=False,
+            replace_visible=True,
+            replace_enabled=True,
+            output_visible=False,
+            output_enabled=False,
+            recovery_enabled=True,
+        ),
+        "preflight": contract(
+            "segmentation_disclosure",
+            choose_visible=False,
+            choose_enabled=False,
+            replace_visible=True,
+            replace_enabled=True,
+            output_visible=False,
+            output_enabled=False,
+            recovery_enabled=True,
+        ),
+        "render": contract(
+            None,
+            choose_visible=False,
+            choose_enabled=False,
+            replace_visible=True,
+            replace_enabled=False,
+            output_visible=False,
+            output_enabled=False,
+            recovery_enabled=False,
+        ),
+        "rebuild_running": contract(
+            None,
+            choose_visible=False,
+            choose_enabled=False,
+            replace_visible=True,
+            replace_enabled=False,
+            output_visible=True,
+            output_enabled=False,
+            recovery_enabled=False,
+            success_description="/tmp/result.webp",
+            artifact_description="/tmp/result.webp",
+        ),
+        "cancelling": contract(
+            None,
+            choose_visible=False,
+            choose_enabled=False,
+            replace_visible=True,
+            replace_enabled=False,
+            output_visible=False,
+            output_enabled=False,
+            recovery_enabled=False,
+        ),
+        "complete_current": contract(
+            "success_banner",
+            choose_visible=False,
+            choose_enabled=False,
+            replace_visible=True,
+            replace_enabled=True,
+            output_visible=True,
+            output_enabled=True,
+            recovery_enabled=True,
+            success_description="/tmp/result.webp",
+            artifact_description="/tmp/result.webp",
+        ),
+        "complete_no_preview": contract(
+            "success_banner",
+            choose_visible=False,
+            choose_enabled=False,
+            replace_visible=True,
+            replace_enabled=True,
+            output_visible=True,
+            output_enabled=True,
+            recovery_enabled=True,
+            success_description="/tmp/result.webp",
+            artifact_description="/tmp/result.webp",
+        ),
+        "edited_cuts": contract(
+            "rebuild_action",
+            choose_visible=False,
+            choose_enabled=False,
+            replace_visible=True,
+            replace_enabled=True,
+            output_visible=True,
+            output_enabled=True,
+            recovery_enabled=True,
+            success_description="/tmp/result.webp",
+            artifact_description="/tmp/result.webp",
+        ),
+        "edited_without_preview": contract(
+            "rebuild_action",
+            choose_visible=False,
+            choose_enabled=False,
+            replace_visible=True,
+            replace_enabled=True,
+            output_visible=True,
+            output_enabled=True,
+            recovery_enabled=True,
+            success_description="/tmp/result.webp",
+            artifact_description="/tmp/result.webp",
+        ),
+        "edited_cut_error": contract(
+            "edited_cut_recovery",
+            choose_visible=False,
+            choose_enabled=False,
+            replace_visible=True,
+            replace_enabled=True,
+            output_visible=True,
+            output_enabled=True,
+            recovery_enabled=True,
+            success_description="/tmp/result.webp",
+            artifact_description="/tmp/result.webp",
+        ),
+    }
+    return [replace(row, **expectations[row.name]) for row in rows]
+
 
 @pytest.mark.parametrize("row", _literal_presentation_rows(), ids=lambda row: row.name)
 def test_complete_literal_presentation_matrix(
-    window, row: LiteralPresentationRow
+    window, qtbot, row: LiteralPresentationRow
 ) -> None:
     value, _ = window
     value.render_state(row.state)
+    qtbot.wait(20)
     workspace_button, workspace_body = value.inspector.disclosures["workspace"]
+    focus_widget = QApplication.focusWidget()
+    assert (focus_widget.objectName() if focus_widget is not None else None) == (
+        row.actual_focus
+    )
     assert value.result_canvas.text() == row.message
     assert value.result_canvas.status_label.text() == row.marker
     assert value.result_canvas.accessibleDescription() == row.description
@@ -1412,5 +1713,24 @@ def test_complete_literal_presentation_matrix(
     assert value.success_container.isVisible() is row.success_visible
     assert value.primary_action_name() == row.primary
     assert value.requested_focus_name() == row.focus
+    assert value.choose_video_button.isVisible() is row.choose_visible
+    assert value.choose_video_button.isEnabled() is row.choose_enabled
+    assert value.replace_video_button.isVisible() is row.replace_visible
+    assert value.replace_video_button.isEnabled() is row.replace_enabled
+    assert value.open_output_button.isVisible() is row.open_output_visible
+    assert value.open_output_button.isEnabled() is row.open_output_enabled
+    assert value.open_folder_button.isVisible() is row.open_folder_visible
+    assert value.open_folder_button.isEnabled() is row.open_folder_enabled
+    assert value.edited_cut_recovery.isEnabled() is row.recovery_enabled
+    assert value.preview_button.accessibleName() == row.preview_name
+    assert value.source_drop_target.accessibleName() == row.drop_name
+    assert value.choose_video_button.accessibleName() == row.choose_name
+    assert value.source_filename.accessibleName() == row.source_name
+    assert value.replace_video_button.accessibleName() == row.replace_name
+    assert value.result_canvas.accessibleName() == row.result_name
+    assert value.success_banner.accessibleDescription() == row.success_description
+    assert value.success_artifact.accessibleDescription() == row.artifact_description
+    assert value.open_output_button.accessibleName() == row.open_output_name
+    assert value.open_folder_button.accessibleName() == row.open_folder_name
     assert value.replace_video_button.isEnabled() is not row.editor_locked
     assert value.inspector.isEnabled() is row.inspector_enabled
