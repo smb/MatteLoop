@@ -2822,6 +2822,127 @@ class AdvisoryFileLock:
         raise failure from failures[0]
 
 
+class LockedSlotFile:
+    """One exact fixed-slot inode locked until its owning artifact closes."""
+
+    __slots__ = (
+        "_adapter",
+        "_descriptor",
+        "_directory",
+        "_identity",
+        "_local_key",
+        "_local_lock",
+        "_locked",
+        "name",
+    )
+
+    def __init__(
+        self,
+        directory: RecoveryDirectory,
+        name: str,
+        descriptor: int,
+        identity: tuple[int, int],
+        adapter: _SystemAdvisoryFileLock,
+        local_key: str,
+        local_lock: Lock,
+        *,
+        locked: bool = True,
+    ) -> None:
+        self._directory = directory
+        self.name = name
+        self._descriptor: int | None = descriptor
+        self._identity = identity
+        self._adapter = adapter
+        self._local_key = local_key
+        self._local_lock: Lock | None = local_lock
+        self._locked = locked
+
+    @property
+    def descriptor(self) -> int:
+        descriptor = self._descriptor
+        if descriptor is None:
+            raise _unsafe_error("output private slot is closed")
+        return descriptor
+
+    @property
+    def identity(self) -> tuple[int, int]:
+        return self._identity
+
+    def assert_owned(self) -> None:
+        if not self._locked or self._local_lock is None:
+            raise _unsafe_error("output private slot lock is no longer owned")
+        descriptor = self.descriptor
+        self._directory.assert_handle_owned()
+        opened = os.fstat(descriptor)
+        current = self._directory.lstat(self.name)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or _directory_identity(opened) != self._identity
+            or _directory_identity(current) != self._identity
+        ):
+            raise _unsafe_error("output private slot ownership changed")
+
+    def reset_for_write(self, source_descriptor: int) -> None:
+        """Truncate only this locked, singly-linked inode, never its source."""
+        self.assert_owned()
+        descriptor = self.descriptor
+        opened = os.fstat(descriptor)
+        source = os.fstat(source_descriptor)
+        if _directory_identity(source) == self._identity:
+            raise _unsafe_error("output private slot aliases its write source")
+        if opened.st_nlink != 1:
+            raise _unsafe_error("hard-linked output private slot cannot be recycled")
+        os.ftruncate(descriptor, 0)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        self.assert_owned()
+
+    def rename_to(self, name: str) -> None:
+        _validate_component(name)
+        current = self._directory.lstat(name)
+        if _directory_identity(current) != self._identity:
+            raise _unsafe_error("renamed output private slot identity changed")
+        self.name = name
+        self.assert_owned()
+
+    def close(self, primary: BaseException | None = None) -> None:
+        descriptor = self._descriptor
+        if descriptor is None:
+            return
+        failures: list[BaseException] = []
+        if self._locked:
+            try:
+                self._adapter.release(descriptor)
+            except BaseException as error:
+                failures.append(error)
+            else:
+                self._locked = False
+        try:
+            os.close(descriptor)
+        except BaseException as error:
+            failures.append(error)
+        else:
+            self._descriptor = None
+            self._locked = False
+        if not self._locked or self._descriptor is None:
+            local_lock = self._local_lock
+            if local_lock is not None:
+                _release_local_advisory_lock(self._local_key, local_lock)
+                self._local_lock = None
+        if not failures:
+            return
+        detail = "; ".join(str(error) for error in failures)
+        if primary is not None:
+            primary.add_note(f"additional output-slot cleanup failure: {detail}")
+            if self._descriptor is not None:
+                _attach_close_owner(primary, self)
+            return
+        failure = _unsafe_error(f"cannot close output private slot: {detail}")
+        if self._descriptor is not None:
+            _attach_close_owner(failure, self)
+        raise failure from failures[0]
+
+
 class RecoveryDirectory:
     """A private child resolved from one already-bound publication parent.
 
@@ -2984,39 +3105,110 @@ class RecoveryDirectory:
     def open_read_write(self, name: str) -> int:
         return self._directory.open_publication_read_write(name)
 
+    def open_locked_slot(
+        self,
+        name: str,
+        owner: AdvisoryFileLock,
+        *,
+        create_if_missing: bool = True,
+    ) -> LockedSlotFile:
+        """Open and lock one exact fixed-slot inode before any mutation."""
+        _validate_component(name)
+        if not isinstance(owner, AdvisoryFileLock) or not owner.anchored:
+            raise _unsafe_error("output private slot requires an anchored owner")
+        owner.assert_owned()
+        descriptor: int | None = None
+        held: LockedSlotFile | None = None
+        local_lock: Lock | None = None
+        local_key = ""
+        try:
+            if create_if_missing:
+                try:
+                    descriptor = self._directory.open_new_publication_fd(name)
+                except FileExistsError:
+                    descriptor = None
+            if descriptor is None:
+                before = self._directory.publication_lstat(name)
+                if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+                    raise _unsafe_error("output private slot is redirected")
+                descriptor = self._directory.open_publication_read_write(name)
+                opened = os.fstat(descriptor)
+                after = self._directory.publication_lstat(name)
+                if not (
+                    _directory_identity(before)
+                    == _directory_identity(opened)
+                    == _directory_identity(after)
+                ):
+                    raise _unsafe_error("output private slot changed while opened")
+            identity = _directory_identity(os.fstat(descriptor))
+            local_key = f"output-slot:{identity[0]}:{identity[1]}"
+            local_lock = _acquire_local_advisory_lock(local_key)
+            if local_lock is None:
+                raise BlockingIOError(
+                    errno.EWOULDBLOCK,
+                    "output private slot is already active",
+                )
+            adapter = _SystemAdvisoryFileLock()
+            if not adapter.acquire_nonblocking(descriptor):
+                held = LockedSlotFile(
+                    self,
+                    name,
+                    descriptor,
+                    identity,
+                    adapter,
+                    local_key,
+                    local_lock,
+                    locked=False,
+                )
+                descriptor = None
+                local_lock = None
+                raise BlockingIOError(
+                    errno.EWOULDBLOCK,
+                    "output private slot is already active",
+                )
+            held = LockedSlotFile(
+                self,
+                name,
+                descriptor,
+                identity,
+                adapter,
+                local_key,
+                local_lock,
+            )
+            descriptor = None
+            local_lock = None
+            held.assert_owned()
+            owner.assert_owned()
+            return held
+        except BaseException as error:
+            if held is not None:
+                held.close(error)
+            elif descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except BaseException as close_error:
+                    error.add_note(
+                        f"additional output-slot handle cleanup failure: {close_error}"
+                    )
+            if local_lock is not None:
+                _release_local_advisory_lock(local_key, local_lock)
+            raise
+
     def open_fixed_pending(
         self,
         name: str,
         owner: AdvisoryFileLock | None = None,
     ) -> int:
-        """Open a bounded pending inode without ever unlinking an unknown entry."""
+        """Create a new bounded pending inode; existing slots require a lock."""
         if owner is not None:
             owner.assert_owned()
         try:
             descriptor = self._directory.open_new_publication_fd(name)
         except FileExistsError:
-            if owner is None or not owner.anchored:
-                raise _unsafe_error(
-                    "existing output private pending entry has no transaction owner"
-                )
-            info = self._directory.publication_lstat(name)
-            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-                raise _unsafe_error("output private pending entry is redirected")
-            descriptor = self._directory.open_publication_read_write(name)
-            opened = os.fstat(descriptor)
-            current = self._directory.publication_lstat(name)
-            if not (
-                _directory_identity(info)
-                == _directory_identity(opened)
-                == _directory_identity(current)
-            ):
-                os.close(descriptor)
-                raise _unsafe_error("output private pending entry changed while opened")
-            owner.assert_owned()
-            # Recycle only the exact held stale inode. If its name is swapped now,
-            # the foreign replacement is untouched and later identity checks fail.
-            os.ftruncate(descriptor, 0)
-            os.lseek(descriptor, 0, os.SEEK_SET)
+            raise _unsafe_error(
+                "existing output private pending entry has no transaction owner "
+                "or inode lock"
+            )
         if owner is not None:
             try:
                 owner.assert_owned()
@@ -3295,29 +3487,80 @@ class RecoveryDirectory:
         self,
         source: str,
         destination: str,
-        source_descriptor: int,
+        source_slot: LockedSlotFile,
         owner: AdvisoryFileLock,
+        *,
+        source_alias: bool = False,
     ) -> None:
-        """Replace a fixed slot only while its exact source inode is still held."""
+        """Rename a locked source only after locking an existing destination."""
         _validate_component(source)
         _validate_component(destination)
+        if source_slot._directory is not self or (
+            not source_alias and source_slot.name != source
+        ):
+            raise _unsafe_error("output private source slot does not match rename")
         owner.assert_owned()
         self.assert_handle_owned()
-        expected = _directory_identity(os.fstat(source_descriptor))
-        before = self.lstat(source)
-        if not stat.S_ISREG(before.st_mode) or _directory_identity(before) != expected:
-            raise _unsafe_error("owned output private source changed before replace")
-        owner.assert_owned()
-        current = self.lstat(source)
-        if _directory_identity(current) != expected:
-            raise _unsafe_error("owned output private source changed during replace")
-        self._directory.replace_publication(source, destination)
-        owner.assert_owned()
-        installed = self.lstat(destination)
-        if _directory_identity(installed) != expected:
-            raise _unsafe_error(
-                "owned output private destination changed after replace"
-            )
+        source_slot.assert_owned()
+        source_info = self.lstat(source)
+        if _directory_identity(source_info) != source_slot.identity:
+            raise _unsafe_error("output private source alias is not locked")
+        destination_slot: LockedSlotFile | None = None
+        primary: BaseException | None = None
+        try:
+            try:
+                destination_info = self.lstat(destination)
+            except FileNotFoundError:
+                destination_info = None
+            if (
+                destination_info is not None
+                and _directory_identity(destination_info) == source_slot.identity
+            ):
+                current_source = self.lstat(source)
+                if _directory_identity(current_source) != source_slot.identity:
+                    raise _unsafe_error("locked output private alias changed")
+                # Both fixed names already identify the held inode.  There is
+                # no portable unlink-if-identity operation: a pathname check
+                # followed by unlink could delete a replacement entry.  Keep
+                # the bounded alias and its inode lock instead of mutating it.
+                source_slot.assert_owned()
+                owner.assert_owned()
+                return
+            try:
+                destination_slot = self.open_locked_slot(
+                    destination,
+                    owner,
+                    create_if_missing=False,
+                )
+            except FileNotFoundError:
+                destination_slot = None
+            source_slot.assert_owned()
+            owner.assert_owned()
+            if destination_slot is None:
+                _rename_bound_publication(
+                    self._directory,
+                    source,
+                    self._directory,
+                    destination,
+                    replace=False,
+                )
+            else:
+                destination_slot.assert_owned()
+                self._directory.replace_publication(source, destination)
+            if source_alias:
+                source_slot.assert_owned()
+                installed = self.lstat(destination)
+                if _directory_identity(installed) != source_slot.identity:
+                    raise _unsafe_error("locked output private alias was not installed")
+            else:
+                source_slot.rename_to(destination)
+            owner.assert_owned()
+        except BaseException as error:
+            primary = error
+            raise
+        finally:
+            if destination_slot is not None:
+                destination_slot.close(primary)
 
     def fsync(self) -> None:
         self._directory.fsync()

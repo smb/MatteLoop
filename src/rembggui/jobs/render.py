@@ -79,6 +79,7 @@ from rembggui.jobs.workspace import (
     CutManifest,
     CutUnionMetadata,
     CutWorkspace,
+    LockedSlotFile,
     PublicationDirectory,
     RecoveryDirectory,
     cleanup_scratch,
@@ -1638,10 +1639,14 @@ class _HeldPreviousOutput:
 class _HeldPublicationFile:
     directory: RecoveryDirectory = field(repr=False, compare=False)
     name: str
-    descriptor: int = field(repr=False, compare=False)
+    slot: LockedSlotFile = field(repr=False, compare=False)
     identity: CandidateFileIdentity
     sha256: str
     owns_directory: bool = field(default=True, repr=False, compare=False)
+
+    @property
+    def descriptor(self) -> int:
+        return self.slot.descriptor
 
     @property
     def path(self) -> Path:
@@ -1653,9 +1658,14 @@ class _HeldRecoveryFile:
     directory: RecoveryDirectory = field(repr=False, compare=False)
     name: str
     shadow_name: str
-    descriptor: int = field(repr=False, compare=False)
+    slot: LockedSlotFile = field(repr=False, compare=False)
+    shadow_slot: LockedSlotFile | None = field(repr=False, compare=False)
     identity: CandidateFileIdentity
     sha256: str
+
+    @property
+    def descriptor(self) -> int:
+        return self.slot.descriptor
 
     @property
     def path(self) -> Path:
@@ -1926,10 +1936,10 @@ def _prepare_publication_stage(
         raise _output_error("output transaction does not match its destination")
     publication_name = f"{target_key}.publish"
     pending_name = f".{target_key}.publish-pending"
-    descriptor: int | None = None
+    slot: LockedSlotFile | None = None
     identity: CandidateFileIdentity | None = None
     try:
-        descriptor, identity = _stage_bound_recovery_copy(
+        slot, identity = _stage_bound_recovery_copy(
             publication_directory,
             pending_name,
             candidate._descriptor,
@@ -1941,13 +1951,13 @@ def _prepare_publication_stage(
         publication_directory.replace_owned(
             pending_name,
             publication_name,
-            descriptor,
+            slot,
             transaction.lock,
         )
         if not _descriptor_bound_entry_matches(
             publication_directory,
             publication_name,
-            descriptor,
+            slot.descriptor,
             identity,
             candidate.sha256,
         ):
@@ -1956,7 +1966,7 @@ def _prepare_publication_stage(
         if not _descriptor_bound_entry_matches(
             publication_directory,
             publication_name,
-            descriptor,
+            slot.descriptor,
             identity,
             candidate.sha256,
         ):
@@ -1966,22 +1976,16 @@ def _prepare_publication_stage(
         staged = _HeldPublicationFile(
             publication_directory,
             publication_name,
-            descriptor,
+            slot,
             identity,
             candidate.sha256,
             owns_directory=False,
         )
-        descriptor = None
+        slot = None
         return staged
     except BaseException as error:
-        if descriptor is not None:
-            try:
-                os.close(descriptor)
-            except OSError as close_error:
-                error.add_note(
-                    "additional publication-stage handle cleanup failure: "
-                    f"{close_error}"
-                )
+        if slot is not None:
+            slot.close(error)
         raise
 
 
@@ -2037,43 +2041,57 @@ def _prepare_durable_recovery(
         _RECOVERY_DIRECTORY_NAME,
         "recovery",
     )
-    existing_descriptor: int | None = None
-    descriptor: int | None = None
+    existing_slot: LockedSlotFile | None = None
+    slot: LockedSlotFile | None = None
     identity: CandidateFileIdentity | None = None
     try:
         try:
-            existing_descriptor = recovery_directory.open_read_write(recovery_name)
+            existing_slot = recovery_directory.open_locked_slot(
+                recovery_name,
+                transaction.lock,
+                create_if_missing=False,
+            )
         except FileNotFoundError:
             pass
         else:
             if _descriptor_bound_entry_matches(
                 recovery_directory,
                 recovery_name,
-                existing_descriptor,
+                existing_slot.descriptor,
                 previous.identity,
                 previous.sha256,
             ):
-                os.fsync(existing_descriptor)
+                os.fsync(existing_slot.descriptor)
                 _require_existing_output_current(
                     publication,
                     destination_name,
                     previous,
                 )
                 _fsync_directory(recovery_directory)
+                provisional = _HeldRecoveryFile(
+                    recovery_directory,
+                    recovery_name,
+                    shadow_name,
+                    existing_slot,
+                    None,
+                    previous.identity,
+                    previous.sha256,
+                )
+                shadow_slot = _prepare_recovery_shadow(provisional, transaction)
                 recovery = _HeldRecoveryFile(
                     recovery_directory,
                     recovery_name,
                     shadow_name,
-                    existing_descriptor,
+                    existing_slot,
+                    shadow_slot,
                     previous.identity,
                     previous.sha256,
                 )
-                _prepare_recovery_shadow(recovery, transaction)
                 recovery_directory.assert_still_bound()
-                existing_descriptor = None
+                existing_slot = None
                 return recovery
-            os.close(existing_descriptor)
-            existing_descriptor = None
+            existing_slot.close()
+            existing_slot = None
 
         try:
             linked = recovery_directory.link_parent_file(
@@ -2084,12 +2102,16 @@ def _prepare_durable_recovery(
         except OSError:
             linked = False
         if linked:
-            descriptor = recovery_directory.open_read_write(pending_name)
-            identity = _candidate_identity(os.fstat(descriptor))
+            slot = recovery_directory.open_locked_slot(
+                pending_name,
+                transaction.lock,
+                create_if_missing=False,
+            )
+            identity = _candidate_identity(os.fstat(slot.descriptor))
             if not _descriptor_bound_entry_matches(
                 recovery_directory,
                 pending_name,
-                descriptor,
+                slot.descriptor,
                 previous.identity,
                 previous.sha256,
             ):
@@ -2098,41 +2120,44 @@ def _prepare_durable_recovery(
                 )
         else:
             try:
-                existing_pending = recovery_directory.open_read_write(pending_name)
+                slot = recovery_directory.open_locked_slot(
+                    pending_name,
+                    transaction.lock,
+                    create_if_missing=False,
+                )
             except FileNotFoundError:
-                existing_pending = None
-            if existing_pending is not None and _descriptor_bound_entry_matches(
+                slot = None
+            if slot is not None and _descriptor_bound_entry_matches(
                 recovery_directory,
                 pending_name,
-                existing_pending,
+                slot.descriptor,
                 previous.identity,
                 previous.sha256,
             ):
-                descriptor = existing_pending
                 identity = previous.identity
             else:
-                if existing_pending is not None:
-                    same_source_inode = (
-                        _candidate_identity(os.fstat(existing_pending)).device,
-                        _candidate_identity(os.fstat(existing_pending)).inode,
-                    ) == (
-                        previous.identity.device,
-                        previous.identity.inode,
+                if slot is not None:
+                    identity = _fill_locked_slot(
+                        recovery_directory,
+                        pending_name,
+                        slot,
+                        previous.descriptor,
+                        previous.identity.size,
+                        previous.sha256,
+                        transaction,
                     )
-                    os.close(existing_pending)
-                    if same_source_inode:
-                        raise _output_error(
-                            "stale recovery pending aliases the held previous output"
-                        )
-                descriptor, identity = _stage_bound_recovery_copy(
-                    recovery_directory,
-                    pending_name,
-                    previous.descriptor,
-                    previous.identity.size,
-                    previous.sha256,
-                    transaction,
-                )
-        os.fsync(descriptor)
+                else:
+                    slot, identity = _stage_bound_recovery_copy(
+                        recovery_directory,
+                        pending_name,
+                        previous.descriptor,
+                        previous.identity.size,
+                        previous.sha256,
+                        transaction,
+                    )
+        if slot is None or identity is None:
+            raise RuntimeError("durable recovery slot was not prepared")
+        os.fsync(slot.descriptor)
         recovery_directory.assert_still_bound()
         _require_existing_output_current(
             publication,
@@ -2143,13 +2168,13 @@ def _prepare_durable_recovery(
         recovery_directory.replace_owned(
             pending_name,
             recovery_name,
-            descriptor,
+            slot,
             transaction.lock,
         )
         if not _descriptor_bound_entry_matches(
             recovery_directory,
             recovery_name,
-            descriptor,
+            slot.descriptor,
             identity,
             previous.sha256,
         ):
@@ -2158,33 +2183,38 @@ def _prepare_durable_recovery(
         if not _descriptor_bound_entry_matches(
             recovery_directory,
             recovery_name,
-            descriptor,
+            slot.descriptor,
             identity,
             previous.sha256,
         ):
             raise _output_error("durable output recovery changed after directory sync")
+        provisional = _HeldRecoveryFile(
+            recovery_directory,
+            recovery_name,
+            shadow_name,
+            slot,
+            None,
+            identity,
+            previous.sha256,
+        )
+        shadow_slot = _prepare_recovery_shadow(provisional, transaction)
         recovery = _HeldRecoveryFile(
             recovery_directory,
             recovery_name,
             shadow_name,
-            descriptor,
+            slot,
+            shadow_slot,
             identity,
             previous.sha256,
         )
-        _prepare_recovery_shadow(recovery, transaction)
         recovery_directory.assert_still_bound()
-        descriptor = None
+        slot = None
         return recovery
     except BaseException as error:
-        for held_descriptor in (existing_descriptor, descriptor):
-            if held_descriptor is None:
+        for held_slot in (existing_slot, slot):
+            if held_slot is None:
                 continue
-            try:
-                os.close(held_descriptor)
-            except OSError as close_error:
-                error.add_note(
-                    f"additional recovery-handle cleanup failure: {close_error}"
-                )
+            held_slot.close(error)
         try:
             recovery_directory.close(error)
         except BaseException as close_error:
@@ -2197,41 +2227,57 @@ def _prepare_durable_recovery(
 def _prepare_recovery_shadow(
     recovery: _HeldRecoveryFile,
     transaction: _HeldOutputTransaction,
-) -> Path:
+) -> LockedSlotFile | None:
     """Keep a second bounded durable name for recovery-path interference."""
     transaction.assert_owned()
     recovery_directory = recovery.directory
-    if _held_bound_entry_matches(
-        recovery_directory,
-        recovery.shadow_name,
-        recovery.identity,
-        recovery.sha256,
-    ):
-        existing_shadow_descriptor = recovery_directory.open_read_write(
-            recovery.shadow_name
-        )
-        existing_primary: BaseException | None = None
+    existing_shadow: LockedSlotFile | None = None
+    try:
         try:
-            os.fsync(existing_shadow_descriptor)
-        except BaseException as error:
-            existing_primary = error
-            raise
-        finally:
-            try:
-                os.close(existing_shadow_descriptor)
-            except OSError as error:
-                if existing_primary is not None:
-                    existing_primary.add_note(
-                        f"additional recovery-shadow cleanup failure: {error}"
-                    )
-                else:
-                    raise
-        return recovery.shadow_path
+            shadow_info = recovery_directory.lstat(recovery.shadow_name)
+        except FileNotFoundError:
+            shadow_info = None
+        if (
+            shadow_info is not None
+            and (shadow_info.st_dev, shadow_info.st_ino) == recovery.slot.identity
+            and _descriptor_bound_entry_matches(
+                recovery_directory,
+                recovery.shadow_name,
+                recovery.descriptor,
+                recovery.identity,
+                recovery.sha256,
+            )
+        ):
+            os.fsync(recovery.descriptor)
+            return None
+        if shadow_info is not None:
+            existing_shadow = recovery_directory.open_locked_slot(
+                recovery.shadow_name,
+                transaction.lock,
+                create_if_missing=False,
+            )
+            if _descriptor_bound_entry_matches(
+                recovery_directory,
+                recovery.shadow_name,
+                existing_shadow.descriptor,
+                recovery.identity,
+                recovery.sha256,
+            ):
+                os.fsync(existing_shadow.descriptor)
+                held = existing_shadow
+                existing_shadow = None
+                return held
+            existing_shadow.close()
+            existing_shadow = None
+    except BaseException as error:
+        if existing_shadow is not None:
+            existing_shadow.close(error)
+        raise
 
     pending_name = f".{recovery.name.removesuffix('.recovery')}.recovery-shadow-pending"
-    descriptor: int | None = None
+    slot: LockedSlotFile | None = None
+    source_alias = False
     identity: CandidateFileIdentity | None = None
-    primary: BaseException | None = None
     try:
         try:
             linked = recovery_directory.link_file(
@@ -2242,38 +2288,61 @@ def _prepare_recovery_shadow(
         except OSError:
             linked = False
         if linked:
-            descriptor = recovery_directory.open_read_write(pending_name)
-            identity = _candidate_identity(os.fstat(descriptor))
+            source_alias = True
+            identity = recovery.identity
             if not _descriptor_bound_entry_matches(
                 recovery_directory,
                 pending_name,
-                descriptor,
+                recovery.descriptor,
                 recovery.identity,
                 recovery.sha256,
             ):
                 raise _output_error("recovery shadow changed while hard-linked")
         else:
-            descriptor, identity = _stage_bound_recovery_copy(
-                recovery_directory,
-                pending_name,
-                recovery.descriptor,
-                recovery.identity.size,
-                recovery.sha256,
-                transaction,
-            )
-        os.fsync(descriptor)
+            try:
+                pending_info = recovery_directory.lstat(pending_name)
+            except FileNotFoundError:
+                pending_info = None
+            if (
+                pending_info is not None
+                and (pending_info.st_dev, pending_info.st_ino) == recovery.slot.identity
+            ):
+                source_alias = True
+                identity = recovery.identity
+                if not _descriptor_bound_entry_matches(
+                    recovery_directory,
+                    pending_name,
+                    recovery.descriptor,
+                    recovery.identity,
+                    recovery.sha256,
+                ):
+                    raise _output_error("recovery shadow alias changed")
+            else:
+                slot, identity = _stage_bound_recovery_copy(
+                    recovery_directory,
+                    pending_name,
+                    recovery.descriptor,
+                    recovery.identity.size,
+                    recovery.sha256,
+                    transaction,
+                )
+        source_slot = recovery.slot if source_alias else slot
+        if source_slot is None or identity is None:
+            raise RuntimeError("recovery shadow slot was not prepared")
+        os.fsync(source_slot.descriptor)
         recovery_directory.assert_still_bound()
         _fsync_directory(recovery_directory)
         recovery_directory.replace_owned(
             pending_name,
             recovery.shadow_name,
-            descriptor,
+            source_slot,
             transaction.lock,
+            source_alias=source_alias,
         )
         if not _descriptor_bound_entry_matches(
             recovery_directory,
             recovery.shadow_name,
-            descriptor,
+            source_slot.descriptor,
             identity,
             recovery.sha256,
         ):
@@ -2282,30 +2351,49 @@ def _prepare_recovery_shadow(
         if not _descriptor_bound_entry_matches(
             recovery_directory,
             recovery.shadow_name,
-            descriptor,
+            source_slot.descriptor,
             identity,
             recovery.sha256,
         ):
             raise _output_error("durable recovery shadow changed after directory sync")
         recovery_directory.assert_still_bound()
-        return recovery.shadow_path
+        if source_alias:
+            return None
+        if slot is None:
+            raise RuntimeError("distinct recovery shadow lost its slot lock")
+        held_slot = slot
+        slot = None
+        return held_slot
     except BaseException as error:
-        primary = error
+        if slot is not None:
+            slot.close(error)
         raise
-    finally:
-        if descriptor is not None:
-            try:
-                os.close(descriptor)
-            except OSError as error:
-                if primary is not None:
-                    primary.add_note(
-                        f"additional recovery-shadow cleanup failure: {error}"
-                    )
-                else:
-                    raise _map_output_os_error(
-                        error,
-                        "cannot close durable recovery-shadow handle",
-                    ) from error
+
+
+def _fill_locked_slot(
+    directory: RecoveryDirectory,
+    name: str,
+    slot: LockedSlotFile,
+    source: int,
+    expected_size: int,
+    expected_sha256: str,
+    transaction: _HeldOutputTransaction,
+) -> CandidateFileIdentity:
+    slot.reset_for_write(source)
+    _copy_descriptor(source, slot.descriptor)
+    os.fsync(slot.descriptor)
+    identity = _candidate_identity(os.fstat(slot.descriptor))
+    if identity.size != expected_size or not _descriptor_bound_entry_matches(
+        directory,
+        name,
+        slot.descriptor,
+        identity,
+        expected_sha256,
+    ):
+        raise _output_error("bound recovery copy changed while written")
+    transaction.assert_owned()
+    slot.assert_owned()
+    return identity
 
 
 def _stage_bound_recovery_copy(
@@ -2315,28 +2403,22 @@ def _stage_bound_recovery_copy(
     expected_size: int,
     expected_sha256: str,
     transaction: _HeldOutputTransaction,
-) -> tuple[int, CandidateFileIdentity]:
+) -> tuple[LockedSlotFile, CandidateFileIdentity]:
     transaction.assert_owned()
-    descriptor = directory.open_fixed_pending(name, transaction.lock)
+    slot = directory.open_locked_slot(name, transaction.lock)
     try:
-        _copy_descriptor(source, descriptor)
-        os.fsync(descriptor)
-        identity = _candidate_identity(os.fstat(descriptor))
-        if identity.size != expected_size or not _descriptor_bound_entry_matches(
+        identity = _fill_locked_slot(
             directory,
             name,
-            descriptor,
-            identity,
+            slot,
+            source,
+            expected_size,
             expected_sha256,
-        ):
-            raise _output_error("bound recovery copy changed while written")
-        transaction.assert_owned()
-        return descriptor, identity
+            transaction,
+        )
+        return slot, identity
     except BaseException as error:
-        try:
-            os.close(descriptor)
-        except OSError as close_error:
-            error.add_note(f"additional bound-recovery cleanup failure: {close_error}")
+        slot.close(error)
         raise
 
 
@@ -2434,7 +2516,7 @@ def _rollback_publication(
         restored = False
         try:
             restore_name = f".{target_key}.restore-{attempt}"
-            descriptor, identity = _stage_bound_recovery_copy(
+            restore_slot, identity = _stage_bound_recovery_copy(
                 recovery.directory,
                 restore_name,
                 recovery.descriptor,
@@ -2445,7 +2527,7 @@ def _rollback_publication(
             staged = _HeldPublicationFile(
                 recovery.directory,
                 restore_name,
-                descriptor,
+                restore_slot,
                 identity,
                 recovery.sha256,
                 owns_directory=False,
@@ -2583,10 +2665,6 @@ def _close_staged_file(
 ) -> None:
     failures: list[str] = []
     try:
-        os.close(staged.descriptor)
-    except OSError as error:
-        failures.append(f"staged-publication handle cleanup failed: {error}")
-    try:
         if _held_bound_entry_matches(
             staged.directory,
             staged.name,
@@ -2596,6 +2674,12 @@ def _close_staged_file(
             failures.append(f"verified private staged file retained at {staged.path}")
     except BaseException as error:
         failures.append(f"private staged-file inspection failed: {error}")
+    try:
+        staged.slot.close(primary)
+    except BaseException as error:
+        if cleanup_errors is not None:
+            cleanup_errors.append(error)
+        failures.append(f"staged-publication slot cleanup failed: {error}")
     if staged.owns_directory:
         try:
             staged.directory.close(primary)
@@ -2619,10 +2703,20 @@ def _close_recovery_file(
     cleanup_errors: list[BaseException] | None = None,
 ) -> None:
     failures: list[str] = []
-    try:
-        os.close(recovery.descriptor)
-    except OSError as error:
-        failures.append(f"additional recovery-output handle cleanup failure: {error}")
+    for label, slot in (
+        ("shadow", recovery.shadow_slot),
+        ("primary", recovery.slot),
+    ):
+        if slot is None:
+            continue
+        try:
+            slot.close(primary)
+        except BaseException as error:
+            if cleanup_errors is not None:
+                cleanup_errors.append(error)
+            failures.append(
+                f"additional recovery-{label} slot cleanup failure: {error}"
+            )
     try:
         recovery.directory.close(primary)
     except BaseException as error:

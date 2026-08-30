@@ -361,6 +361,47 @@ outer parent name is exchanged, rollback can restore the original bound parent
 without touching the foreign replacement; the lexical binding check still makes
 the overall publication fail rather than falsely reporting success.
 
+A final fixed-slot review then replaced the parent anchor itself while the first
+publisher was paused with a live stage. Because the first process retained its
+old anchor descriptor, a second process could create a new, internally
+consistent anchor and transaction lock for the same target. Before the fix,
+both REPLACE and native no-clobber contenders entered the fixed publication slot
+and overwrote the first process's live inode. Equivalent REDs covered a live
+recovery-shadow pending and rollback-restore pending. An anchor-payload rewrite
+was added separately to distinguish same-inode content interference from a
+name/inode replacement.
+
+The authoritative ownership boundary now includes every fixed private file
+inode. `LockedSlotFile` retains the exact regular-file descriptor, its
+device/inode identity, a nonblocking OS advisory lock, and an in-process inode
+guard. An existing publication, recovery, shadow, or restore pending/final slot
+is opened no-follow, bracketed by descriptor/entry identity checks, and locked
+before it can be inspected for reuse, truncated, copied, or used as a replace
+source/destination. The lock transfers with the inode across pending-to-final
+renames and remains held until the publication/recovery holder cleanup closes.
+Thus replacing the coordinator anchor and lock no longer grants a contender the
+right to mutate the first process's live fixed slot: it receives structured
+`INVALID_OUTPUT` / `output` / `retry-output` contention instead.
+
+New fixed files are claimed with exclusive creation (or an atomic hard link)
+and are never written before their inode lock is acquired. Stale slots are
+reusable only after process death releases their kernel lock. A slot that aliases
+its copy source, or any multiply linked stale copy target, is never truncated.
+If source and destination fixed names already identify the same locked inode,
+the bounded alias is retained: there is no portable unlink-if-inode operation,
+so the implementation deliberately avoids a pathname check followed by blind
+unlink. Close failures retain the exact slot owner for retry through the same
+bounded cleanup-owner mechanism as the surrounding directory handles.
+
+The POSIX fork suite now covers coordinator replacement for REPLACE,
+no-clobber, recovery shadow, and rollback restore, plus anchor-payload rewrite,
+crash-released slot reuse, hard-link no-truncate, and same-inode no-unlink.
+Windows uses the same publication-shared read/write descriptor and the existing
+CRT one-byte nonblocking adapter; Microsoft's `_locking` contract explicitly
+permits locking past end of file, so an empty exclusively-created slot needs no
+sentinel write before ownership is established:
+<https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/locking>.
+
 ## Architecture and safety decisions
 
 - `cut_cache_key_inputs()` is the only authoritative cut-input mapping. The
@@ -401,17 +442,18 @@ the overall publication fail rather than falsely reporting success.
 
 ## Verification
 
-- `.venv/bin/pytest -q` — **989 passed in 50.59s** outside the restricted
-  shared-memory sandbox. The nine warnings are Python 3.13's macOS warning for
+- `.venv/bin/pytest -q --tb=short` — **997 passed in 50.89s** outside the
+  restricted shared-memory sandbox. The 13 warnings are Python 3.13's macOS warning for
   the deliberately forked cross-process lock repros in an already
   multi-threaded pytest process; no test failed or hung.
-- Focused WebP, render, Rebuild, workspace, and native Windows cache-filesystem
-  contract gate — **332 passed in 37.82s**, including canonical alias
-  serialization, lock/private-directory replacement, fixed-slot ownership,
-  crash-released stale-lock reuse, parent-namespace swaps, durable sync ordering,
+- Focused native cache-filesystem, workspace, and render gate — **237 passed in
+  5.11s**. The slower WebP and Rebuild gate is separately **81 passed in
+  33.03s**. Together they include canonical alias serialization,
+  lock/private-directory/anchor replacement, fixed-slot inode ownership,
+  crash-released stale-slot reuse, parent-namespace swaps, durable sync ordering,
   retry-owner retention, and bidirectional Windows-sharing fakes.
 - `ruff check .` — passed.
-- `ruff format --check` over all 7 changed Python files — passed.
+- `ruff format --check` over all 4 changed Python files — passed.
 - `mypy src` — passed for 29 source files.
 - `git diff --check` — passed.
 

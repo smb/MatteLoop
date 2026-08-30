@@ -757,21 +757,25 @@ def test_output_lock_anchor_is_parent_bound_and_stale_pending_reuses_exact_inode
     os.write(first, b"stale")
     first_identity = os.fstat(first).st_dev, os.fstat(first).st_ino
     os.close(first)
+    source = os.open(tmp_path / "source.bin", os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
     try:
         anchors = tuple(tmp_path.glob(".*.transaction-anchor"))
         assert len(anchors) == 1
         assert anchors[0].parent == tmp_path
         assert not tuple(private.path.glob(".*.transaction-anchor"))
 
-        recycled = private.open_fixed_pending(pending_name, lock)
+        recycled = private.open_locked_slot(pending_name, lock)
         try:
-            assert (os.fstat(recycled).st_dev, os.fstat(recycled).st_ino) == (
-                first_identity
-            )
-            assert os.fstat(recycled).st_size == 0
+            recycled.reset_for_write(source)
+            assert (
+                os.fstat(recycled.descriptor).st_dev,
+                os.fstat(recycled.descriptor).st_ino,
+            ) == (first_identity)
+            assert os.fstat(recycled.descriptor).st_size == 0
         finally:
-            os.close(recycled)
+            recycled.close()
     finally:
+        os.close(source)
         lock.close()
         private.close()
         publication.close()
@@ -811,6 +815,118 @@ def test_parent_anchored_output_lock_is_reusable_after_process_death(
     reused.close()
     private.close()
     publication.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses fork to simulate slot-owner death")
+def test_fixed_output_slot_is_reusable_after_process_death(tmp_path: Path) -> None:
+    context = multiprocessing.get_context("fork")
+    ready = context.Event()
+
+    def acquire_slot_then_die() -> None:
+        publication = workspace_module.PublicationDirectory.open(tmp_path)
+        private = publication.open_private_directory(
+            ".rembggui-publish",
+            "publication",
+        )
+        key = publication.target_key(tmp_path / "output.webp")
+        lock = publication.acquire_output_lock(private, key)
+        slot = private.open_locked_slot(f".{key}.publish-pending", lock)
+        os.write(slot.descriptor, b"crash-stale")
+        ready.set()
+        os._exit(0)
+
+    process = context.Process(target=acquire_slot_then_die)
+    process.start()
+    assert ready.wait(5)
+    process.join(5)
+    assert process.exitcode == 0
+
+    publication = workspace_module.PublicationDirectory.open(tmp_path)
+    private = publication.open_private_directory(
+        ".rembggui-publish",
+        "publication",
+    )
+    key = publication.target_key(tmp_path / "output.webp")
+    lock = publication.acquire_output_lock(private, key)
+    slot = private.open_locked_slot(f".{key}.publish-pending", lock)
+    try:
+        assert os.pread(slot.descriptor, len(b"crash-stale"), 0) == b"crash-stale"
+    finally:
+        slot.close()
+        lock.close()
+        private.close()
+        publication.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="exercises a POSIX hardlink source alias")
+def test_locked_hardlink_slot_is_never_truncated_as_stale(tmp_path: Path) -> None:
+    source = tmp_path / "output.webp"
+    source.write_bytes(b"held-source")
+    publication = workspace_module.PublicationDirectory.open(tmp_path)
+    private = publication.open_private_directory(
+        ".rembggui-publish",
+        "publication",
+    )
+    key = publication.target_key(source)
+    lock = publication.acquire_output_lock(private, key)
+    pending_name = f".{key}.publish-pending"
+    assert private.link_parent_file(source.name, pending_name, lock)
+    source_descriptor = publication.open_read(source.name)
+    slot = private.open_locked_slot(pending_name, lock, create_if_missing=False)
+    identity = os.fstat(source_descriptor).st_dev, os.fstat(source_descriptor).st_ino
+    try:
+        with pytest.raises(AppError, match="aliases its write source"):
+            slot.reset_for_write(source_descriptor)
+
+        assert (os.fstat(slot.descriptor).st_dev, os.fstat(slot.descriptor).st_ino) == (
+            identity
+        )
+        assert os.pread(slot.descriptor, len(b"held-source"), 0) == b"held-source"
+        assert source.read_bytes() == b"held-source"
+    finally:
+        slot.close()
+        os.close(source_descriptor)
+        lock.close()
+        private.close()
+        publication.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="exercises POSIX hardlink aliases")
+def test_owned_replace_keeps_same_inode_alias_instead_of_blind_unlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publication = workspace_module.PublicationDirectory.open(tmp_path)
+    private = publication.open_private_directory(
+        ".rembggui-publish",
+        "publication",
+    )
+    key = publication.target_key(tmp_path / "output.webp")
+    owner = publication.acquire_output_lock(private, key)
+    pending_name = f".{key}.publish-pending"
+    final_name = f"{key}.publish"
+    slot = private.open_locked_slot(pending_name, owner)
+    os.write(slot.descriptor, b"held-slot")
+    assert private.link_file(pending_name, final_name, owner)
+
+    def reject_blind_unlink(_self, _name: str) -> None:
+        raise AssertionError("same-inode fixed slot must never be blindly unlinked")
+
+    monkeypatch.setattr(workspace_module._BoundDirectory, "unlink", reject_blind_unlink)
+    try:
+        private.replace_owned(pending_name, final_name, slot, owner)
+
+        slot.assert_owned()
+        pending = private.lstat(pending_name)
+        final = private.lstat(final_name)
+        assert (pending.st_dev, pending.st_ino) == slot.identity
+        assert (final.st_dev, final.st_ino) == slot.identity
+        assert os.pread(slot.descriptor, len(b"held-slot"), 0) == b"held-slot"
+    finally:
+        slot.close()
+        owner.close()
+        private.close()
+        publication.close()
 
 
 def test_existing_private_pending_without_anchored_owner_is_never_unlinked(
@@ -913,6 +1029,42 @@ def test_parent_anchor_close_failure_retains_exact_retry_owner(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="exercises POSIX descriptor cleanup")
+def test_locked_slot_close_failure_retains_exact_retry_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publication = workspace_module.PublicationDirectory.open(tmp_path)
+    private = publication.open_private_directory(
+        ".rembggui-publish",
+        "publication",
+    )
+    key = publication.target_key(tmp_path / "output.webp")
+    lock = publication.acquire_output_lock(private, key)
+    slot = private.open_locked_slot(f".{key}.publish-pending", lock)
+    slot_descriptor = slot.descriptor
+    actual_close = os.close
+    fail_slot = True
+
+    def fail_slot_once(descriptor: int) -> None:
+        if fail_slot and descriptor == slot_descriptor:
+            raise OSError(errno.EIO, "synthetic slot close failure")
+        actual_close(descriptor)
+
+    monkeypatch.setattr(workspace_module.os, "close", fail_slot_once)
+    with pytest.raises(AppError) as exc:
+        slot.close()
+
+    assert slot.descriptor == slot_descriptor
+    fail_slot = False
+    assert workspace_module._drain_attached_bound_directory_closes(exc.value) == 1
+    with pytest.raises(AppError, match="closed"):
+        _ = slot.descriptor
+    lock.close()
+    private.close()
+    publication.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="exercises POSIX descriptor cleanup")
 def test_unlock_error_with_successful_close_releases_local_and_kernel_ownership(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -975,6 +1127,44 @@ def test_private_output_lock_serializes_threads_even_if_platform_lock_reenters(
         first.close()
         second_directory.close()
         first_directory.close()
+
+
+def test_fixed_slot_serializes_threads_even_if_platform_lock_reenters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publication = workspace_module.PublicationDirectory.open(tmp_path)
+    first_directory = publication.open_private_directory(
+        ".rembggui-publish",
+        "publication",
+    )
+    second_directory = RecoveryDirectory.open(tmp_path, ".rembggui-publish")
+    key = publication.target_key(tmp_path / "output.webp")
+    owner = publication.acquire_output_lock(first_directory, key)
+    monkeypatch.setattr(
+        workspace_module._SystemAdvisoryFileLock,
+        "acquire_nonblocking",
+        lambda _self, _descriptor: True,
+    )
+    monkeypatch.setattr(
+        workspace_module._SystemAdvisoryFileLock,
+        "release",
+        lambda _self, _descriptor: None,
+    )
+    first = first_directory.open_locked_slot(f".{key}.publish-pending", owner)
+    try:
+        with pytest.raises(BlockingIOError):
+            second_directory.open_locked_slot(
+                first.name,
+                owner,
+                create_if_missing=False,
+            )
+    finally:
+        first.close()
+        owner.close()
+        second_directory.close()
+        first_directory.close()
+        publication.close()
 
 
 def test_contended_output_lock_retains_descriptor_when_close_fails(
