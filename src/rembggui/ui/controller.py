@@ -36,6 +36,7 @@ from rembggui.ui.ports import (
     WindowCommand,
 )
 from rembggui.ui.preview_controller import PreviewController, PreviewRuntime
+from rembggui.ui.render_controller import RenderController
 
 VIDEO_FILE_FILTER = "Video files (*.mp4 *.mov *.webm *.mkv)"
 _THREAD_SHUTDOWN_TIMEOUT_MS = 5000
@@ -141,6 +142,16 @@ class SourceController(QObject):
             dialog_parent=dialog_parent,
             parent=self,
         )
+        self._render_controller = RenderController(
+            store,
+            runtime=self._preview_controller.runtime,
+            scheduler=self._preview_controller.scheduler,
+            preview_callback=lambda: self._preview_controller.dispatch(
+                PreviewFrameRequested()
+            ),
+            dialog_parent=dialog_parent,
+            parent=self,
+        )
         self._decode_request_ids = count(1)
         self._threads: dict[str, tuple[QThread, _SourceLoadWorker]] = {}
         self._closed = False
@@ -149,11 +160,17 @@ class SourceController(QObject):
         """Set the window used as the parent for native source dialogs."""
         self._dialog_parent = parent
         self._preview_controller.set_dialog_parent(parent)
+        self._render_controller.set_dialog_parent(parent)
 
     @property
     def active_load_count(self) -> int:
         """Expose worker count for lifecycle tests without exposing worker state."""
         return sum(thread.isRunning() for thread, _worker in self._threads.values())
+
+    @property
+    def render_controller(self) -> RenderController:
+        """Expose the render command owner for lifecycle and UI integration tests."""
+        return self._render_controller
 
     def dispatch(self, command: WindowCommand) -> None:
         if self._closed:
@@ -165,8 +182,7 @@ class SourceController(QObject):
         elif isinstance(command, PreviewFrameRequested):
             self._preview_controller.dispatch(command)
         elif isinstance(command, RenderVideoRequested):
-            # TODO(next slice: render): wire RenderVideoRequested to the render job.
-            return
+            self._render_controller.dispatch(command)
         elif isinstance(command, RebuildEditedCutsRequested):
             # TODO(next slice: rebuild): wire edited-cut rebuild to the job service.
             return
@@ -177,15 +193,14 @@ class SourceController(QObject):
             # TODO(next slice: workspaces): add the workspace manager command service.
             return
         elif isinstance(command, OpenOutputRequested):
-            # TODO(next slice: output): wire opening the rendered output.
-            return
+            self._render_controller.dispatch(command)
         elif isinstance(command, OpenOutputFolderRequested):
-            # TODO(next slice: output): wire opening the rendered output folder.
-            return
+            self._render_controller.dispatch(command)
 
     def shutdown(self) -> None:
         """Stop accepting results while the application is closing."""
         self._closed = True
+        self._render_controller.shutdown()
         self._preview_controller.shutdown()
         threads = tuple(self._threads.items())
         for _request_id, (thread, _worker) in threads:

@@ -65,6 +65,7 @@ from rembggui.jobs.render import (
     LocalSourcePort,
     PreparedSegmentation,
     PreviewService,
+    RenderArtifact,
     SystemClock,
 )
 from rembggui.jobs.render import PreviewResult as RenderPreviewResult
@@ -90,6 +91,8 @@ class PreviewRuntime(Protocol):
     def preview(
         self, request: RenderRequest, playhead: Fraction, context: JobContext
     ) -> RenderPreviewResult: ...
+
+    def render(self, request: RenderRequest, context: JobContext) -> RenderArtifact: ...
 
     def close(self) -> None: ...
 
@@ -205,6 +208,14 @@ class ProductionPreviewRuntime:
             clock=SystemClock(),
         ).preview(request, playhead, context)
 
+    def render(self, request: RenderRequest, context: JobContext) -> RenderArtifact:
+        prepared = self._prepared
+        if prepared is None or prepared.model_id != request.segmentation.model_id:
+            prepared = self.prepare(request.segmentation.model_id, {}, context)
+        from rembggui.ui.render_pipeline import render_prepared
+
+        return render_prepared(prepared, request, context)
+
     def close(self) -> None:
         self._manager.close()
 
@@ -294,8 +305,10 @@ class PreviewJobDialog(QDialog):
                 self.progress_bar.setFormat(
                     format_model_download_progress(event.completed, event.total)
                 )
+            elif event.stage == "Decode":
+                self.progress_bar.setFormat("%v / %m frames")
             else:
-                self.progress_bar.setFormat("%v / %m bytes")
+                self.progress_bar.setFormat("%v / %m")
 
     def set_cancelling(self) -> None:
         self.stage_label.setText("Cancelling…")
@@ -466,6 +479,14 @@ class PreviewController(QObject):
     @property
     def dialog(self) -> PreviewJobDialog | None:
         return self._dialog
+
+    @property
+    def runtime(self) -> PreviewRuntime:
+        return self._runtime
+
+    @property
+    def scheduler(self) -> ExclusiveJobScheduler:
+        return self._scheduler
 
     @property
     def active_preview_count(self) -> int:
@@ -654,10 +675,17 @@ def _preview_inputs(metadata: object) -> _PreviewInputs:
     return _PreviewInputs(source, width, height, duration)
 
 
-def _render_request(inputs: _PreviewInputs, model_id: str) -> RenderRequest:
+def _render_request(
+    inputs: _PreviewInputs,
+    model_id: str,
+    *,
+    fps: int = 1,
+    filename: str = "preview.webp",
+    collision_policy: CollisionPolicy = CollisionPolicy.CANCEL,
+) -> RenderRequest:
     return RenderRequest(
         source=inputs.source,
-        sampling=SamplingSpec(Fraction(0), inputs.duration, fps=1),
+        sampling=SamplingSpec(Fraction(0), inputs.duration, fps=fps),
         crop=CropSpec(0, 0, inputs.width, inputs.height),
         segmentation=SegmentationSpec(
             model_id=model_id, edge_mode=EdgeMode.STANDARD
@@ -670,8 +698,8 @@ def _render_request(inputs: _PreviewInputs, model_id: str) -> RenderRequest:
         ),
         output=OutputSpec(
             inputs.source.parent,
-            "preview.webp",
-            collision_policy=CollisionPolicy.CANCEL,
+            filename,
+            collision_policy=collision_policy,
         ),
     )
 
