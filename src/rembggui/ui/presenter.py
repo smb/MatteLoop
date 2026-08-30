@@ -14,6 +14,7 @@ from rembggui.core.state import (
     capabilities,
 )
 from rembggui.ui.source_error_copy import source_error_copy
+from rembggui.ui.source_presentation import present_source_metadata as s
 
 
 @dataclass(frozen=True)
@@ -55,7 +56,12 @@ class PresentationModel:
     success_accessible_description: str
     workspace_attention: bool
     workspace_open: bool
-    source_metadata: object | None
+    source_filename: str
+    source_dimensions: str
+    source_duration: str
+    source_frame_rate: str
+    source_file_size: str
+    source_path: str | None
     source_frame: object | None
     source_loading: bool
     inspector_enabled: bool
@@ -96,17 +102,14 @@ def present(state: AppState) -> PresentationModel:
         message = marker
     elif not state.model_available:
         message = "Download required"
-
     result_status_marker: str | None
     if state.edited_cuts and state.preview_result is not None:
         message = "Model preview — rebuild uses edited cut frames"
-
     result_accessible_description = message
     if state.preview is PreviewState.STALE and state.stale_category:
         result_accessible_description = f"{state.stale_category}: {message}"
     if state.edited_cuts and state.preview_result is not None:
         result_accessible_description = "Model preview — rebuild uses edited cut frames"
-
     if state.edited_cuts:
         result_status_marker = "Edited cuts changed"
     elif (
@@ -119,7 +122,6 @@ def present(state: AppState) -> PresentationModel:
         result_status_marker = f"{marker} · {state.stale_category}"
     else:
         result_status_marker = marker
-
     result_status = (
         "error" if state.source is SourceState.ERROR else state.preview.value
     )
@@ -134,7 +136,6 @@ def present(state: AppState) -> PresentationModel:
     artifact_path = (
         str(state.artifact_result.value) if state.artifact_result is not None else None
     )
-
     if active or not ready:
         primary: str | None = None
     elif state.preview is PreviewState.CURRENT and allowed.can_render:
@@ -145,7 +146,6 @@ def present(state: AppState) -> PresentationModel:
         primary = "render"
     else:
         primary = None
-
     return PresentationModel(
         source_mode=source_mode,
         result_message=message,
@@ -201,7 +201,7 @@ def present(state: AppState) -> PresentationModel:
         success_accessible_description=artifact_path or "Render complete",
         workspace_attention=state.edited_cuts or state.edited_cuts_error is not None,
         workspace_open=state.edited_cuts or state.edited_cuts_error is not None,
-        source_metadata=state.source_value,
+        **s(state.source_value if ready else None, state.source is SourceState.LOADING),
         source_frame=state.source_frame,
         source_loading=state.source is SourceState.LOADING,
         inspector_enabled=not active

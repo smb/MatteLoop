@@ -68,11 +68,13 @@ def test_empty_has_only_restrained_source_surface(qtbot) -> None:
     assert not window.preview_stage.isVisible()
 
 
-def test_long_source_path_is_middle_elided_with_full_accessibility_description(
+def test_long_source_filename_is_middle_elided_with_full_path_accessibility_description(
     qtbot,
 ) -> None:
     class Metadata:
-        path = "/very/long/path/" + "segment/" * 30 + "source-video.mov"
+        path = (
+            "/very/long/path/" + "segment/" * 30 + "source-video-" + "x" * 50 + ".mov"
+        )
         width = 1920
         height = 1080
 
@@ -89,4 +91,6 @@ def test_long_source_path_is_middle_elided_with_full_accessibility_description(
     window.show()
     assert window.source_filename.toolTip() == Metadata.path
     assert window.source_filename.accessibleDescription() == Metadata.path
+    assert window.source_filename.text().endswith(".mov")
     assert "…" in window.source_filename.text()
+    assert "/" not in window.source_filename.text()

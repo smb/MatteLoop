@@ -554,6 +554,7 @@ def test_probe_revision_binds_decode_to_same_regular_file(tmp_path):
     info = probe_source(path)
 
     assert isinstance(info.revision, SourceRevision)
+    assert info.file_size == path.stat().st_size
     replacement = make_video(
         tmp_path / "replacement.mp4", list(reversed(_solid_frames())), Fraction(2)
     )

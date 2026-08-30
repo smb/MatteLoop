@@ -258,10 +258,7 @@ class MainWindow(QMainWindow):
         )
         self.source_error_copy.setText(model.source_error_message or "")
         self.source_drop_surface.heading.setText(model.source_surface_heading)
-        if model.source_metadata is not None:
-            self.source_strip.set_metadata(model.source_metadata)
-        elif model.source_loading:
-            self.source_strip.filename.setText("Reading video…")
+        self.source_strip.set_presented_metadata(model)
         source_frame = model.source_frame
         self.original_canvas.set_frame(
             source_frame if isinstance(source_frame, QImage) else None

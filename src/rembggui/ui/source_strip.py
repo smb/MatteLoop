@@ -3,12 +3,33 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Protocol
 
 from PySide6.QtCore import Qt, QUrl, Signal
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QFontMetrics
+from PySide6.QtGui import QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 SUPPORTED_VIDEO_SUFFIXES = frozenset({".mp4", ".mov", ".webm", ".mkv"})
+
+
+class SourcePresentationValues(Protocol):
+    @property
+    def source_filename(self) -> str: ...
+
+    @property
+    def source_dimensions(self) -> str: ...
+
+    @property
+    def source_duration(self) -> str: ...
+
+    @property
+    def source_frame_rate(self) -> str: ...
+
+    @property
+    def source_file_size(self) -> str: ...
+
+    @property
+    def source_path(self) -> str | None: ...
 
 
 class SourceStrip(QWidget):
@@ -49,35 +70,16 @@ class SourceStrip(QWidget):
         value.setProperty("mono", True)
         return value
 
-    def set_metadata(self, metadata: object | None) -> None:
-        path = getattr(metadata, "path", None)
-        if path is not None:
-            full_path = str(path)
-            self.filename.setText(
-                QFontMetrics(self.filename.font()).elidedText(
-                    full_path, Qt.TextElideMode.ElideMiddle, 360
-                )
-            )
-            self.filename.setToolTip(full_path)
-            self.filename.setAccessibleDescription(full_path)
-        else:
-            self.filename.setText("Video loaded")
-            self.filename.setToolTip("")
-            self.filename.setAccessibleDescription("")
-        width, height = (
-            getattr(metadata, "width", None),
-            getattr(metadata, "height", None),
-        )
-        self.dimensions.setText(f"{width} × {height}" if width and height else "")
-        duration = getattr(metadata, "duration", None)
-        self.duration.setText(str(duration) if duration is not None else "")
-        rate = getattr(metadata, "average_rate", None) or getattr(
-            metadata, "peak_rate", None
-        )
-        self.frame_rate.setText(f"{rate} fps" if rate is not None else "")
-        revision = getattr(metadata, "revision", None)
-        size = getattr(revision, "size", None)
-        self.file_size.setText(f"{size:,} bytes" if isinstance(size, int) else "")
+
+    def set_presented_metadata(self, values: SourcePresentationValues) -> None:
+        """Apply presenter-owned source values to the strip widgets."""
+        self.filename.setText(values.source_filename)
+        self.dimensions.setText(values.source_dimensions)
+        self.duration.setText(values.source_duration)
+        self.frame_rate.setText(values.source_frame_rate)
+        self.file_size.setText(values.source_file_size)
+        self.filename.setToolTip(values.source_path or "")
+        self.filename.setAccessibleDescription(values.source_path or "")
 
 
 class SourceDropSurface(QWidget):

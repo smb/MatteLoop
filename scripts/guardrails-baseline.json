@@ -80,7 +80,7 @@
     "long_functions": 1
   },
   "src/rembggui/ui/main_window.py": {
-    "lines": 374,
+    "lines": 371,
     "long_functions": 2
   },
   "src/rembggui/ui/presenter.py": {

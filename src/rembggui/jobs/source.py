@@ -187,7 +187,6 @@ class SourceValidationProof:
 @dataclass(frozen=True, slots=True)
 class SourceInfo:
     """Validated presentation metadata in oriented, square-pixel coordinates."""
-
     path: Path
     revision: SourceRevision
     validation_proof: SourceValidationProof
@@ -209,6 +208,7 @@ class SourceInfo:
     color_space: str
     color_primaries: str
     color_transfer: str
+    file_size: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -989,7 +989,7 @@ def _source_info(
     )
     proof = replace(proof, contract_digest=proof.computed_digest())
     return SourceInfo(
-        path=source,
+        path=source, file_size=revision.size,
         revision=revision,
         validation_proof=proof,
         width=width,
