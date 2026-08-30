@@ -15,6 +15,7 @@ from rembggui.core.state import (
 )
 from rembggui.ui.source_error_copy import source_error_copy
 from rembggui.ui.source_presentation import present_source_metadata as s
+from rembggui.ui.timeline_presentation import TimelinePresentation, present_timeline
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,7 @@ class PresentationModel:
     source_file_size: str
     source_path: str | None
     source_frame: object | None
+    timeline: TimelinePresentation | None
     result_frame: object | None
     source_loading: bool
     inspector_enabled: bool
@@ -127,16 +129,13 @@ def present(state: AppState) -> PresentationModel:
         "error" if state.source is SourceState.ERROR else state.preview.value
     )
     result_checkerboard = state.preview in {
-        PreviewState.CURRENT,
-        PreviewState.STALE,
+        PreviewState.CURRENT, PreviewState.STALE
     } or (state.preview is PreviewState.RUNNING and state.preview_result is not None)
     source_error_detail = str(state.source_error) if state.source_error else None
     source_error_message = None
     if state.source is SourceState.ERROR:
         source_error_message = source_error_copy(state.source_error)
-    artifact_path = (
-        str(state.artifact_result.value) if state.artifact_result is not None else None
-    )
+    artifact_path = str(state.artifact_result.value) if state.artifact_result else None
     if active or not ready:
         primary: str | None = None
     elif state.preview is PreviewState.CURRENT and allowed.can_render:
@@ -204,6 +203,7 @@ def present(state: AppState) -> PresentationModel:
         workspace_open=state.edited_cuts or state.edited_cuts_error is not None,
         **s(state.source_value if ready else None, state.source is SourceState.LOADING),
         source_frame=state.source_frame,
+        timeline=present_timeline(state),
         result_frame=(
             state.preview_result.value if state.preview_result is not None else None
         ),

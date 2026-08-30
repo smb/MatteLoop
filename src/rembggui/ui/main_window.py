@@ -34,8 +34,9 @@ from rembggui.ui.ports import (
     WindowServices,
 )
 from rembggui.ui.presenter import PresentationModel, present
-from rembggui.ui.preview_canvas import PreviewStage, TimelinePlaceholder
+from rembggui.ui.preview_canvas import PreviewStage
 from rembggui.ui.source_strip import SourceDropSurface, SourceStrip
+from rembggui.ui.timeline import TimelineWidget
 
 
 class MainWindow(QMainWindow):
@@ -90,7 +91,8 @@ class MainWindow(QMainWindow):
         self.preview_stage = PreviewStage()
         self.original_canvas = self.preview_stage.original_canvas
         self.result_canvas = self.preview_stage.result_canvas
-        self.timeline_placeholder = TimelinePlaceholder()
+        self.timeline_widget = TimelineWidget()
+        self.timeline_placeholder = self.timeline_widget
         self.source_error_heading = QLabel("Couldn’t read this video")
         self.source_error_heading.setObjectName("source_error_heading")
         self.source_error_heading.setAccessibleName("Video load error")
@@ -105,7 +107,7 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.source_error_heading)
         left_layout.addWidget(self.source_error_copy)
         left_layout.addWidget(self.preview_stage, 1)
-        left_layout.addWidget(self.timeline_placeholder)
+        left_layout.addWidget(self.timeline_widget)
         root.addWidget(self.left_workspace, 1)
         inspector_column = QWidget()
         inspector_layout = QVBoxLayout(inspector_column)
@@ -176,6 +178,7 @@ class MainWindow(QMainWindow):
         self.preview_button.clicked.connect(
             lambda: self._services.dispatch(PreviewFrameRequested())
         )
+        self.timeline_widget.command_requested.connect(self._services.dispatch)
         self.render_button.clicked.connect(
             lambda: self._services.dispatch(RenderVideoRequested())
         )
@@ -201,12 +204,11 @@ class MainWindow(QMainWindow):
     def _set_tab_order(self) -> None:
         """Declare a deterministic keyboard route through the shell."""
         widgets = [
-            self.source_drop_target,
-            self.choose_video_button,
+            self.source_drop_target, self.choose_video_button,
             self.replace_video_button,
             self.original_canvas,
             self.result_canvas,
-            self.timeline_placeholder,
+            self.timeline_widget,
         ]
         widgets.extend(
             [
@@ -248,7 +250,8 @@ class MainWindow(QMainWindow):
         self.source_drop_surface.setVisible(model.source_surface_visible)
         self.source_strip.setVisible(model.source_strip_visible)
         self.preview_stage.setVisible(model.show_stage)
-        self.timeline_placeholder.setVisible(model.show_timeline)
+        self.timeline_widget.setVisible(model.show_timeline)
+        self.timeline_widget.apply_presentation(model.timeline, not model.editor_locked)
         self.source_error_heading.setVisible(model.source_error_visible)
         self.source_error_copy.setVisible(model.source_error_visible)
         self.source_error_heading.setText("Couldn’t read this video")
@@ -293,9 +296,7 @@ class MainWindow(QMainWindow):
         self.success_artifact.setToolTip(artifact_path)
         self.success_artifact.setAccessibleDescription(artifact_path)
         self.success_banner.setToolTip(artifact_path)
-        self.success_banner.setAccessibleDescription(
-            model.success_accessible_description
-        )
+        self.success_banner.setAccessibleDescription(model.success_accessible_description)
         self.inspector.setEnabled(model.inspector_enabled)
         for name, button in (
             ("preview", self.preview_button),
@@ -313,13 +314,11 @@ class MainWindow(QMainWindow):
             return
         artifact_path = getattr(self, "_success_artifact_path", "")
         available_width = self.success_artifact.width() or 220
-        self.success_artifact.setText(
-            QFontMetrics(self.success_artifact.font()).elidedText(
-                artifact_path,
-                Qt.TextElideMode.ElideMiddle,
-                available_width,
-            )
+        metrics = QFontMetrics(self.success_artifact.font())
+        text = metrics.elidedText(
+            artifact_path, Qt.TextElideMode.ElideMiddle, available_width
         )
+        self.success_artifact.setText(text)
 
     def _queue_focus(self, target: FocusTarget) -> None:
         if target is self._last_focus:
@@ -363,6 +362,7 @@ class MainWindow(QMainWindow):
             unsubscribe, self._unsubscribe = self._unsubscribe, None
             unsubscribe()
         self._settings.setValue("window/geometry", self.saveGeometry())
+        self.timeline_widget.shutdown()
         super().closeEvent(event)
 
     def _restore_geometry(self) -> None:

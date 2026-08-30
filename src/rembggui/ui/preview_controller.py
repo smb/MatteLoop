@@ -49,6 +49,7 @@ from rembggui.core.state import (
     capabilities,
 )
 from rembggui.core.state import PreviewResult as StatePreviewResult
+from rembggui.core.timeline import TimelineState
 from rembggui.jobs.context import (
     CancellationState,
     ExclusiveJobScheduler,
@@ -355,6 +356,9 @@ class _PreviewInputs:
     width: int
     height: int
     duration: Fraction
+    start: Fraction
+    end: Fraction
+    playhead: Fraction
 
 
 class _PreviewWorker(QObject):
@@ -403,7 +407,9 @@ class _PreviewWorker(QObject):
                 )
             )
             self._emit_stage("Segmentation")
-            result = self._runtime.preview(request, Fraction(0), self._context)
+            result = self._runtime.preview(
+                request, self._inputs.playhead, self._context
+            )
             if self._context.terminal_state is JobTerminalState.RUNNING:
                 self._context.commit_if_not_cancelled(lambda: None)
             elif self._context.terminal_state is JobTerminalState.CANCEL_PENDING:
@@ -507,7 +513,7 @@ class PreviewController(QObject):
         metadata = state.source_value
         if source_id is None or state.source is not SourceState.READY:
             return
-        inputs = _preview_inputs(metadata)
+        inputs = _preview_inputs(metadata, state.timeline)
         job_id = uuid4().hex
         request_id = uuid4().hex
         self._store.dispatch(
@@ -660,7 +666,9 @@ class PreviewController(QObject):
         self._threads.pop(job_id, None)
 
 
-def _preview_inputs(metadata: object) -> _PreviewInputs:
+def _preview_inputs(
+    metadata: object, timeline: TimelineState | None = None
+) -> _PreviewInputs:
     source = getattr(metadata, "path", None)
     width = getattr(metadata, "width", None)
     height = getattr(metadata, "height", None)
@@ -672,7 +680,21 @@ def _preview_inputs(metadata: object) -> _PreviewInputs:
         or not isinstance(duration, Fraction)
     ):
         raise ValueError("loaded source metadata cannot build a preview request")
-    return _PreviewInputs(source, width, height, duration)
+    if timeline is None:
+        return _PreviewInputs(
+            source, width, height, duration, Fraction(0), duration, Fraction(0)
+        )
+    if timeline.duration != duration:
+        raise ValueError("timeline duration does not match loaded source metadata")
+    return _PreviewInputs(
+        source,
+        width,
+        height,
+        duration,
+        timeline.start,
+        timeline.end,
+        timeline.playhead,
+    )
 
 
 def _render_request(
@@ -685,7 +707,7 @@ def _render_request(
 ) -> RenderRequest:
     return RenderRequest(
         source=inputs.source,
-        sampling=SamplingSpec(Fraction(0), inputs.duration, fps=fps),
+        sampling=SamplingSpec(inputs.start, inputs.end, fps=fps),
         crop=CropSpec(0, 0, inputs.width, inputs.height),
         segmentation=SegmentationSpec(
             model_id=model_id, edge_mode=EdgeMode.STANDARD

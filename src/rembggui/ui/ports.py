@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Protocol
 
 from rembggui.core.state import AppState, Event
+from rembggui.core.timeline import TimelineEvent
 
 
 class StateStore(Protocol):
@@ -78,6 +79,7 @@ type WindowCommand = (
     | OpenOutputFolderRequested
     | ManageModelsRequested
     | ManageWorkspacesRequested
+    | TimelineEvent
 )
 
 

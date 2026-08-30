@@ -23,6 +23,7 @@ from rembggui.core.state import (
     SourceLoadRequested,
     reduce,
 )
+from rembggui.core.timeline import EndChanged, StartChanged
 from rembggui.core.webp import validate_webp
 from rembggui.jobs.render import ImmutableRgba, PreparedSegmentation, RenderArtifact
 from rembggui.ui.controller import SourceController
@@ -43,6 +44,7 @@ class Metadata:
     width: int = 128
     height: int = 128
     duration: Fraction = Fraction(2)
+    average_rate: Fraction = Fraction(30)
 
 
 class FakeSegmenter:
@@ -162,6 +164,31 @@ def test_render_command_writes_default_request_off_gui_thread(tmp_path, qtbot) -
     assert [
         event.stage for event in store.events if isinstance(event, JobStageChanged)
     ] == ["Decode", "Segmentation", "Post-process", "Encode", "Validate"]
+    controller.shutdown()
+
+
+def test_render_command_uses_the_selected_export_range(tmp_path, qtbot) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"fixture")
+    runtime = FakeRenderRuntime()
+    selected = reduce(_ready_state(source), StartChanged(Fraction(1, 2)))
+    selected = reduce(selected, EndChanged(Fraction(3, 2)))
+    selected = reduce(selected, PreviewRequested("preview", "preview-request"))
+    selected = reduce(
+        selected,
+        PreviewSucceeded(
+            "preview", PreviewResult("source", "preview-request", QImage())
+        ),
+    )
+    store = RecordingStore(selected)
+    controller = SourceController(store, preview_runtime=runtime)
+
+    controller.dispatch(RenderVideoRequested())
+
+    qtbot.waitUntil(lambda: store.state.artifact is ArtifactState.VALID, timeout=5000)
+    request = runtime.render_requests[0]
+    assert request.sampling.start == Fraction(1, 2)
+    assert request.sampling.end == Fraction(3, 2)
     controller.shutdown()
 
 

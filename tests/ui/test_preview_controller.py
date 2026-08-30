@@ -17,6 +17,7 @@ from rembggui.core.state import (
     PreviewState,
     PreviewSucceeded,
 )
+from rembggui.core.timeline import EndChanged, PlayheadChanged, StartChanged
 from rembggui.jobs.context import JobContext, ProgressEvent
 from rembggui.jobs.render import ImmutableRgba, PreparedSegmentation, PreviewResult
 from rembggui.ui.controller import SourceController, SourceLoadResult
@@ -36,6 +37,7 @@ class Metadata:
     width: int = 128
     height: int = 128
     duration: Fraction = Fraction(2)
+    average_rate: Fraction = Fraction(30)
 
 
 class FakeSourceAdapter:
@@ -187,6 +189,35 @@ def test_preview_request_prepares_model_and_displays_the_first_frame_cutout(
     assert window.primary_action_name() == "render"
     assert window.render_button.isEnabled()
     assert window.requested_focus_name() == "result_canvas"
+
+
+def test_preview_request_uses_the_playhead_and_selected_export_range(
+    tmp_path: Path, qtbot
+) -> None:
+    path = tmp_path / "source.mp4"
+    path.write_bytes(b"fixture")
+    runtime = FakePreviewRuntime()
+    store = RecordingStore()
+    controller = SourceController(
+        store,
+        source_adapter=FakeSourceAdapter(path),
+        preview_runtime=runtime,
+    )
+
+    controller.dispatch(VideoDropped(path))
+    qtbot.waitUntil(lambda: store.state.source.value == "ready", timeout=5000)
+    controller.dispatch(StartChanged(Fraction(1, 2)))
+    controller.dispatch(EndChanged(Fraction(3, 2)))
+    controller.dispatch(PlayheadChanged(Fraction(1)))
+    controller.dispatch(PreviewFrameRequested())
+
+    qtbot.waitUntil(lambda: store.state.preview is PreviewState.CURRENT, timeout=5000)
+    request, playhead = runtime.requests[0]
+
+    assert playhead == Fraction(1)
+    assert request.sampling.start == Fraction(1, 2)
+    assert request.sampling.end == Fraction(3, 2)
+    controller.shutdown()
 
 
 @pytest.mark.parametrize("use_escape", [False, True])

@@ -117,17 +117,3 @@ class PreviewStage(QFrame):
         divider.setObjectName("preview_divider")
         layout.addWidget(divider)
         layout.addWidget(self.result_canvas, 1)
-
-
-class TimelinePlaceholder(QFrame):
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setObjectName("timeline_placeholder")
-        self.setAccessibleName("Video timeline")
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setMinimumHeight(176)
-        layout = QVBoxLayout(self)
-        label = QLabel("Timeline editing arrives in the next step")
-        label.setProperty("secondary", True)
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(label)
