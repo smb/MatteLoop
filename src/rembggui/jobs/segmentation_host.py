@@ -22,9 +22,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import multiprocessing
 import os
+import platform
 import stat
 import time
 from collections.abc import Callable
@@ -43,6 +45,11 @@ import numpy as np
 from numpy.typing import NDArray
 
 from rembggui.core.errors import AppError, ErrorCode
+from rembggui.core.execution_providers import (
+    CPU_EXECUTION_PROVIDER,
+    is_allowed_provider,
+    provider_base_label,
+)
 from rembggui.jobs.models.cache_fs import (
     BoundDirectoryCloseError,
     BoundModelDirectory,
@@ -78,6 +85,7 @@ _MAX_LAUNCH_DEPTH = 6
 _MAX_LAUNCH_ITEMS = 256
 _MAX_LAUNCH_NODES = 2_048
 _MAX_LAUNCH_TEXT_BYTES = 16 * 1024
+_LOGGER = logging.getLogger(__name__)
 
 type Uint8Frame = NDArray[np.uint8]
 type ChildTarget = Callable[[Connection, object], None]
@@ -99,6 +107,8 @@ class SegmentationClient:
         if startup_timeout <= 0 or response_timeout <= 0:
             raise ValueError("process timeouts must be positive")
         self._model_spec = _normalize_launch_payload(model_spec)
+        self._effective_provider = _launch_provider(self._model_spec)
+        self._startup_notice: str | None = None
         self._child_target = (
             child_target if child_target is not None else segmentation_process_main
         )
@@ -146,6 +156,16 @@ class SegmentationClient:
         with self._state_lock:
             return self._active_job_id
 
+    @property
+    def effective_provider(self) -> str:
+        with self._lifecycle_lock:
+            return self._effective_provider
+
+    @property
+    def startup_notice(self) -> str | None:
+        with self._lifecycle_lock:
+            return self._startup_notice
+
     def start(self) -> None:
         """Start a fresh child; after invalidation this is the explicit retry."""
         self._claim_operation(job_id=None, busy_job_id=self.active_job_id)
@@ -159,6 +179,8 @@ class SegmentationClient:
             with self._lifecycle_lock:
                 if self._is_running_unlocked():
                     return
+                self._effective_provider = _launch_provider(self._model_spec)
+                self._startup_notice = None
                 self._discard_process_unlocked(graceful=False)
                 try:
                     parent, child = self._mp_context.Pipe(duplex=True)
@@ -208,6 +230,10 @@ class SegmentationClient:
                         raise self._crash_error(
                             "segmentation process exited immediately after startup"
                         )
+                    self._effective_provider = (
+                        message.execution_provider or _launch_provider(self._model_spec)
+                    )
+                    self._startup_notice = message.startup_notice
                 except BaseException as error:
                     try:
                         self._discard_process_unlocked(graceful=False)
@@ -332,6 +358,8 @@ class SegmentationClient:
                 with self._lifecycle_lock:
                     self._discard_process_unlocked(graceful=True)
                     self._model_spec = normalized
+                    self._effective_provider = _launch_provider(normalized)
+                    self._startup_notice = None
             self._start_operation_owned()
         finally:
             self._release_operation()
@@ -865,11 +893,20 @@ def segmentation_process_main(connection: Connection, model_spec: object) -> Non
     try:
         normalized = _normalize_launch_payload(model_spec)
         session = _create_rembg_session(normalized)
+        effective_provider = getattr(
+            session, "execution_provider", _launch_provider(normalized)
+        )
+        startup_notice = getattr(session, "startup_notice", None)
         process_id = multiprocessing.current_process().pid
         if process_id is None:
             return
         _serve_segmentation_connection(
-            connection, session, _run_rembg, process_id=process_id
+            connection,
+            session,
+            _run_rembg,
+            process_id=process_id,
+            execution_provider=effective_provider,
+            startup_notice=startup_notice,
         )
     finally:
         session = None
@@ -885,10 +922,19 @@ def _serve_segmentation_connection(
     inference: Inference,
     *,
     process_id: int,
+    execution_provider: str | None = None,
+    startup_notice: str | None = None,
 ) -> None:
     """Serve one session/one request using only bounded, schema-checked bytes."""
     if not _send_child(
-        connection, WorkerReady(PROTOCOL_VERSION, CONTROL_JOB_ID, process_id)
+        connection,
+        WorkerReady(
+            PROTOCOL_VERSION,
+            CONTROL_JOB_ID,
+            process_id,
+            execution_provider,
+            startup_notice,
+        ),
     ):
         return
     while True:
@@ -1060,12 +1106,14 @@ def _create_rembg_session(model_spec: dict[str, object]) -> object:
         verified.model_bytes,
         verified.rembg_version,
         verified.inference_kwargs,
+        execution_provider=verified.execution_provider,
     )
 
 
 @dataclass(frozen=True, slots=True)
 class _VerifiedModelLaunch:
     model_id: str
+    execution_provider: str
     artifact_path: Path
     rembg_version: str
     size_bytes: int
@@ -1078,6 +1126,8 @@ class _VerifiedModelLaunch:
 class _PreparedRembgSession:
     session: object
     inference_kwargs: tuple[tuple[str, str], ...]
+    execution_provider: str = CPU_EXECUTION_PROVIDER
+    startup_notice: str | None = None
 
 
 def _validate_verified_launch_payload(
@@ -1095,6 +1145,7 @@ def _validate_verified_launch_payload(
         "sha256",
         "size_bytes",
         "inference_defaults",
+        "execution_provider",
     }
     if type(catalog) is not ModelCatalog:
         raise _model_preparation_error("child model catalog is not authoritative")
@@ -1111,10 +1162,13 @@ def _validate_verified_launch_payload(
     sha256 = model_spec.get("sha256")
     size_bytes = model_spec.get("size_bytes")
     inference_defaults = model_spec.get("inference_defaults")
+    execution_provider = model_spec.get("execution_provider")
     if type(schema_version) is not int or schema_version != 1:
         raise _model_preparation_error("child model launch schema is invalid")
     if type(model_id) is not str:
         raise _model_preparation_error("child model ID is invalid")
+    if not is_allowed_provider(execution_provider):
+        raise _model_preparation_error("child execution provider is invalid")
     try:
         spec = catalog.get(model_id)
     except AppError as error:
@@ -1186,6 +1240,7 @@ def _validate_verified_launch_payload(
         raise _model_cache_error(str(error)) from error
     return _VerifiedModelLaunch(
         spec.id,
+        execution_provider,
         artifact_path,
         catalog.rembg_version,
         artifact.size_bytes,
@@ -1266,6 +1321,7 @@ def _instantiate_verified_rembg_session(
     rembg_version: str,
     inference_kwargs: tuple[tuple[str, str], ...] = (),
     *,
+    execution_provider: str = CPU_EXECUTION_PROVIDER,
     session_classes: object | None = None,
     ort_module: object | None = None,
     installed_version: str | None = None,
@@ -1279,7 +1335,47 @@ def _instantiate_verified_rembg_session(
         from rembg.sessions import sessions_class  # type: ignore[import-untyped]
 
         session_classes = sessions_class
+    session_class = _resolve_rembg_session_class(
+        model_id,
+        session_classes,
+        rembg_version,
+        installed_version,
+    )
+    runtime: Any = ort_module
+    if not is_allowed_provider(execution_provider):
+        raise _model_preparation_error("execution provider is not allowlisted")
+    session_options = _session_options(runtime)
+    available = _available_runtime_providers(runtime)
+    if execution_provider != CPU_EXECUTION_PROVIDER and (
+        execution_provider not in available
+    ):
+        return _create_cpu_fallback_session(
+            session_class,
+            model_id,
+            model_bytes,
+            session_options,
+            runtime,
+            inference_kwargs,
+            execution_provider,
+            RuntimeError("provider is not reported by ONNX Runtime"),
+        )
+    return _construct_requested_session(
+        session_class,
+        model_id,
+        model_bytes,
+        session_options,
+        runtime,
+        inference_kwargs,
+        execution_provider,
+    )
 
+
+def _resolve_rembg_session_class(
+    model_id: str,
+    session_classes: object,
+    rembg_version: str,
+    installed_version: str | None,
+) -> Any:
     if installed_version is None:
         try:
             installed_version = package_version("rembg")
@@ -1291,34 +1387,53 @@ def _instantiate_verified_rembg_session(
         raise _model_preparation_error(
             "installed rembg runtime does not match the verified model namespace"
         )
-    session_class: Any | None = None
     if not isinstance(session_classes, list):
         raise _model_preparation_error("rembg session registry is invalid")
     for candidate in session_classes:
         if candidate.name() == model_id:
-            session_class = candidate
-            break
-    if session_class is None:
-        raise _model_preparation_error("verified built-in rembg session is unavailable")
+            return candidate
+    raise _model_preparation_error("verified built-in rembg session is unavailable")
 
-    runtime: Any = ort_module
-    session_options = runtime.SessionOptions()
-    session_options.enable_profiling = False
-    threads = os.getenv("OMP_NUM_THREADS")
-    if threads is not None:
-        thread_count = int(threads)
-        session_options.inter_op_num_threads = thread_count
-        session_options.intra_op_num_threads = thread_count
-    device_type = runtime.get_device()
-    available = (
-        runtime.get_available_providers() if str(device_type).startswith("GPU") else []
+
+def _session_options(runtime: Any) -> object:
+    options = runtime.SessionOptions()
+    options.enable_profiling = False
+    if platform.system() == "Darwin":
+        optimization = getattr(
+            getattr(runtime, "GraphOptimizationLevel", None), "ORT_ENABLE_ALL", None
+        )
+        mode = getattr(getattr(runtime, "ExecutionMode", None), "ORT_SEQUENTIAL", None)
+        if optimization is not None:
+            options.graph_optimization_level = optimization
+        if mode is not None:
+            options.execution_mode = mode
+        options.intra_op_num_threads = 0
+    return options
+
+
+def _available_runtime_providers(runtime: Any) -> tuple[str, ...]:
+    try:
+        return tuple(runtime.get_available_providers())
+    except (AttributeError, TypeError) as error:
+        raise _model_preparation_error(
+            "ONNX Runtime did not report execution providers"
+        ) from error
+
+
+def _construct_requested_session(
+    session_class: Any,
+    model_id: str,
+    model_bytes: bytes,
+    session_options: object,
+    runtime: Any,
+    inference_kwargs: tuple[tuple[str, str], ...],
+    execution_provider: str,
+) -> _PreparedRembgSession:
+    providers = (
+        [CPU_EXECUTION_PROVIDER]
+        if execution_provider == CPU_EXECUTION_PROVIDER
+        else [execution_provider, CPU_EXECUTION_PROVIDER]
     )
-    if device_type == "GPU" and "CUDAExecutionProvider" in available:
-        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
-    elif str(device_type).startswith("GPU") and "ROCMExecutionProvider" in available:
-        providers = ["ROCMExecutionProvider", "CPUExecutionProvider"]
-    else:
-        providers = ["CPUExecutionProvider"]
     try:
         session = session_class.__new__(session_class)
         session.model_name = model_id
@@ -1327,11 +1442,62 @@ def _instantiate_verified_rembg_session(
             sess_options=session_options,
             providers=providers,
         )
-    except (MemoryError, OSError, RuntimeError, TypeError, ValueError) as error:
+    except Exception as error:
+        if execution_provider == CPU_EXECUTION_PROVIDER:
+            raise _model_preparation_error(
+                "verified ONNX session could not be constructed: "
+                f"{type(error).__name__}"
+            ) from error
+        return _create_cpu_fallback_session(
+            session_class,
+            model_id,
+            model_bytes,
+            session_options,
+            runtime,
+            inference_kwargs,
+            execution_provider,
+            error,
+        )
+    return _PreparedRembgSession(session, inference_kwargs, execution_provider)
+
+
+def _create_cpu_fallback_session(
+    session_class: Any,
+    model_id: str,
+    model_bytes: bytes,
+    session_options: object,
+    runtime: Any,
+    inference_kwargs: tuple[tuple[str, str], ...],
+    requested_provider: str,
+    error: BaseException,
+) -> _PreparedRembgSession:
+    label = provider_base_label(requested_provider)
+    _LOGGER.error(
+        "ONNX Runtime provider %s could not initialise model %s; using CPU: %s",
+        requested_provider,
+        model_id,
+        error,
+    )
+    try:
+        session = session_class.__new__(session_class)
+        session.model_name = model_id
+        session.inner_session = runtime.InferenceSession(
+            model_bytes,
+            sess_options=session_options,
+            providers=[CPU_EXECUTION_PROVIDER],
+        )
+    except Exception as fallback_error:
         raise _model_preparation_error(
-            f"verified ONNX session could not be constructed: {type(error).__name__}"
-        ) from error
-    return _PreparedRembgSession(session, inference_kwargs)
+            "verified ONNX CPU fallback session could not be constructed: "
+            f"{type(fallback_error).__name__}"
+        ) from fallback_error
+    return _PreparedRembgSession(
+        session,
+        inference_kwargs,
+        CPU_EXECUTION_PROVIDER,
+        f"{label} konnte dieses Modell nicht laden. Die Verarbeitung wird "
+        "automatisch über die CPU fortgesetzt.",
+    )
 
 
 def _model_preparation_error(detail: str) -> AppError:
@@ -1475,6 +1641,15 @@ def _normalize_launch_payload(value: object) -> dict[str, object]:
     normalized = json.loads(encoded.decode("ascii"))
     assert type(normalized) is dict
     return normalized
+
+
+def _launch_provider(model_spec: dict[str, object]) -> str:
+    provider = model_spec.get("execution_provider")
+    return (
+        provider
+        if isinstance(provider, str) and is_allowed_provider(provider)
+        else CPU_EXECUTION_PROVIDER
+    )
 
 
 def _clone_json_safe(

@@ -11,6 +11,10 @@ import pytest
 from PIL import Image
 
 from rembggui.core.errors import AppError, ErrorCode
+from rembggui.core.execution_providers import (
+    CPU_EXECUTION_PROVIDER,
+    CUDA_EXECUTION_PROVIDER,
+)
 from rembggui.jobs.models.cache_fs import BoundModelDirectory
 from rembggui.jobs.models.catalog import ExecutionClass, ModelCatalog, ModelSpec
 from rembggui.jobs.models.session import ModelSessionManager, PreparationResult
@@ -140,6 +144,7 @@ def _verified_launch(
         "sha256": spec.artifact.sha256,
         "size_bytes": spec.artifact.size_bytes,
         "inference_defaults": spec.inference_defaults.to_primitives(),
+        "execution_provider": "CPUExecutionProvider",
     }
     return catalog, payload, artifact_path
 
@@ -169,9 +174,11 @@ def test_local_prepare_downloads_before_start_with_exact_safe_launch_payload(
         "sha256",
         "size_bytes",
         "inference_defaults",
+        "execution_provider",
     }
     assert payload["model_id"] == "u2net"
     assert payload["runtime_filename"] == "u2net.onnx"
+    assert payload["execution_provider"] == "CPUExecutionProvider"
     assert payload["model_home"] == str(tmp_path / "2.0.72" / "u2net")
     assert "model_path" not in payload
     assert "extras" not in payload
@@ -217,6 +224,33 @@ def test_same_active_model_is_idempotent_without_download_or_restart(
     assert downloader.calls == ["u2net"]
     assert clients[0].starts == 1
     assert clients[0].replacements == []
+
+
+def test_provider_change_replaces_the_active_model_session_once(
+    tmp_path: Path,
+) -> None:
+    manager, downloader, clients, events = _manager(tmp_path)
+
+    first = manager.prepare("u2net", {"execution_provider": CPU_EXECUTION_PROVIDER})
+    reused = manager.prepare("u2net", {"execution_provider": CPU_EXECUTION_PROVIDER})
+    switched = manager.prepare("u2net", {"execution_provider": CUDA_EXECUTION_PROVIDER})
+    switched_again = manager.prepare(
+        "u2net", {"execution_provider": CUDA_EXECUTION_PROVIDER}
+    )
+
+    assert reused == first
+    assert switched.execution_provider == CUDA_EXECUTION_PROVIDER
+    assert switched_again == switched
+    assert downloader.calls == ["u2net", "u2net"]
+    assert events == [
+        "download:u2net",
+        "start:u2net",
+        "download:u2net",
+        "replace:u2net",
+    ]
+    assert len(clients) == 1
+    assert len(clients[0].replacements) == 1
+    assert clients[0].replacements[0]["execution_provider"] == CUDA_EXECUTION_PROVIDER
 
 
 def test_model_change_downloads_and_verifies_before_process_replacement(
@@ -610,7 +644,7 @@ def test_child_creates_session_only_after_hash_proof_without_parent_env_mutation
     monkeypatch.setattr(
         host_module,
         "_instantiate_verified_rembg_session",
-        lambda model_id, model_bytes, rembg_version, inference_kwargs=(): (
+        lambda model_id, model_bytes, rembg_version, inference_kwargs=(), **_kwargs: (
             calls.append((model_id, model_bytes, rembg_version, inference_kwargs)),
             sentinel,
         )[1],
@@ -658,6 +692,10 @@ def test_verified_instantiation_uses_bytes_without_onnxruntime_profiling() -> No
             return "CPU"
 
         @staticmethod
+        def get_available_providers() -> list[str]:
+            return ["CPUExecutionProvider"]
+
+        @staticmethod
         def InferenceSession(
             content: bytes, *, sess_options: object, providers: list[str]
         ) -> object:
@@ -687,6 +725,56 @@ def test_verified_instantiation_uses_bytes_without_onnxruntime_profiling() -> No
     assert dict(os.environ) == before
 
 
+def test_failed_hardware_provider_falls_back_to_cpu_with_a_startup_notice() -> None:
+    calls: list[list[str]] = []
+
+    class FakeSession:
+        @classmethod
+        def name(cls) -> str:
+            return "u2net"
+
+    class FakeOptions:
+        enable_profiling = True
+
+    class FakeOrt:
+        @staticmethod
+        def SessionOptions() -> FakeOptions:
+            return FakeOptions()
+
+        @staticmethod
+        def get_available_providers() -> list[str]:
+            return [CUDA_EXECUTION_PROVIDER, CPU_EXECUTION_PROVIDER]
+
+        @staticmethod
+        def InferenceSession(
+            _content: bytes, *, sess_options: object, providers: list[str]
+        ) -> object:
+            del sess_options
+            calls.append(providers)
+            if providers[0] == CUDA_EXECUTION_PROVIDER:
+                raise RuntimeError("CUDA cannot initialise this model")
+            return object()
+
+    prepared = _instantiate_verified_rembg_session(
+        "u2net",
+        b"already-verified",
+        "2.0.72",
+        execution_provider=CUDA_EXECUTION_PROVIDER,
+        session_classes=[FakeSession],
+        ort_module=FakeOrt,
+        installed_version="2.0.72",
+    )
+
+    assert isinstance(prepared, _PreparedRembgSession)
+    assert prepared.execution_provider == CPU_EXECUTION_PROVIDER
+    assert prepared.startup_notice is not None
+    assert "CPU fortgesetzt" in prepared.startup_notice
+    assert calls == [
+        [CUDA_EXECUTION_PROVIDER, CPU_EXECUTION_PROVIDER],
+        [CPU_EXECUTION_PROVIDER],
+    ]
+
+
 def test_session_consumes_verified_bytes_even_if_path_swaps_back_during_creation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -706,6 +794,7 @@ def test_session_consumes_verified_bytes_even_if_path_swaps_back_during_creation
         model_bytes: bytes,
         _version: str,
         _inference_kwargs: tuple[tuple[str, str], ...] = (),
+        **_kwargs: object,
     ) -> object:
         captured.append(model_bytes)
         artifact_path.write_bytes(evil)

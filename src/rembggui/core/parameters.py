@@ -10,6 +10,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from rembggui.core.errors import ValidationError
+from rembggui.core.execution_providers import (
+    CPU_EXECUTION_PROVIDER,
+    is_allowed_provider,
+)
 from rembggui.core.specs import (
     EdgeMode,
     FramingSpec,
@@ -53,12 +57,15 @@ class ParameterState:
     output_directory: Path | None = None
     output_filename: str | None = None
     max_mib: Decimal = Decimal("0")
+    execution_provider: str = CPU_EXECUTION_PROVIDER
 
     def __post_init__(self) -> None:
         if self.model_id not in V1_MODEL_IDS:
             raise ValueError("model is outside the V1 catalog")
         SamplingSpec(Fraction(0), Fraction(1), self.fps)
         SegmentationSpec(self.model_id, self.edge_mode)
+        if not is_allowed_provider(self.execution_provider):
+            raise ValueError("execution provider is not allowlisted")
         FramingSpec(
             self.trim,
             self.alpha_threshold,
@@ -87,6 +94,11 @@ class ModelChanged:
 @dataclass(frozen=True, slots=True)
 class EdgeModeChanged:
     edge_mode: EdgeMode
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionProviderChanged:
+    execution_provider: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +144,7 @@ class OutputMaxSizeChanged:
 ParameterEvent = (
     ModelChanged
     | EdgeModeChanged
+    | ExecutionProviderChanged
     | OutputFpsChanged
     | GlobalTrimChanged
     | AlphaThresholdChanged
@@ -153,6 +166,8 @@ def reduce_parameters(state: AppState, event: ParameterEvent) -> AppState:
         return _reduce_model(state, event)
     if isinstance(event, EdgeModeChanged):
         return _reduce_edge_mode(state, event)
+    if isinstance(event, ExecutionProviderChanged):
+        return _reduce_execution_provider(state, event)
     if isinstance(event, OutputFpsChanged):
         return _reduce_fps(state, event)
     if isinstance(event, GlobalTrimChanged):
@@ -196,6 +211,21 @@ def _reduce_edge_mode(state: AppState, event: EdgeModeChanged) -> AppState:
         state,
         replace(parameters, edge_mode=event.edge_mode),
         "Segmentation",
+    )
+
+
+def _reduce_execution_provider(
+    state: AppState, event: ExecutionProviderChanged
+) -> AppState:
+    if (
+        not is_allowed_provider(event.execution_provider)
+        or event.execution_provider == state.parameters.execution_provider
+    ):
+        return state
+    return _invalidate(
+        state,
+        replace(state.parameters, execution_provider=event.execution_provider),
+        "Rechenbeschleunigung",
     )
 
 
@@ -303,6 +333,9 @@ def parameters_from_values(values: Mapping[str, object]) -> ParameterState:
         defaults,
         model_id=_model_value(values.get("model_id"), defaults.model_id),
         edge_mode=_edge_value(values.get("edge_mode"), defaults.edge_mode),
+        execution_provider=_provider_value(
+            values.get("execution_provider"), defaults.execution_provider
+        ),
         fps=_int_value(values.get("fps"), defaults.fps, 1, 240),
         trim=_bool_value(values.get("trim"), defaults.trim),
         alpha_threshold=_decimal_value(
@@ -357,6 +390,10 @@ def _edge_value(value: object, default: EdgeMode) -> EdgeMode:
         if edge in {EdgeMode.STANDARD, EdgeMode.DECONTAMINATE_COLORS}
         else default
     )
+
+
+def _provider_value(value: object, default: str) -> str:
+    return value if isinstance(value, str) and is_allowed_provider(value) else default
 
 
 def _int_value(value: object, default: int, minimum: int, maximum: int | None) -> int:

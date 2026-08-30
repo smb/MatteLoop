@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass, field
 from typing import NoReturn
 
+from rembggui.core.execution_providers import is_allowed_provider
 from rembggui.core.specs import MAX_ALPHA_MATTING_ERODE_SIZE
 
 PROTOCOL_VERSION = 2
@@ -95,6 +96,8 @@ class WorkerReady:
     protocol_version: int
     job_id: str
     process_id: int
+    execution_provider: str | None = None
+    startup_notice: str | None = None
 
 
 type ParentMessage = SegmentRequest | CancelRequest | Shutdown
@@ -159,12 +162,7 @@ def decode_child_message(data: bytes) -> ChildMessage:
     payload = _load(data)
     message_type = _type_tag(payload)
     if message_type == "worker_ready":
-        _exact_keys(payload, {"type", "protocol_version", "job_id", "process_id"})
-        job_id = _identifier(payload, "job_id")
-        if job_id != CONTROL_JOB_ID:
-            _fail("WorkerReady requires the control job ID")
-        process_id = _strict_int(payload, "process_id", minimum=1)
-        return WorkerReady(_version(payload), job_id, process_id)
+        return _decode_worker_ready(payload)
     if message_type == "segment_response":
         _exact_keys(
             payload,
@@ -204,6 +202,28 @@ def decode_child_message(data: bytes) -> ChildMessage:
         _exact_keys(payload, {"type", "protocol_version", "job_id"})
         return CancelAck(_version(payload), _identifier(payload, "job_id"))
     _fail("message type is not valid in the child-to-parent direction")
+
+
+def _decode_worker_ready(payload: dict[str, object]) -> WorkerReady:
+    base_keys = {"type", "protocol_version", "job_id", "process_id"}
+    optional_keys = {"execution_provider", "startup_notice"}
+    if not base_keys <= set(payload) <= base_keys | optional_keys:
+        _fail("worker_ready fields are invalid")
+    job_id = _identifier(payload, "job_id")
+    if job_id != CONTROL_JOB_ID:
+        _fail("WorkerReady requires the control job ID")
+    process_id = _strict_int(payload, "process_id", minimum=1)
+    provider = payload.get("execution_provider")
+    notice = payload.get("startup_notice")
+    if provider is not None and (
+        not isinstance(provider, str) or not is_allowed_provider(provider)
+    ):
+        _fail("worker_ready provider is invalid")
+    if notice is not None and (
+        type(notice) is not str or not notice or len(notice) > _MAX_TEXT_LENGTH
+    ):
+        _fail("worker_ready notice is invalid")
+    return WorkerReady(_version(payload), job_id, process_id, provider, notice)
 
 
 def _message_payload(message: object) -> dict[str, object]:
@@ -255,13 +275,30 @@ def _message_payload(message: object) -> dict[str, object]:
             "job_id": message.job_id,
         }
     if type(message) is WorkerReady:
-        return {
-            "type": "worker_ready",
-            "protocol_version": message.protocol_version,
-            "job_id": message.job_id,
-            "process_id": message.process_id,
-        }
+        return _worker_ready_payload(message)
     _fail("unsupported protocol message object")
+
+
+def _worker_ready_payload(message: WorkerReady) -> dict[str, object]:
+    payload = {
+        "type": "worker_ready",
+        "protocol_version": message.protocol_version,
+        "job_id": message.job_id,
+        "process_id": message.process_id,
+    }
+    if message.execution_provider is not None:
+        if not is_allowed_provider(message.execution_provider):
+            _fail("worker_ready provider is invalid")
+        payload["execution_provider"] = message.execution_provider
+    if message.startup_notice is not None:
+        if (
+            type(message.startup_notice) is not str
+            or not message.startup_notice
+            or len(message.startup_notice) > _MAX_TEXT_LENGTH
+        ):
+            _fail("worker_ready notice is invalid")
+        payload["startup_notice"] = message.startup_notice
+    return payload
 
 
 def _slot_payload(slot: SharedFrame) -> dict[str, object]:

@@ -20,7 +20,7 @@
     "long_functions": 2
   },
   "src/rembggui/jobs/models/session.py": {
-    "lines": 345,
+    "lines": 399,
     "long_functions": 1
   },
   "src/rembggui/jobs/render.py": {
@@ -28,7 +28,7 @@
     "long_functions": 11
   },
   "src/rembggui/jobs/segmentation_host.py": {
-    "lines": 1630,
+    "lines": 1805,
     "long_functions": 8
   },
   "src/rembggui/jobs/source.py": {
@@ -80,7 +80,7 @@
     "long_functions": 1
   },
   "src/rembggui/ui/main_window.py": {
-    "lines": 366,
+    "lines": 373,
     "long_functions": 1
   },
   "src/rembggui/ui/presenter.py": {

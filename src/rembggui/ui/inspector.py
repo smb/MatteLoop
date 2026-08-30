@@ -20,10 +20,17 @@ from PySide6.QtWidgets import (
 )
 
 from rembggui.core.crop_state import CropChanged, CropToggleChanged, ResetCrop
+from rembggui.core.execution_providers import (
+    CPU_EXECUTION_PROVIDER,
+    ProviderOption,
+    is_allowed_provider,
+)
+from rembggui.core.execution_providers import provider_options as build_provider_options
 from rembggui.core.parameters import (
     V1_MODEL_IDS,
     AlphaThresholdChanged,
     EdgeModeChanged,
+    ExecutionProviderChanged,
     GlobalTrimChanged,
     ModelChanged,
     OutputFilenameChanged,
@@ -62,14 +69,28 @@ class Inspector(QFrame):
         settings: QSettings,
         model_options: tuple[tuple[str, bool], ...] | None = None,
         parent: QWidget | None = None,
+        *,
+        provider_options: tuple[ProviderOption, ...] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("inspector")
         self.setAccessibleName("Processing settings")
         self._settings = settings
         self._model_options = dict(model_options or ())
+        self._provider_options = (
+            build_provider_options((CPU_EXECUTION_PROVIDER,))
+            if provider_options is None
+            else provider_options
+        )
+        self._available_provider_ids = tuple(
+            option.provider for option in self._provider_options
+        )
+        self._provider_model_id = ""
         self._build_parameter_controls()
         self._build_crop_controls()
+        self._build_scrollable_content()
+
+    def _build_scrollable_content(self) -> None:
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         self.scroll_area = QScrollArea()
@@ -141,6 +162,10 @@ class Inspector(QFrame):
         self.model_picker.setCurrentIndex(
             self.model_picker.findData(catalog.default_id)
         )
+        self.provider_picker = QComboBox()
+        self.provider_picker.setObjectName("provider_picker")
+        self.provider_picker.setAccessibleName("Rechenbeschleunigung")
+        self._set_provider_options(catalog.default_id)
         self.edge_picker = QComboBox()
         self.edge_picker.setObjectName("edge_picker")
         self.edge_picker.setAccessibleName("Edge treatment")
@@ -203,6 +228,7 @@ class Inspector(QFrame):
 
     def _connect_parameter_controls(self) -> None:
         self.model_picker.currentIndexChanged.connect(self._model_changed)
+        self.provider_picker.currentIndexChanged.connect(self._provider_changed)
         self.edge_picker.currentIndexChanged.connect(self._edge_changed)
         self.fps_spinbox.valueChanged.connect(
             lambda value: self._emit_if_editable(OutputFpsChanged(value))
@@ -244,6 +270,11 @@ class Inspector(QFrame):
         model_id = self.model_picker.currentData()
         if isinstance(model_id, str):
             self._emit_if_editable(ModelChanged(model_id))
+
+    def _provider_changed(self, _index: int) -> None:
+        selected = self.provider_picker.currentData()
+        if is_allowed_provider(selected):
+            self._emit_if_editable(ExecutionProviderChanged(selected))
 
     def _edge_changed(self, _index: int) -> None:
         try:
@@ -295,8 +326,34 @@ class Inspector(QFrame):
     ) -> None:
         """Render reducer-owned parameters into standard inspector widgets."""
         self._parameter_syncing = True
+        try:
+            self._apply_parameter_values(presentation)
+        finally:
+            self._parameter_syncing = False
+        available = editable and presentation.duration is not None
+        for widget in (
+            self.model_picker,
+            self.provider_picker,
+            self.edge_picker,
+            self.fps_spinbox,
+            self.start_spinbox,
+            self.end_spinbox,
+            self.duration_spinbox,
+            self.trim_checkbox,
+            self.alpha_threshold_spinbox,
+            self.padding_spinbox,
+            self.stretch_spinbox,
+            self.output_directory_button,
+            self.output_filename_edit,
+            self.max_size_spinbox,
+        ):
+            widget.setEnabled(available)
+        self.fps_warning.setVisible(available and presentation.fps > 60)
+
+    def _apply_parameter_values(self, presentation: ParameterPresentation) -> None:
         widgets = (
             self.model_picker,
+            self.provider_picker,
             self.edge_picker,
             self.fps_spinbox,
             self.start_spinbox,
@@ -314,6 +371,12 @@ class Inspector(QFrame):
             model_index = self.model_picker.findData(presentation.model_id)
             if model_index >= 0:
                 self.model_picker.setCurrentIndex(model_index)
+            self._set_provider_options(presentation.model_id)
+            provider_index = self.provider_picker.findData(
+                presentation.execution_provider
+            )
+            if provider_index >= 0:
+                self.provider_picker.setCurrentIndex(provider_index)
             edge_index = self.edge_picker.findData(presentation.edge_mode.value)
             if edge_index >= 0:
                 self.edge_picker.setCurrentIndex(edge_index)
@@ -331,25 +394,6 @@ class Inspector(QFrame):
             self._clear_filename_error()
         finally:
             del blockers
-            self._parameter_syncing = False
-        available = editable and presentation.duration is not None
-        for widget in (
-            self.model_picker,
-            self.edge_picker,
-            self.fps_spinbox,
-            self.start_spinbox,
-            self.end_spinbox,
-            self.duration_spinbox,
-            self.trim_checkbox,
-            self.alpha_threshold_spinbox,
-            self.padding_spinbox,
-            self.stretch_spinbox,
-            self.output_directory_button,
-            self.output_filename_edit,
-            self.max_size_spinbox,
-        ):
-            widget.setEnabled(available)
-        self.fps_warning.setVisible(available and presentation.fps > 60)
 
     def _apply_time_values(self, presentation: ParameterPresentation) -> None:
         duration = presentation.source_duration
@@ -534,6 +578,7 @@ class Inspector(QFrame):
         layout = QFormLayout(controls)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addRow("Model", self.model_picker)
+        layout.addRow("Rechenbeschleunigung", self.provider_picker)
         layout.addRow("Edge treatment", self.edge_picker)
         return controls
 
@@ -576,6 +621,7 @@ class Inspector(QFrame):
         """Return standard parameter controls in consequence order."""
         return (
             self.model_picker,
+            self.provider_picker,
             self.edge_picker,
             self.fps_spinbox,
             self.start_spinbox,
@@ -595,6 +641,7 @@ class Inspector(QFrame):
         return (
             self.disclosures["segmentation"][0],
             self.model_picker,
+            self.provider_picker,
             self.edge_picker,
             self.manage_models,
             self.disclosures["time_sampling"][0],
@@ -646,3 +693,24 @@ class Inspector(QFrame):
     def _read_bool(self, name: str, default: bool) -> bool:
         value = self._settings.value(name, default)
         return value if type(value) is bool else default
+
+    def _set_provider_options(self, model_id: str) -> None:
+        if self._provider_model_id == model_id and self.provider_picker.count():
+            return
+        selected = self.provider_picker.currentData()
+        options = build_provider_options(
+            self._available_provider_ids, model_id=model_id
+        )
+        self._provider_options = options
+        self._provider_model_id = model_id
+        self.provider_picker.blockSignals(True)
+        try:
+            self.provider_picker.clear()
+            for option in options:
+                self.provider_picker.addItem(option.label, option.provider)
+        finally:
+            self.provider_picker.blockSignals(False)
+        if selected is not None:
+            index = self.provider_picker.findData(selected)
+            if index >= 0:
+                self.provider_picker.setCurrentIndex(index)

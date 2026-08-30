@@ -18,6 +18,8 @@ def _run_gui() -> int:
     from PySide6.QtCore import QSettings
     from PySide6.QtWidgets import QApplication
 
+    from rembggui.core.execution_providers import provider_options_from_runtime
+    from rembggui.core.parameters import V1_MODEL_IDS
     from rembggui.core.state import AppState, ModelAvailabilityChanged
     from rembggui.ui.controller import SourceController
     from rembggui.ui.main_window import MainWindow
@@ -34,14 +36,23 @@ def _run_gui() -> int:
     application.setApplicationVersion(__version__)
     install_theme(application)
     settings = QSettings()
-    store = ReducerStore(AppState(parameters=load_parameters(settings)))
+    stored_model = settings.value("parameters/model_id")
+    model_id = stored_model if stored_model in V1_MODEL_IDS else "birefnet-portrait"
+    provider_options = provider_options_from_runtime(model_id=model_id)
+    store = ReducerStore(
+        AppState(parameters=load_parameters(settings, provider_options))
+    )
     controller = SourceController(store, settings=settings, parent=application)
     availability = dict(controller.model_options).get(
         store.state.parameters.model_id, False
     )
     store.dispatch(ModelAvailabilityChanged(availability))
     window = MainWindow(
-        store, controller, settings, model_options=controller.model_options
+        store,
+        controller,
+        settings,
+        model_options=controller.model_options,
+        provider_options=provider_options,
     )
     controller.set_dialog_parent(window)
     application.aboutToQuit.connect(controller.shutdown)

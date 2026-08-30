@@ -9,6 +9,10 @@ from threading import RLock
 from typing import Protocol
 
 from rembggui.core.errors import AppError, ErrorCode
+from rembggui.core.execution_providers import (
+    CPU_EXECUTION_PROVIDER,
+    is_allowed_provider,
+)
 from rembggui.jobs.models.cache_fs import (
     BoundDirectoryCloseError,
     BoundModelDirectory,
@@ -45,6 +49,8 @@ class PreparationResult:
     execution_class: ExecutionClass
     local_session_ready: bool
     artifact_path: Path | None
+    execution_provider: str = CPU_EXECUTION_PROVIDER
+    fallback_notice: str | None = None
 
 
 class ModelSessionManager:
@@ -79,6 +85,8 @@ class ModelSessionManager:
         self._lock = RLock()
         self._client: SessionClient | None = None
         self._active_spec: ModelSpec | None = None
+        self._active_provider: str | None = None
+        self._active_requested_provider: str | None = None
         self._active_result: PreparationResult | None = None
         self._cleanup_spec: ModelSpec | None = None
         self._cleanup_ids: frozenset[str] = frozenset()
@@ -95,6 +103,16 @@ class ModelSessionManager:
             return self._active_spec
 
     @property
+    def active_provider(self) -> str | None:
+        with self._lock:
+            return self._active_provider
+
+    @property
+    def active_requested_provider(self) -> str | None:
+        with self._lock:
+            return self._active_requested_provider
+
+    @property
     def cleanup_pending_id(self) -> str | None:
         with self._lock:
             return self._cleanup_spec.id if self._cleanup_spec is not None else None
@@ -105,13 +123,18 @@ class ModelSessionManager:
             spec = self._catalog.get(model_id)
             if self._cleanup_spec is not None:
                 raise _cleanup_pending_error(self._cleanup_spec.id)
-            if type(extras) is not dict or extras:
+            provider = _execution_provider(extras)
+            if provider is None:
                 raise _preparation_error(
-                    "Task 9 accepts no model paths, custom options, or prompts"
+                    "execution provider must be an allowlisted local provider"
                 )
             if spec.execution_class is not ExecutionClass.LOCAL:
                 raise _preparation_error("model execution class is not supported")
-            if self._active_spec == spec and self._active_result is not None:
+            if (
+                self._active_spec == spec
+                and self._active_requested_provider == provider
+                and self._active_result is not None
+            ):
                 return self._active_result
             artifact_path = self._downloader.download(
                 spec,
@@ -119,13 +142,7 @@ class ModelSessionManager:
                 self._progress,
                 self._cancelled,
             )
-            launch_payload = self._launch_payload(spec, artifact_path)
-            result = PreparationResult(
-                model_id=spec.id,
-                execution_class=spec.execution_class,
-                local_session_ready=True,
-                artifact_path=artifact_path,
-            )
+            launch_payload = self._launch_payload(spec, artifact_path, provider)
             if self._client is None:
                 client = self._client_factory(launch_payload)
                 try:
@@ -159,7 +176,18 @@ class ModelSessionManager:
                         raise cleanup_error from replacement_error
                     self._clear_all_unlocked()
                     raise
+            active_provider = _client_provider(client, provider)
+            result = PreparationResult(
+                model_id=spec.id,
+                execution_class=spec.execution_class,
+                local_session_ready=True,
+                artifact_path=artifact_path,
+                execution_provider=active_provider,
+                fallback_notice=_client_notice(client),
+            )
             self._active_spec = spec
+            self._active_provider = active_provider
+            self._active_requested_provider = provider
             self._active_result = result
             return result
 
@@ -229,7 +257,7 @@ class ModelSessionManager:
             self._close_active_unlocked()
 
     def _launch_payload(
-        self, spec: ModelSpec, artifact_path: Path
+        self, spec: ModelSpec, artifact_path: Path, execution_provider: str
     ) -> dict[str, object]:
         artifact = spec.artifact
         assert artifact is not None
@@ -253,6 +281,7 @@ class ModelSessionManager:
             "sha256": artifact.sha256,
             "size_bytes": artifact.size_bytes,
             "inference_defaults": spec.inference_defaults.to_primitives(),
+            "execution_provider": execution_provider,
         }
 
     def _close_active_unlocked(self) -> None:
@@ -271,11 +300,15 @@ class ModelSessionManager:
 
     def _clear_active_unlocked(self) -> None:
         self._active_spec = None
+        self._active_provider = None
+        self._active_requested_provider = None
         self._active_result = None
 
     def _clear_all_unlocked(self) -> None:
         self._client = None
         self._active_spec = None
+        self._active_provider = None
+        self._active_requested_provider = None
         self._active_result = None
         self._cleanup_spec = None
         self._cleanup_ids = frozenset()
@@ -289,6 +322,27 @@ class ModelSessionManager:
                 "model session manager has already been closed",
                 "restart-application",
             )
+
+
+def _execution_provider(extras: dict[str, object]) -> str | None:
+    if type(extras) is not dict or set(extras) - {"execution_provider"}:
+        return None
+    provider = extras.get("execution_provider", CPU_EXECUTION_PROVIDER)
+    return (
+        provider
+        if isinstance(provider, str) and is_allowed_provider(provider)
+        else None
+    )
+
+
+def _client_provider(client: SessionClient, default: str) -> str:
+    provider = getattr(client, "effective_provider", default)
+    return provider if is_allowed_provider(provider) else default
+
+
+def _client_notice(client: SessionClient) -> str | None:
+    notice = getattr(client, "startup_notice", None)
+    return notice if isinstance(notice, str) and notice else None
 
 
 def _after_remove_directory_bound(_bound: BoundModelDirectory) -> None:

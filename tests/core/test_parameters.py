@@ -11,6 +11,7 @@ from rembggui.core.parameters import (
     V1_MODEL_IDS,
     AlphaThresholdChanged,
     EdgeModeChanged,
+    ExecutionProviderChanged,
     GlobalTrimChanged,
     ModelChanged,
     OutputDirectoryChanged,
@@ -110,6 +111,14 @@ def test_segmentation_parameter_changes_stale_the_current_preview() -> None:
     changed_again = reduce(changed, EdgeModeChanged(EdgeMode.DECONTAMINATE_COLORS))
     assert changed_again.parameters.edge_mode is EdgeMode.DECONTAMINATE_COLORS
     assert changed_again.preview is PreviewState.STALE
+
+
+def test_execution_provider_changes_stale_the_current_preview() -> None:
+    changed = reduce(_current(), ExecutionProviderChanged("CUDAExecutionProvider"))
+
+    assert changed.parameters.execution_provider == "CUDAExecutionProvider"
+    assert changed.preview is PreviewState.STALE
+    assert changed.stale_category == "Rechenbeschleunigung"
 
 
 def test_cleanup_parameter_changes_stale_the_current_preview() -> None:

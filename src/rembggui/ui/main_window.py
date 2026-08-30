@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from rembggui.core.execution_providers import ProviderOption
 from rembggui.core.state import AppState, FocusTarget
 from rembggui.ui.action_shelf import ActionShelf
 from rembggui.ui.crop_view import render_source_editor
@@ -52,6 +53,7 @@ class MainWindow(QMainWindow):
         parent: QWidget | None = None,
         *,
         model_options: tuple[tuple[str, bool], ...] | None = None,
+        provider_options: tuple[ProviderOption, ...] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("main_window")
@@ -62,6 +64,7 @@ class MainWindow(QMainWindow):
         self._services = services
         self._settings = settings
         self._model_options = model_options
+        self._provider_options = provider_options
         self._unsubscribe: Callable[[], None] | None = None
         self._last_focus: FocusTarget | None = None
         self._build()
@@ -118,7 +121,11 @@ class MainWindow(QMainWindow):
         inspector_layout = QVBoxLayout(inspector_column)
         inspector_layout.setContentsMargins(0, 0, 0, 0)
         inspector_layout.setSpacing(0)
-        self.inspector = Inspector(self._settings, model_options=self._model_options)
+        self.inspector = Inspector(
+            self._settings,
+            model_options=self._model_options,
+            provider_options=self._provider_options,
+        )
         self.inspector_scroll = self.inspector.scroll_area
         self.inspector_content = self.inspector.scroll_area.widget()
         self.action_shelf = ActionShelf()

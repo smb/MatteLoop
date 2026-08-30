@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from fractions import Fraction
 from itertools import count
 from pathlib import Path
@@ -16,12 +17,16 @@ from PySide6.QtWidgets import QFileDialog, QWidget
 
 from rembggui.core.crop_state import CropEvent
 from rembggui.core.errors import AppError, ErrorCode
+from rembggui.core.execution_providers import ProviderOption, is_allowed_provider
 from rembggui.core.parameters import (
+    ExecutionProviderChanged,
     OutputDirectoryChanged,
     ParameterEvent,
     output_directory_for_source,
 )
 from rembggui.core.state import (
+    AppState,
+    JobState,
     SourceLoaded,
     SourceLoadFailed,
     SourceLoadRequested,
@@ -179,6 +184,15 @@ class SourceController(QObject):
             dialog_parent=dialog_parent,
             parent=self,
         )
+        self._preview_controller.provider_ready.connect(self._provider_ready)
+        self._render_controller.provider_ready.connect(self._provider_ready)
+        self._working_provider = store.state.parameters.execution_provider
+        self._failed_provider: str | None = None
+        self._pending_provider: str | None = None
+        self._provider_reconcile_scheduled = False
+        self._unsubscribe: Callable[[], None] | None = store.subscribe(
+            self._state_changed
+        )
         self._decode_request_ids = count(1)
         self._threads: dict[str, tuple[QThread, _SourceLoadWorker]] = {}
         self._frame_threads: list[tuple[QThread, SourceFrameWorker]] = []
@@ -214,6 +228,11 @@ class SourceController(QObject):
     def model_options(self) -> tuple[tuple[str, bool], ...]:
         """Expose runtime model availability for the passive inspector view."""
         return self._preview_controller.model_options
+
+    @property
+    def provider_options(self) -> tuple[ProviderOption, ...]:
+        """Expose runtime provider availability for the passive inspector view."""
+        return self._preview_controller.provider_options
 
     def dispatch(self, command: WindowCommand) -> None:
         if self._closed:
@@ -263,6 +282,11 @@ class SourceController(QObject):
     def shutdown(self) -> None:
         """Stop accepting results while the application is closing."""
         self._closed = True
+        self._pending_provider = None
+        if self._unsubscribe is not None:
+            unsubscribe = self._unsubscribe
+            self._unsubscribe = None
+            unsubscribe()
         self._frame_timer.stop()
         self._cancel_frame_threads()
         for thread, _worker in tuple(self._frame_threads):
@@ -376,7 +400,55 @@ class SourceController(QObject):
         self._store.dispatch(event)
         after = self._store.state
         if after is not before and self._settings is not None:
-            persist_parameters(self._settings, after.parameters)
+            if isinstance(event, ExecutionProviderChanged):
+                self._failed_provider = None
+                parameters = after.parameters
+            else:
+                parameters = after.parameters
+                if parameters.execution_provider == self._failed_provider:
+                    parameters = replace(
+                        parameters,
+                        execution_provider=self._working_provider,
+                    )
+            persist_parameters(
+                self._settings,
+                parameters,
+            )
+
+    @Slot(str)
+    def _provider_ready(self, provider: str) -> None:
+        if self._closed or not is_allowed_provider(provider):
+            return
+        self._pending_provider = provider
+        if self._store.state.job.phase is JobState.IDLE:
+            self._schedule_provider_reconciliation()
+
+    def _state_changed(self, state: AppState) -> None:
+        if (
+            self._pending_provider is not None
+            and state.job.phase is JobState.IDLE
+        ):
+            self._schedule_provider_reconciliation()
+
+    def _schedule_provider_reconciliation(self) -> None:
+        if self._provider_reconcile_scheduled:
+            return
+        self._provider_reconcile_scheduled = True
+        QTimer.singleShot(0, self._reconcile_provider)
+
+    @Slot()
+    def _reconcile_provider(self) -> None:
+        self._provider_reconcile_scheduled = False
+        if self._closed or self._store.state.job.phase is not JobState.IDLE:
+            return
+        provider, self._pending_provider = self._pending_provider, None
+        if provider is None:
+            return
+        selected = self._store.state.parameters.execution_provider
+        if selected != provider:
+            self._dispatch_parameter(ExecutionProviderChanged(provider))
+        self._failed_provider = None
+        self._working_provider = provider
 
     def _choose_output_directory(self) -> None:
         state = self._store.state

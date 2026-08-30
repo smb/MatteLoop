@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from PySide6.QtCore import QSettings
 
+from rembggui.core.execution_providers import ProviderOption, select_provider
 from rembggui.core.parameters import ParameterState, parameters_from_values
 
 _PREFIX = "parameters/"
 _KEYS = (
     "model_id",
     "edge_mode",
+    "execution_provider",
     "fps",
     "trim",
     "alpha_threshold",
@@ -21,16 +23,28 @@ _KEYS = (
 )
 
 
-def load_parameters(settings: QSettings) -> ParameterState:
+def load_parameters(
+    settings: QSettings, provider_options: tuple[ProviderOption, ...] | None = None
+) -> ParameterState:
     """Read each primitive independently; malformed settings use field defaults."""
     values = {name: settings.value(f"{_PREFIX}{name}") for name in _KEYS}
-    return parameters_from_values(values)
+    parameters = parameters_from_values(values)
+    if provider_options is None:
+        return parameters
+    return parameters_from_values(
+        {**values, "execution_provider": select_provider(
+            values.get("execution_provider"), provider_options
+        )}
+    )
 
 
 def persist_parameters(settings: QSettings, parameters: ParameterState) -> None:
     """Persist only simple values; source and job state never enter settings."""
     settings.setValue(f"{_PREFIX}model_id", parameters.model_id)
     settings.setValue(f"{_PREFIX}edge_mode", parameters.edge_mode.value)
+    settings.setValue(
+        f"{_PREFIX}execution_provider", parameters.execution_provider
+    )
     settings.setValue(f"{_PREFIX}fps", parameters.fps)
     settings.setValue(f"{_PREFIX}trim", parameters.trim)
     settings.setValue(

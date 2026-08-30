@@ -19,6 +19,7 @@ from rembggui.core.state import AppState
 class ParameterPresentation:
     model_id: str
     edge_mode: EdgeMode
+    execution_provider: str
     fps: int
     trim: bool
     alpha_threshold: Decimal
@@ -52,6 +53,7 @@ def present_parameters(state: AppState) -> ParameterPresentation:
     return ParameterPresentation(
         model_id=parameters.model_id,
         edge_mode=parameters.edge_mode,
+        execution_provider=parameters.execution_provider,
         fps=timeline.fps if timeline is not None else parameters.fps,
         trim=parameters.trim,
         alpha_threshold=parameters.alpha_threshold,

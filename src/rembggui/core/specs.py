@@ -12,6 +12,10 @@ from fractions import Fraction
 from pathlib import Path, PureWindowsPath
 
 from rembggui.core.errors import ErrorCode, ValidationError
+from rembggui.core.execution_providers import (
+    CPU_EXECUTION_PROVIDER,
+    is_allowed_provider,
+)
 
 MIN_FINAL_DIMENSION = 128
 MAX_FINAL_DIMENSION = 16_383
@@ -199,11 +203,12 @@ def catalog_edge_mode(edge_mode: EdgeMode) -> str:
 
 @dataclass(frozen=True)
 class SegmentationSpec:
-    """Model and edge-treatment selections for a segmentation worker."""
+    """Model, provider, and edge-treatment selections for a worker."""
 
     model_id: str = "birefnet-portrait"
     edge_mode: EdgeMode = EdgeMode.STANDARD
     alpha_matting: AlphaMattingSpec = field(default_factory=AlphaMattingSpec)
+    execution_provider: str = CPU_EXECUTION_PROVIDER
 
     def __post_init__(self) -> None:
         self.validate()
@@ -220,6 +225,12 @@ class SegmentationSpec:
                 ErrorCode.INVALID_SEGMENTATION,
                 "segmentation",
                 "edge_mode must be an EdgeMode",
+            )
+        if not is_allowed_provider(self.execution_provider):
+            raise ValidationError(
+                ErrorCode.INVALID_SEGMENTATION,
+                "segmentation",
+                "execution_provider must be an allowlisted provider",
             )
         if not isinstance(self.alpha_matting, AlphaMattingSpec):
             raise ValidationError(

@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from PySide6.QtCore import QSettings
 
+from rembggui.core.execution_providers import (
+    COREML_EXECUTION_PROVIDER,
+    CPU_EXECUTION_PROVIDER,
+    ProviderOption,
+)
 from rembggui.ui.inspector import Inspector
 
 
@@ -106,6 +111,31 @@ def test_inspector_emits_edge_mode_from_the_standard_combo(qtbot) -> None:
     inspector.edge_picker.setCurrentIndex(1)
 
     assert [type(command).__name__ for command in commands] == ["EdgeModeChanged"]
+
+
+def test_inspector_exposes_and_emits_the_selected_execution_provider(qtbot) -> None:
+    inspector = Inspector(
+        _settings(),
+        provider_options=(
+            ProviderOption(CPU_EXECUTION_PROVIDER, "CPU – empfohlen", True),
+            ProviderOption(
+                COREML_EXECUTION_PROVIDER,
+                "Apple CoreML – experimentell",
+            ),
+        ),
+    )
+    qtbot.addWidget(inspector)
+    commands: list[object] = []
+    inspector.command_requested.connect(commands.append)
+
+    assert inspector.provider_picker.currentData() == CPU_EXECUTION_PROVIDER
+    assert inspector.provider_picker.itemText(1) == "Apple CoreML – experimentell"
+    inspector.provider_picker.setCurrentIndex(1)
+
+    assert [type(command).__name__ for command in commands] == [
+        "ExecutionProviderChanged"
+    ]
+    assert commands[0].execution_provider == COREML_EXECUTION_PROVIDER
 
 
 def test_inspector_explains_invalid_output_filename_without_emitting_a_command(

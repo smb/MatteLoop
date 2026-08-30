@@ -56,6 +56,8 @@ class RenderRuntime(Protocol):
 class _RenderWorker(QObject):
     notification = Signal(object)
     finished = Signal(str)
+    provider_ready = Signal(str)
+    provider_notice = Signal(str)
 
     def __init__(
         self,
@@ -81,6 +83,17 @@ class _RenderWorker(QObject):
     def run(self) -> None:
         try:
             artifact = self._runtime.render(self._request, self._context)
+            provider = getattr(
+                self._runtime,
+                "active_provider",
+                self._request.segmentation.execution_provider,
+            )
+            if not isinstance(provider, str):
+                provider = self._request.segmentation.execution_provider
+            self.provider_ready.emit(provider)
+            notice = getattr(self._runtime, "fallback_notice", None)
+            if isinstance(notice, str) and notice:
+                self.provider_notice.emit(notice)
             if self._context.terminal_state is JobTerminalState.RUNNING:
                 self._context.commit_if_not_cancelled(lambda: None)
             elif self._context.terminal_state is JobTerminalState.CANCEL_PENDING:
@@ -124,6 +137,9 @@ class _RenderWorker(QObject):
 
 class RenderController(QObject):
     """Start render jobs after reducer-approved UI confirmations."""
+
+    provider_ready = Signal(str)
+    provider_notice = Signal(str)
 
     def __init__(
         self,
@@ -200,10 +216,16 @@ class RenderController(QObject):
                     name="rembggui-render-cancel",
                     daemon=True,
                 ).start()
-        for thread, _worker in tuple(self._threads.values()):
-            thread.quit()
-        for thread, _worker in tuple(self._threads.values()):
-            thread.wait(5000)
+        for job_id, (thread, _worker) in tuple(self._threads.items()):
+            try:
+                thread.quit()
+            except RuntimeError:
+                self._threads.pop(job_id, None)
+        for job_id, (thread, _worker) in tuple(self._threads.items()):
+            try:
+                thread.wait(5000)
+            except RuntimeError:
+                self._threads.pop(job_id, None)
 
     def _request_render(self) -> None:
         state = self._store.state
@@ -427,10 +449,12 @@ class RenderController(QObject):
         thread = QThread(self)
         worker.moveToThread(thread)
         worker.notification.connect(self._notification)
+        worker.provider_ready.connect(self._provider_ready)
+        worker.provider_notice.connect(self._provider_notice)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
         thread.finished.connect(lambda job_id=job_id: self._thread_finished(job_id))
+        thread.finished.connect(thread.deleteLater)
         thread.started.connect(worker.run)
         self._contexts[job_id] = context
         self._threads[job_id] = (thread, worker)
@@ -497,6 +521,25 @@ class RenderController(QObject):
             notification, (RenderSucceeded, RenderFailed, CancelAcknowledged)
         ):
             self._terminal_notification(notification)
+
+    @Slot(str)
+    def _provider_ready(self, provider: str) -> None:
+        if (
+            self._active_job_id is None
+            or self._store.state.job.job_id != self._active_job_id
+        ):
+            return
+        self.provider_ready.emit(provider)
+
+    @Slot(str)
+    def _provider_notice(self, notice: str) -> None:
+        if (
+            self._active_job_id is None
+            or self._store.state.job.job_id != self._active_job_id
+        ):
+            return
+        if self._dialog is not None:
+            self._dialog.set_provider_notice(notice)
 
     def _terminal_notification(
         self, notification: RenderSucceeded | RenderFailed | CancelAcknowledged

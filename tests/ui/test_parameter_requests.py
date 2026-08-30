@@ -5,6 +5,7 @@ from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 
+from rembggui.core.execution_providers import CUDA_EXECUTION_PROVIDER
 from rembggui.core.parameters import ParameterState
 from rembggui.core.specs import EdgeMode
 from rembggui.core.timeline import TimelineState
@@ -24,6 +25,7 @@ def test_preview_and_render_requests_share_every_inspector_parameter() -> None:
     parameters = ParameterState(
         model_id="u2net",
         edge_mode=EdgeMode.DECONTAMINATE_COLORS,
+        execution_provider=CUDA_EXECUTION_PROVIDER,
         fps=120,
         trim=True,
         alpha_threshold=Decimal("4.5"),
@@ -43,6 +45,7 @@ def test_preview_and_render_requests_share_every_inspector_parameter() -> None:
     assert request.sampling == timeline_to_sampling(timeline)
     assert request.segmentation.model_id == parameters.model_id
     assert request.segmentation.edge_mode is parameters.edge_mode
+    assert request.segmentation.execution_provider == parameters.execution_provider
     assert request.framing.trim is parameters.trim
     assert request.framing.alpha_threshold == parameters.alpha_threshold
     assert request.framing.padding == parameters.padding

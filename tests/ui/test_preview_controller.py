@@ -141,7 +141,7 @@ def _settings() -> QSettings:
 
 
 def test_preview_request_prepares_model_and_displays_the_first_frame_cutout(
-    tmp_path: Path, qtbot
+    tmp_path: Path, qtbot, request
 ) -> None:
     path = tmp_path / "source.mp4"
     path.write_bytes(b"fixture")
@@ -152,6 +152,7 @@ def test_preview_request_prepares_model_and_displays_the_first_frame_cutout(
         source_adapter=FakeSourceAdapter(path),
         preview_runtime=runtime,
     )
+    request.addfinalizer(controller.shutdown)
     window = MainWindow(store, controller, _settings())
     qtbot.addWidget(window)
     window.show()
@@ -165,7 +166,12 @@ def test_preview_request_prepares_model_and_displays_the_first_frame_cutout(
         timeout=5000,
     )
 
-    assert runtime.prepare_calls == [("birefnet-portrait", {})]
+    assert runtime.prepare_calls == [
+        (
+            "birefnet-portrait",
+            {"execution_provider": "CPUExecutionProvider"},
+        )
+    ]
     assert runtime.thread_ids and runtime.thread_ids[0] != get_ident()
     request, playhead = runtime.requests[0]
     assert playhead == Fraction(0)

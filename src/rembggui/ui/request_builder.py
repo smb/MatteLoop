@@ -92,7 +92,9 @@ def _render_request(
         sampling=SamplingSpec(inputs.start, inputs.end, fps=parameters.fps),
         crop=inputs.crop,
         segmentation=SegmentationSpec(
-            model_id=parameters.model_id, edge_mode=parameters.edge_mode
+            model_id=parameters.model_id,
+            edge_mode=parameters.edge_mode,
+            execution_provider=parameters.execution_provider,
         ),
         framing=FramingSpec(
             trim=parameters.trim,
