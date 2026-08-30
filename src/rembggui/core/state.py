@@ -5,6 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
+from rembggui.core.timeline import (
+    SourceFrameDecoded,
+    TimelineEvent,
+    TimelineState,
+    timeline_from_metadata,
+)
+from rembggui.core.timeline_reducer import reduce_timeline
+
 
 class SourceState(StrEnum):
     EMPTY = "empty"
@@ -103,6 +111,7 @@ class AppState:
     source_request_id: str | None = None
     source_value: object | None = None
     source_frame: object | None = None
+    timeline: TimelineState | None = None
     source_error: object | None = None
     model_available: bool = True
     model_supports_render: bool = True
@@ -332,6 +341,7 @@ class EditedCutsChanged:
 type Event = (
     SourceLoadRequested
     | SourceLoaded
+    | SourceFrameDecoded
     | SourceLoadFailed
     | ModelAvailabilityChanged
     | PreviewRequested
@@ -350,6 +360,7 @@ type Event = (
     | CancelAcknowledged
     | EditedCutsScanRequested
     | EditedCutsChanged
+    | TimelineEvent
 )
 
 
@@ -368,7 +379,6 @@ def reduce(state: AppState, event: Event) -> AppState:
             model_supports_render=state.model_supports_render,
             focus_target=FocusTarget.NONE,
         )
-
     if isinstance(event, SourceLoaded):
         if not _matches_source_request(state, event.source_id, event.request_id):
             return state
@@ -377,10 +387,12 @@ def reduce(state: AppState, event: Event) -> AppState:
             source=SourceState.READY,
             source_value=event.value,
             source_frame=event.frame,
+            timeline=timeline_from_metadata(event.value),
             source_error=None,
             focus_target=FocusTarget.PREVIEW_ACTION,
         )
-
+    if isinstance(event, (SourceFrameDecoded, TimelineEvent)):
+        return reduce_timeline(state, event)
     if isinstance(event, SourceLoadFailed):
         if not _matches_source_request(state, event.source_id, event.request_id):
             return state
@@ -392,14 +404,12 @@ def reduce(state: AppState, event: Event) -> AppState:
             source_error=event.error,
             focus_target=FocusTarget.SOURCE_ERROR_HEADING,
         )
-
     if isinstance(event, ModelAvailabilityChanged):
         return replace(
             state,
             model_available=event.available,
             model_supports_render=event.supports_render,
         )
-
     if isinstance(event, PreviewRequested):
         if not capabilities(state).can_preview:
             return state
@@ -424,7 +434,6 @@ def reduce(state: AppState, event: Event) -> AppState:
             preflight_warning=False,
             focus_target=FocusTarget.JOB_DIALOG,
         )
-
     if isinstance(event, ModelPrepared):
         if not _matches_job_notification(
             state,
@@ -445,7 +454,6 @@ def reduce(state: AppState, event: Event) -> AppState:
                 stage=event.stage,
             ),
         )
-
     if isinstance(event, JobStageChanged):
         if (
             not _matches_job_notification(
@@ -462,7 +470,6 @@ def reduce(state: AppState, event: Event) -> AppState:
         if phase is JobState.PREPARING_MODEL and event.stage == "Segmentation":
             phase = JobState.PREVIEWING
         return replace(state, job=replace(state.job, phase=phase, stage=event.stage))
-
     if isinstance(event, PreviewSucceeded):
         if not _matches_result(
             state,
@@ -484,7 +491,6 @@ def reduce(state: AppState, event: Event) -> AppState:
             job_request_id=None,
             focus_target=FocusTarget.RESULT_CANVAS,
         )
-
     if isinstance(event, PreviewFailed):
         if not _matches_result(
             state,
@@ -522,7 +528,6 @@ def reduce(state: AppState, event: Event) -> AppState:
             job_request_id=None,
             focus_target=FocusTarget.PREVIEW_ACTION,
         )
-
     if isinstance(event, PreviewInvalidated):
         if state.preview is not PreviewState.CURRENT:
             return state
@@ -532,7 +537,6 @@ def reduce(state: AppState, event: Event) -> AppState:
             stale_category=event.category,
             focus_target=FocusTarget.PREVIEW_ACTION,
         )
-
     if isinstance(event, RenderPreflightRequested):
         if not capabilities(state).can_render:
             return state
@@ -541,7 +545,6 @@ def reduce(state: AppState, event: Event) -> AppState:
             preflight_warning=True,
             focus_target=FocusTarget.PREFLIGHT_DIALOG,
         )
-
     if isinstance(event, RenderPreflightDismissed):
         if not state.preflight_warning:
             return state
@@ -550,7 +553,6 @@ def reduce(state: AppState, event: Event) -> AppState:
             preflight_warning=False,
             focus_target=_editor_action_focus(state),
         )
-
     if isinstance(event, RenderRequested):
         if not capabilities(state).can_render:
             return state
@@ -561,7 +563,6 @@ def reduce(state: AppState, event: Event) -> AppState:
             JobKind.RENDER,
             event.initiator_focus,
         )
-
     if isinstance(event, RebuildRequested):
         if not capabilities(state).can_rebuild:
             return state
@@ -572,7 +573,6 @@ def reduce(state: AppState, event: Event) -> AppState:
             JobKind.REBUILD,
             event.initiator_focus,
         )
-
     if isinstance(event, RenderSucceeded):
         if not _matches_render_result(
             state,

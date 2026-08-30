@@ -10,7 +10,7 @@ from typing import Protocol
 from uuid import uuid4
 
 from PIL import Image
-from PySide6.QtCore import QObject, QThread, Signal, Slot
+from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QFileDialog, QWidget
 
@@ -21,7 +21,21 @@ from rembggui.core.state import (
     SourceLoadRequested,
     SourceState,
 )
-from rembggui.jobs.source import decode_frame, probe_source
+from rembggui.core.timeline import (
+    EndChanged,
+    PlayheadChanged,
+    SetEndToPlayhead,
+    SetStartToPlayhead,
+    SourceFrameDecoded,
+    StartChanged,
+    StepFrame,
+)
+from rembggui.jobs.source import (
+    SourceRevision,
+    SourceValidationProof,
+    decode_frame,
+    probe_source,
+)
 from rembggui.ui.ports import (
     ChooseVideoRequested,
     ManageModelsRequested,
@@ -37,6 +51,7 @@ from rembggui.ui.ports import (
 )
 from rembggui.ui.preview_controller import PreviewController, PreviewRuntime
 from rembggui.ui.render_controller import RenderController
+from rembggui.ui.timeline import SourceFrameWorker
 
 VIDEO_FILE_FILTER = "Video files (*.mp4 *.mov *.webm *.mkv)"
 _THREAD_SHUTDOWN_TIMEOUT_MS = 5000
@@ -154,6 +169,11 @@ class SourceController(QObject):
         )
         self._decode_request_ids = count(1)
         self._threads: dict[str, tuple[QThread, _SourceLoadWorker]] = {}
+        self._frame_threads: list[tuple[QThread, SourceFrameWorker]] = []
+        self._frame_timer = QTimer(self)
+        self._frame_timer.setSingleShot(True)
+        self._frame_timer.setInterval(125)
+        self._frame_timer.timeout.connect(self._decode_current_playhead)
         self._closed = False
 
     def set_dialog_parent(self, parent: QWidget) -> None:
@@ -165,7 +185,13 @@ class SourceController(QObject):
     @property
     def active_load_count(self) -> int:
         """Expose worker count for lifecycle tests without exposing worker state."""
-        return sum(thread.isRunning() for thread, _worker in self._threads.values())
+        active = 0
+        for request_id, (thread, _worker) in tuple(self._threads.items()):
+            try:
+                active += int(thread.isRunning())
+            except RuntimeError:
+                self._threads.pop(request_id, None)
+        return active
 
     @property
     def render_controller(self) -> RenderController:
@@ -183,6 +209,18 @@ class SourceController(QObject):
             self._preview_controller.dispatch(command)
         elif isinstance(command, RenderVideoRequested):
             self._render_controller.dispatch(command)
+        elif isinstance(
+            command,
+            (
+                PlayheadChanged,
+                StepFrame,
+                StartChanged,
+                EndChanged,
+                SetStartToPlayhead,
+                SetEndToPlayhead,
+            ),
+        ):
+            self._dispatch_timeline(command)
         elif isinstance(command, RebuildEditedCutsRequested):
             # TODO(next slice: rebuild): wire edited-cut rebuild to the job service.
             return
@@ -200,12 +238,16 @@ class SourceController(QObject):
     def shutdown(self) -> None:
         """Stop accepting results while the application is closing."""
         self._closed = True
+        self._frame_timer.stop()
+        self._cancel_frame_threads()
+        for thread, _worker in tuple(self._frame_threads):
+            thread.wait(_THREAD_SHUTDOWN_TIMEOUT_MS)
         self._render_controller.shutdown()
         self._preview_controller.shutdown()
         threads = tuple(self._threads.items())
-        for _request_id, (thread, _worker) in threads:
+        for _request_id, (thread, _load_worker) in threads:
             thread.quit()
-        for _request_id, (thread, _worker) in threads:
+        for _request_id, (thread, _load_worker) in threads:
             thread.wait(_THREAD_SHUTDOWN_TIMEOUT_MS)
 
     def _choose_video(self, replace: bool) -> None:
@@ -220,6 +262,8 @@ class SourceController(QObject):
             self._start_load(Path(filename))
 
     def _start_load(self, path: Path) -> None:
+        self._frame_timer.stop()
+        self._cancel_frame_threads()
         source_id = uuid4().hex
         request_id = uuid4().hex
         self._store.dispatch(SourceLoadRequested(source_id, request_id))
@@ -288,6 +332,78 @@ class SourceController(QObject):
 
     def _load_thread_finished(self, request_id: str) -> None:
         self._threads.pop(request_id, None)
+
+    def _dispatch_timeline(self, event: object) -> None:
+        before = self._store.state
+        self._store.dispatch(event)  # type: ignore[arg-type]
+        after = self._store.state
+        if after is before or after.timeline is None:
+            return
+        if isinstance(event, StepFrame):
+            self._frame_timer.stop()
+            self._decode_current_playhead()
+        elif isinstance(event, PlayheadChanged):
+            self._cancel_frame_threads()
+            self._frame_timer.start()
+
+    @Slot()
+    def _decode_current_playhead(self) -> None:
+        if self._closed:
+            return
+        state = self._store.state
+        metadata = state.source_value
+        timeline = state.timeline
+        revision = getattr(metadata, "revision", None)
+        source_path = getattr(metadata, "path", None)
+        if (
+            state.source is not SourceState.READY
+            or state.source_id is None
+            or timeline is None
+            or not isinstance(source_path, Path)
+            or not isinstance(revision, SourceRevision)
+        ):
+            return
+        self._cancel_frame_threads()
+        proof = getattr(metadata, "validation_proof", None)
+        worker = SourceFrameWorker(
+            state.source_id,
+            timeline.generation,
+            source_path,
+            timeline.playhead,
+            revision,
+            proof if isinstance(proof, SourceValidationProof) else None,
+        )
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        worker.result.connect(self._frame_decoded)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda thread=thread: self._forget_frame_thread(thread))
+        self._frame_threads.append((thread, worker))
+        thread.started.connect(worker.run)
+        thread.start()
+
+    @Slot(object)
+    def _frame_decoded(self, value: object) -> None:
+        if not isinstance(value, tuple) or len(value) != 3:
+            return
+        source_id, generation, frame = value
+        if not isinstance(source_id, str) or not isinstance(generation, int):
+            return
+        self._store.dispatch(SourceFrameDecoded(source_id, generation, frame))
+
+    def _cancel_frame_threads(self) -> None:
+        for thread, _worker in self._frame_threads:
+            thread.requestInterruption()
+            thread.quit()
+
+    def _forget_frame_thread(self, thread: QThread) -> None:
+        self._frame_threads = [
+            (current, worker)
+            for current, worker in self._frame_threads
+            if current is not thread
+        ]
 
 
 def _qimage_from_pillow(image: Image.Image) -> QImage:
