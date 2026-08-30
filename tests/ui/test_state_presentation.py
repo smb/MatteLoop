@@ -141,7 +141,7 @@ def test_failed_repreview_keeps_old_result_stale_and_retries_preview(window) -> 
     state = reduce(state, PreviewFailed("retry", "source", "retry-request", "failed"))
     value.render_state(state)
     assert value.primary_action_name() == "preview"
-    assert value.result_canvas.text() == "Settings changed — preview again"
+    assert value.result_canvas.text() == "Preview failed — preview again"
 
 
 def test_widget_actions_translate_to_frozen_commands(window, qtbot) -> None:

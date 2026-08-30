@@ -45,11 +45,15 @@ class PresentationModel:
     result_status: str
     result_checkerboard: bool
     result_accessible_name: str
+    result_accessible_description: str
     result_status_marker: str | None
     recovery_visible: bool
     recovery_label: str
     artifact_path: str | None
     success_label: str
+    success_accessible_description: str
+    workspace_attention: bool
+    workspace_open: bool
     source_metadata: object | None
     source_loading: bool
     inspector_enabled: bool
@@ -76,21 +80,39 @@ def present(state: AppState) -> PresentationModel:
             if state.preview_result is not None
             else "Previewing selected frame"
         )
-    elif not state.model_available:
-        message = "Download required"
     elif state.preview is PreviewState.CURRENT:
         marker = "Current preview"
         message = "Current preview"
     elif state.preview is PreviewState.STALE:
-        marker = "Settings changed — preview again"
+        if (
+            state.preview_attempt_error is not None
+            and state.stale_category == "Preview failed"
+        ):
+            marker = "Preview failed — preview again"
+        else:
+            marker = "Settings changed — preview again"
         message = marker
+    elif not state.model_available:
+        message = "Download required"
 
     result_status_marker: str | None
-    if state.edited_cuts:
+    if state.edited_cuts and state.preview_result is not None:
         message = "Model preview — rebuild uses edited cut frames"
+
+    result_accessible_description = message
+    if state.preview is PreviewState.STALE and state.stale_category:
+        result_accessible_description = f"{state.stale_category}: {message}"
+    if state.edited_cuts and state.preview_result is not None:
+        result_accessible_description = "Model preview — rebuild uses edited cut frames"
 
     if state.edited_cuts:
         result_status_marker = "Edited cuts changed"
+    elif (
+        state.preview is PreviewState.STALE
+        and state.preview_attempt_error is not None
+        and state.stale_category == "Preview failed"
+    ):
+        result_status_marker = marker
     elif marker is not None and state.stale_category is not None:
         result_status_marker = f"{marker} · {state.stale_category}"
     else:
@@ -166,6 +188,7 @@ def present(state: AppState) -> PresentationModel:
         result_status=result_status,
         result_checkerboard=result_checkerboard,
         result_accessible_name="Background-removed result",
+        result_accessible_description=result_accessible_description,
         result_status_marker=result_status_marker,
         recovery_visible=state.edited_cuts_error is not None,
         recovery_label=(
@@ -175,6 +198,9 @@ def present(state: AppState) -> PresentationModel:
         ),
         artifact_path=artifact_path,
         success_label="Render complete",
+        success_accessible_description=artifact_path or "Render complete",
+        workspace_attention=state.edited_cuts or state.edited_cuts_error is not None,
+        workspace_open=state.edited_cuts or state.edited_cuts_error is not None,
         source_metadata=state.source_value,
         source_loading=state.source is SourceState.LOADING,
         inspector_enabled=not active

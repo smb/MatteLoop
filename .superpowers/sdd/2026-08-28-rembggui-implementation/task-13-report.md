@@ -130,3 +130,66 @@ ok: true (spawn/shared-memory roundtrip, video decode, WebP alpha)
 
 Native platform builds were not executed. No SAM, cloud, remote, or
 `withoutBg` scope was introduced.
+
+## Task 13 application-shell re-review follow-up
+
+The second Sol re-review follow-up keeps failed re-previews with an existing
+result visibly stale even when model availability changes: the presenter now
+prioritizes the failed-attempt marker and exposes `Preview failed — preview
+again` in the result status and accessible description. Edited cuts without a
+preview retain the neutral preview instruction; the approved edited-cut copy
+is emitted only when a preview result exists.
+
+The completion banner is now a responsive two-row surface above the fixed
+104 px Preview/Render shelf. Its artifact row elides against the actual label
+width while retaining the full tooltip and accessible path, and its separate
+action row keeps both output actions at their size hints at the 340 px
+inspector width. Workspace recovery is a child of the Workspace body; the
+presenter owns attention/open flags so validation errors open that section and
+focus the visible recovery action.
+
+The inspector scroll area is removed from the tab chain. Explicit tab order
+now covers source, preview stage, timeline, visible section controls,
+Workspace recovery/rebuild/manage actions, success announcement/output
+actions, and finally Preview/Render. Dynamic visibility and enabled state let
+Qt skip controls that do not apply to the current reducer state.
+
+### Re-review TDD and verification
+
+The new review regressions were run RED before production changes:
+
+```text
+QT_QPA_PLATFORM=offscreen .venv/bin/pytest -q tests/ui/test_task13_review_fixes.py
+52 passed, 7 failed
+```
+
+After implementation:
+
+```text
+QT_QPA_PLATFORM=offscreen .venv/bin/pytest -q tests/ui/test_task13_review_fixes.py
+59 passed
+
+QT_QPA_PLATFORM=offscreen .venv/bin/pytest -q tests/ui tests/test_resources.py tests/test_app_smoke.py
+123 passed
+
+.venv/bin/ruff check src/rembggui/ui/presenter.py src/rembggui/ui/main_window.py \
+  src/rembggui/ui/inspector.py tests/ui/test_task13_review_fixes.py \
+  tests/ui/test_state_presentation.py
+All checks passed
+
+.venv/bin/mypy src
+Success: no issues found in 38 source files
+```
+
+The existing failed-repreview expectation was updated to the review-approved
+truthful copy. The sandbox full run reached `1064 passed, 34 failed` only
+because its POSIX shared-memory calls are denied; those failures are outside
+the UI scope. The same full run outside the sandbox passed:
+
+```text
+QT_QPA_PLATFORM=offscreen .venv/bin/pytest -q  # outside sandbox
+1098 passed, 15 warnings
+```
+
+Native platform builds were not executed. No SAM, cloud, remote, or
+`withoutBg` scope was introduced.

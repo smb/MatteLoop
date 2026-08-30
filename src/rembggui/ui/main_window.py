@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -119,8 +120,13 @@ class MainWindow(QMainWindow):
         self.rebuild_button = self.inspector.rebuild_button
         self.success_container = QFrame()
         self.success_container.setObjectName("success_banner_container")
-        success_layout = QHBoxLayout(self.success_container)
+        success_layout = QVBoxLayout(self.success_container)
         success_layout.setContentsMargins(16, 8, 16, 8)
+        success_layout.setSpacing(4)
+        success_info_row = QWidget()
+        success_info_row.setObjectName("success_info_row")
+        info_layout = QHBoxLayout(success_info_row)
+        info_layout.setContentsMargins(0, 0, 0, 0)
         self.success_banner = QLabel("Render complete")
         self.success_banner.setObjectName("success_banner")
         self.success_banner.setAccessibleName("Render complete")
@@ -129,16 +135,26 @@ class MainWindow(QMainWindow):
         self.success_artifact.setObjectName("success_artifact")
         self.success_artifact.setProperty("mono", True)
         self.success_artifact.setProperty("secondary", True)
+        self.success_artifact.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        info_layout.addWidget(self.success_banner)
+        info_layout.addWidget(self.success_artifact, 1)
+        success_actions_row = QWidget()
+        success_actions_row.setObjectName("success_actions_row")
+        actions_layout = QHBoxLayout(success_actions_row)
+        actions_layout.setContentsMargins(0, 0, 0, 0)
+        actions_layout.addStretch(1)
         self.open_output_button = QPushButton("Open output")
         self.open_output_button.setObjectName("open_output")
         self.open_output_button.setAccessibleName("Open output")
         self.open_folder_button = QPushButton("Open folder")
         self.open_folder_button.setObjectName("open_output_folder")
         self.open_folder_button.setAccessibleName("Open folder")
-        success_layout.addWidget(self.success_banner)
-        success_layout.addWidget(self.success_artifact, 1)
-        success_layout.addWidget(self.open_output_button)
-        success_layout.addWidget(self.open_folder_button)
+        actions_layout.addWidget(self.open_output_button)
+        actions_layout.addWidget(self.open_folder_button)
+        success_layout.addWidget(success_info_row)
+        success_layout.addWidget(success_actions_row)
         self.success_container.hide()
         self.manage_models_button = self.inspector.manage_models
         self.manage_workspaces_button = self.inspector.manage_workspaces
@@ -192,12 +208,20 @@ class MainWindow(QMainWindow):
             self.result_canvas,
             self.timeline_placeholder,
         ]
-        widgets.extend(button for button, _body in self.inspector.disclosures.values())
         widgets.extend(
             [
-                self.edited_cut_recovery,
+                self.inspector.disclosures["segmentation"][0],
                 self.manage_models_button,
+                self.inspector.disclosures["time_sampling"][0],
+                self.inspector.disclosures["crop_cleanup"][0],
+                self.inspector.disclosures["output"][0],
+                self.inspector.disclosures["workspace"][0],
+                self.edited_cut_recovery,
+                self.rebuild_button,
                 self.manage_workspaces_button,
+                self.success_banner,
+                self.open_output_button,
+                self.open_folder_button,
                 self.preview_button,
                 self.render_button,
             ]
@@ -209,6 +233,7 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         if hasattr(self, "inspector"):
             self._resize_inspector()
+            self._update_success_artifact()
 
     def _resize_inspector(self) -> None:
         width = min(400, max(340, 340 + max(0, self.width() - 1100)))
@@ -239,9 +264,7 @@ class MainWindow(QMainWindow):
             self.source_strip.filename.setText("Reading video…")
         self.result_canvas.setText(model.result_message)
         self.result_canvas.setAccessibleName(model.result_accessible_name)
-        self.result_canvas.setAccessibleDescription(
-            model.stale_category or model.result_message
-        )
+        self.result_canvas.setAccessibleDescription(model.result_accessible_description)
         self.result_canvas.setProperty("status", model.result_status)
         self.result_canvas.setProperty("checkerboard", model.result_checkerboard)
         self.result_canvas.set_status_marker(model.result_status_marker)
@@ -256,21 +279,22 @@ class MainWindow(QMainWindow):
         self.rebuild_button.setVisible(model.show_rebuild)
         self.edited_cut_recovery.setVisible(model.recovery_visible)
         self.edited_cut_recovery.setText(model.recovery_label)
-        self.inspector.show_workspace_attention(
-            model.show_rebuild or model.recovery_visible
+        self.inspector.set_workspace_state(
+            model.workspace_attention, model.workspace_open
         )
         self.open_output_button.setEnabled(model.open_output_enabled)
         self.open_folder_button.setEnabled(model.open_folder_enabled)
         self.success_container.setVisible(model.show_success)
         self.success_banner.setText(model.success_label)
         artifact_path = model.artifact_path or ""
-        self.success_artifact.setText(
-            QFontMetrics(self.success_artifact.font()).elidedText(
-                artifact_path, Qt.TextElideMode.ElideMiddle, 220
-            )
-        )
+        self._success_artifact_path = artifact_path
+        self._update_success_artifact()
         self.success_artifact.setToolTip(artifact_path)
         self.success_artifact.setAccessibleDescription(artifact_path)
+        self.success_banner.setToolTip(artifact_path)
+        self.success_banner.setAccessibleDescription(
+            model.success_accessible_description
+        )
         self.inspector.setEnabled(model.inspector_enabled)
         for name, button in (
             ("preview", self.preview_button),
@@ -282,6 +306,19 @@ class MainWindow(QMainWindow):
             button.style().polish(button)
         self.preview_button.setAccessibleName(model.preview_label)
         self._queue_focus(model.focus_target)
+
+    def _update_success_artifact(self) -> None:
+        if not hasattr(self, "success_artifact"):
+            return
+        artifact_path = getattr(self, "_success_artifact_path", "")
+        available_width = self.success_artifact.width() or 220
+        self.success_artifact.setText(
+            QFontMetrics(self.success_artifact.font()).elidedText(
+                artifact_path,
+                Qt.TextElideMode.ElideMiddle,
+                available_width,
+            )
+        )
 
     def _queue_focus(self, target: FocusTarget) -> None:
         if target is self._last_focus:

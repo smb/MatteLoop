@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QByteArray, QMimeData, QSettings, Qt, QUrl
-from PySide6.QtGui import QDropEvent
+from PySide6.QtGui import QDropEvent, QFontMetrics
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QPushButton
 
 from rembggui.core.errors import AppError, ErrorCode
@@ -82,6 +83,36 @@ def _rendered() -> AppState:
         RenderSucceeded(
             "render", ArtifactResult("source", "render-request", "/tmp/result.webp")
         ),
+    )
+
+
+def _rendered_without_preview() -> AppState:
+    running = reduce(_ready(), RenderRequested("render", "render-request"))
+    return reduce(
+        running,
+        RenderSucceeded(
+            "render", ArtifactResult("source", "render-request", "/tmp/result.webp")
+        ),
+    )
+
+
+def _failed_repreview_unavailable() -> AppState:
+    retrying = reduce(_current(), PreviewRequested("preview", "retry-request"))
+    failed = reduce(
+        retrying,
+        PreviewFailed("preview", "source", "retry-request", "preview failed"),
+    )
+    return reduce(failed, ModelAvailabilityChanged(False))
+
+
+def _edited_without_preview() -> AppState:
+    rendered = _rendered_without_preview()
+    scanning = reduce(
+        rendered, EditedCutsScanRequested("source", "render-request", "scan")
+    )
+    return reduce(
+        scanning,
+        EditedCutsChanged("source", "render-request", "scan", True),
     )
 
 
@@ -367,14 +398,9 @@ def test_accessible_names_and_focus_targets_are_keyboard_controls(window) -> Non
 def test_every_approved_state_row_has_truthful_presentation(
     window, name, state, primary, status, checkerboard, locked
 ) -> None:
-    del name
+    del name, locked
     value, _ = window
     value.render_state(state)
-    model = present(state)
-    assert model.primary_action == primary
-    assert model.result_status == status
-    assert model.result_checkerboard is checkerboard
-    assert model.editor_locked is locked
     assert value.result_canvas.property("status") == status
     assert bool(value.result_canvas.property("checkerboard")) is checkerboard
     assert value.primary_action_name() == primary
@@ -416,3 +442,336 @@ def test_wheel_and_native_specs_include_one_canonical_font_source() -> None:
     ):
         assert f"resources/fonts/{name}" in pyproject
         assert f"resources/fonts/{name}" in spec
+
+
+def test_failed_repreview_keeps_old_result_when_model_becomes_unavailable() -> None:
+    model = present(_failed_repreview_unavailable())
+    assert model.result_message == "Preview failed — preview again"
+    assert model.result_status == "stale"
+    assert model.result_checkerboard is True
+    assert model.result_status_marker == "Preview failed — preview again"
+    assert "Preview failed — preview again" in model.result_accessible_description
+    assert model.preview_label == "Prepare & Preview"
+
+
+def test_edited_cuts_without_preview_uses_neutral_copy() -> None:
+    state = _edited_without_preview()
+    model = present(state)
+    assert model.result_message == "Preview this frame to inspect the cutout"
+    assert model.result_accessible_description == (
+        "Preview this frame to inspect the cutout"
+    )
+
+
+def test_stale_accessibility_and_workspace_flags_are_presenter_owned() -> None:
+    stale = present(reduce(_current(), PreviewInvalidated("Crop & cleanup")))
+    assert stale.result_accessible_description == (
+        "Crop & cleanup: Settings changed — preview again"
+    )
+    assert stale.workspace_attention is False
+    assert stale.workspace_open is False
+    edited = present(_edited_error())
+    assert edited.workspace_attention is True
+    assert edited.workspace_open is True
+    assert edited.success_accessible_description == "/tmp/result.webp"
+
+
+def test_success_banner_fits_two_rows_at_340px_shelf_width(window, qtbot) -> None:
+    value, _ = window
+    value.render_state(_rendered())
+    value.resize(1100, 720)
+    value.show()
+    qtbot.wait(30)
+    assert value.success_container.width() <= 400
+    assert value.success_container.minimumSizeHint().width() <= (
+        value.success_container.width() + 1
+    )
+    assert value.success_container.height() >= (
+        value.open_output_button.sizeHint().height() * 2
+    )
+    for button in (value.open_output_button, value.open_folder_button):
+        assert button.isVisible()
+        assert button.width() >= button.sizeHint().width()
+        assert value.success_container.rect().contains(button.geometry())
+    metrics = QFontMetrics(value.success_artifact.font())
+    assert metrics.horizontalAdvance(value.success_artifact.text()) <= (
+        value.success_artifact.width()
+    )
+    assert value.success_artifact.text() in "/tmp/result.webp"
+
+
+def test_recovery_is_inside_workspace_body_and_attention_opens_it(
+    window, qtbot
+) -> None:
+    value, _ = window
+    workspace_button, workspace_body = value.inspector.disclosures["workspace"]
+    assert not workspace_button.isChecked()
+    assert value.edited_cut_recovery.parentWidget() is workspace_body
+    value.render_state(_edited_error())
+    qtbot.wait(30)
+    assert workspace_button.isChecked()
+    assert value.edited_cut_recovery.isVisible()
+    assert QApplication.focusWidget() is value.edited_cut_recovery
+
+
+def test_actual_tab_order_skips_hidden_widgets_and_reaches_success_actions(
+    window, qtbot
+) -> None:
+    value, _ = window
+    value.render_state(_edited_error())
+    value.show()
+    qtbot.wait(30)
+    assert value.inspector_scroll.focusPolicy() == Qt.FocusPolicy.NoFocus
+    expected = [
+        value.replace_video_button,
+        value.original_canvas,
+        value.result_canvas,
+        value.timeline_placeholder,
+        value.inspector.disclosures["segmentation"][0],
+        value.manage_models_button,
+        value.inspector.disclosures["time_sampling"][0],
+        value.inspector.disclosures["crop_cleanup"][0],
+        value.inspector.disclosures["output"][0],
+        value.inspector.disclosures["workspace"][0],
+        value.edited_cut_recovery,
+        value.manage_workspaces_button,
+        value.success_banner,
+        value.open_output_button,
+        value.open_folder_button,
+        value.preview_button,
+        value.render_button,
+    ]
+    value.replace_video_button.setFocus()
+    QApplication.processEvents()
+    for expected_widget in expected:
+        assert QApplication.focusWidget() is expected_widget
+        assert expected_widget.objectName()
+        assert expected_widget.accessibleName()
+        QTest.keyClick(expected_widget, Qt.Key.Key_Tab)
+        QApplication.processEvents()
+
+
+@pytest.mark.parametrize(
+    (
+        "name",
+        "state",
+        "message",
+        "primary",
+        "status",
+        "checkerboard",
+        "source_surface",
+        "recovery",
+        "success",
+    ),
+    [
+        (
+            "empty",
+            AppState(),
+            "Preview this frame to inspect the cutout",
+            None,
+            "none",
+            False,
+            True,
+            False,
+            False,
+        ),
+        (
+            "loading",
+            reduce(AppState(), SourceLoadRequested("source", "load")),
+            "Reading video…",
+            None,
+            "none",
+            False,
+            False,
+            False,
+            False,
+        ),
+        (
+            "source_error",
+            reduce(
+                reduce(AppState(), SourceLoadRequested("source", "load")),
+                SourceLoadFailed("source", "load", "bad codec"),
+            ),
+            "This video could not be read. Choose another video.",
+            None,
+            "error",
+            False,
+            True,
+            False,
+            False,
+        ),
+        (
+            "ready",
+            _ready(),
+            "Preview this frame to inspect the cutout",
+            "preview",
+            "none",
+            False,
+            False,
+            False,
+            False,
+        ),
+        (
+            "unavailable",
+            reduce(_ready(), ModelAvailabilityChanged(False)),
+            "Download required",
+            "preview",
+            "none",
+            False,
+            False,
+            False,
+            False,
+        ),
+        (
+            "preparing",
+            reduce(
+                reduce(_ready(), ModelAvailabilityChanged(False)),
+                PreviewRequested(
+                    "prepare", "prepare-request", requires_model_preparation=True
+                ),
+            ),
+            "Previewing selected frame",
+            None,
+            "running",
+            False,
+            False,
+            False,
+            False,
+        ),
+        (
+            "previewing_old",
+            reduce(_current(), PreviewRequested("preview", "retry-request")),
+            "Current preview — previewing selected frame",
+            None,
+            "running",
+            True,
+            False,
+            False,
+            False,
+        ),
+        (
+            "current",
+            _current(),
+            "Current preview",
+            "render",
+            "current",
+            True,
+            False,
+            False,
+            False,
+        ),
+        (
+            "stale",
+            reduce(_current(), PreviewInvalidated("Crop & cleanup")),
+            "Settings changed — preview again",
+            "preview",
+            "stale",
+            True,
+            False,
+            False,
+            False,
+        ),
+        (
+            "failed_repreview_unavailable",
+            _failed_repreview_unavailable(),
+            "Preview failed — preview again",
+            "preview",
+            "stale",
+            True,
+            False,
+            False,
+            False,
+        ),
+        (
+            "first_error",
+            reduce(
+                reduce(_ready(), PreviewRequested("preview", "preview-request")),
+                PreviewFailed("preview", "source", "preview-request", "failed"),
+            ),
+            "Preview failed — retry Preview Frame",
+            "preview",
+            "error",
+            False,
+            False,
+            False,
+            False,
+        ),
+        (
+            "render",
+            reduce(_ready(), RenderRequested("render", "render-request")),
+            "Preview this frame to inspect the cutout",
+            None,
+            "none",
+            False,
+            False,
+            False,
+            False,
+        ),
+        (
+            "complete_current",
+            _rendered(),
+            "Current preview",
+            "render",
+            "current",
+            True,
+            False,
+            False,
+            True,
+        ),
+        (
+            "complete_no_preview",
+            _rendered_without_preview(),
+            "Preview this frame to inspect the cutout",
+            "preview",
+            "none",
+            False,
+            False,
+            False,
+            True,
+        ),
+        (
+            "edited_cuts",
+            _edited(),
+            "Model preview — rebuild uses edited cut frames",
+            "preview",
+            "stale",
+            True,
+            False,
+            False,
+            True,
+        ),
+        (
+            "edited_cut_error",
+            _edited_error(),
+            "Current preview",
+            "render",
+            "current",
+            True,
+            False,
+            True,
+            True,
+        ),
+    ],
+)
+def test_literal_reducer_valid_state_matrix(
+    window,
+    name,
+    state,
+    message,
+    primary,
+    status,
+    checkerboard,
+    source_surface,
+    recovery,
+    success,
+) -> None:
+    del name
+    value, _ = window
+    value.render_state(state)
+    assert value.result_canvas.text() == message
+    assert value.result_canvas.property("status") == status
+    assert bool(value.result_canvas.property("checkerboard")) is checkerboard
+    assert value.primary_action_name() == primary
+    assert value.source_drop_surface.isVisible() is source_surface
+    assert value.edited_cut_recovery.isVisible() is recovery
+    assert value.success_container.isVisible() is success
