@@ -36,6 +36,7 @@ _PROVENANCE_FIELDS = frozenset(
     )
 )
 _GPL_WITHOUT_L_PREFIX = re.compile(r"(?<!l)gpl")
+_GPL_LEGAL_FILENAMES = frozenset(("GPL-3.0.txt", "LGPL-3.0.txt"))
 _ARCHIVE_ERRORS = (BadZipFile, OSError, RuntimeError, NotImplementedError)
 _ROOT = Path(__file__).resolve().parents[2]
 _INSPECTION_SCRIPT = r"""
@@ -164,9 +165,20 @@ def forbidden_bundle_entries(
         entry
         for entry in root.rglob("*")
         if any(fragment in entry.name.casefold() for fragment in normalized)
-        or _has_forbidden_license_marker(entry.relative_to(root).as_posix())
+        or (
+            _has_forbidden_license_marker(entry.relative_to(root).as_posix())
+            and not _is_exact_gpl_legal_file(entry)
+        )
     )
     return tuple(sorted(matches, key=lambda path: path.as_posix()))
+
+
+def _is_exact_gpl_legal_file(entry: Path) -> bool:
+    return (
+        entry.name in _GPL_LEGAL_FILENAMES
+        and not entry.is_symlink()
+        and entry.is_file()
+    )
 
 
 def provenance_path(wheel: Path) -> Path:

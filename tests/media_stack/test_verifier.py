@@ -251,6 +251,51 @@ def test_bundle_scan_rejects_gpl_and_nonfree_but_accepts_lgpl(tmp_path: Path) ->
     assert forbidden_bundle_entries(tmp_path, ()) == (gpl, nonfree)
 
 
+def test_bundle_scan_accepts_exact_required_gpl_legal_files(tmp_path: Path) -> None:
+    gpl = tmp_path / "GPL-3.0.txt"
+    lgpl = tmp_path / "legal" / "LGPL-3.0.txt"
+    lgpl.parent.mkdir()
+    gpl.write_bytes(b"GPL text")
+    lgpl.write_bytes(b"LGPL text")
+
+    assert forbidden_bundle_entries(tmp_path, ()) == ()
+
+
+def test_bundle_scan_rejects_gpl_legal_filename_lookalikes(tmp_path: Path) -> None:
+    rejected = (
+        tmp_path / "GPL-3.0.txt.dylib",
+        tmp_path / "libGPLCodec.dylib",
+        tmp_path / "nonfree-codec.dylib",
+    )
+    for path in rejected:
+        path.write_bytes(b"not an exact legal file")
+    forbidden_directory = tmp_path / "nested" / "GPL-3.0.txt"
+    forbidden_directory.mkdir(parents=True)
+
+    assert forbidden_bundle_entries(tmp_path, ()) == tuple(
+        sorted((*rejected, forbidden_directory), key=lambda path: path.as_posix())
+    )
+
+
+@pytest.mark.parametrize("filename", ("gpl-3.0.txt", "GpL-3.0.txt"))
+def test_bundle_scan_rejects_alternate_case_gpl_legal_filenames(
+    tmp_path: Path, filename: str
+) -> None:
+    lookalike = tmp_path / filename
+    lookalike.write_bytes(b"not an exact legal file")
+
+    assert forbidden_bundle_entries(tmp_path, ()) == (lookalike,)
+
+
+def test_bundle_scan_forbidden_fragments_win_for_exact_legal_file(
+    tmp_path: Path,
+) -> None:
+    legal_file = tmp_path / "GPL-3.0.txt"
+    legal_file.write_bytes(b"GPL text")
+
+    assert forbidden_bundle_entries(tmp_path, ("gpl-3.0",)) == (legal_file,)
+
+
 def test_runtime_evidence_and_report_are_frozen_and_slotted() -> None:
     evidence = _evidence()
     report = VerificationReport(
