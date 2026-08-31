@@ -40,17 +40,28 @@ def _evidence(**replacements: tuple[str, ...] | str) -> RuntimeEvidence:
     return RuntimeEvidence(**values)  # type: ignore[arg-type]
 
 
-def _wheel_path(tmp_path: Path, target: BuildTarget = MACOS) -> Path:
-    platform_tag = (
+def _wheel_path(
+    tmp_path: Path,
+    target: BuildTarget = MACOS,
+    *,
+    python_tag: str = "cp311",
+    abi_tag: str = "abi3",
+    platform_tag: str | None = None,
+) -> Path:
+    resolved_platform = platform_tag or (
         "macosx_13_0_arm64" if target.target_id == "macos-arm64" else "win_amd64"
     )
-    return tmp_path / f"av-16.1.0-cp313-cp313-{platform_tag}.whl"
+    return tmp_path / (
+        f"av-16.1.0-{python_tag}-{abi_tag}-{resolved_platform}.whl"
+    )
 
 
 def _write_fake_wheel(
     path: Path, *, include_av: bool = True, ffmpeg_version: str = "8.0.1"
 ) -> None:
-    platform_tag = "macosx_13_0_arm64" if "macosx" in path.name else "win_amd64"
+    _distribution, _version, python_tag, abi_tag, platform_tag = (
+        path.name.removesuffix(".whl").split("-")
+    )
     with ZipFile(path, "w") as wheel:
         if include_av:
             wheel.writestr(
@@ -84,7 +95,7 @@ def _write_fake_wheel(
             "Wheel-Version: 1.0\n"
             "Generator: test\n"
             "Root-Is-Purelib: false\n"
-            f"Tag: cp313-cp313-{platform_tag}\n",
+            f"Tag: {python_tag}-{abi_tag}-{platform_tag}\n",
         )
 
 
@@ -294,6 +305,30 @@ def test_verification_rejects_noncanonical_provenance_json(tmp_path: Path) -> No
     )
 
     with pytest.raises(ValueError, match="canonical JSON"):
+        verify_media_wheel(wheel, MANIFEST, MACOS)
+
+
+@pytest.mark.parametrize(
+    ("python_tag", "abi_tag", "platform_tag"),
+    (
+        ("cp313", "cp313", "macosx_13_0_arm64"),
+        ("cp310", "abi3", "macosx_13_0_arm64"),
+        ("cp311", "abi3", "macosx_14_0_arm64"),
+    ),
+)
+def test_verification_rejects_wheel_tags_outside_the_exact_manifest_contract(
+    tmp_path: Path, python_tag: str, abi_tag: str, platform_tag: str
+) -> None:
+    wheel = _wheel_path(
+        tmp_path,
+        python_tag=python_tag,
+        abi_tag=abi_tag,
+        platform_tag=platform_tag,
+    )
+    _write_fake_wheel(wheel)
+    _write_provenance(wheel, MACOS)
+
+    with pytest.raises(MediaStackVerificationError, match="wheel"):
         verify_media_wheel(wheel, MANIFEST, MACOS)
 
 

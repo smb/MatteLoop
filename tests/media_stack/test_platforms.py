@@ -130,6 +130,7 @@ def test_pyav_build_commands_use_the_platform_specific_build_interface() -> None
     assert macos == (
         "env",
         "PKG_CONFIG_PATH=prefix/lib/pkgconfig",
+        "MACOSX_DEPLOYMENT_TARGET=13.0",
         "tool/python",
         "-m",
         "build",

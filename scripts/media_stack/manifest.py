@@ -16,6 +16,7 @@ _TOOL_NAMES = frozenset(
     ("build", "setuptools", "cython", "wheel", "delocate", "delvewheel")
 )
 _SOURCE_FIELDS = frozenset(("name", "version", "url", "sha256", "archive_root"))
+_PYAV_WHEEL_FIELDS = frozenset(("python_tag", "abi_tag"))
 _VERIFICATION_FIELDS = frozenset(
     (
         "required_codecs",
@@ -42,6 +43,12 @@ class SourceSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class PyAVWheelTags:
+    python_tag: str
+    abi_tag: str
+
+
+@dataclass(frozen=True, slots=True)
 class ToolVersions:
     build: str
     setuptools: str
@@ -65,6 +72,7 @@ class MediaStackManifest:
     targets: tuple[str, ...]
     python_abi: str
     macos_deployment_target: str
+    pyav_wheel: PyAVWheelTags
     sources: tuple[SourceSpec, ...]
     tool_sources: tuple[SourceSpec, ...]
     tools: ToolVersions
@@ -82,6 +90,7 @@ def load_manifest(path: Path) -> MediaStackManifest:
             "targets",
             "python_abi",
             "macos_deployment_target",
+            "pyav_wheel",
             "sources",
             "tool_sources",
             "tools",
@@ -101,6 +110,7 @@ def load_manifest(path: Path) -> MediaStackManifest:
     deployment_target = _require_pinned_version(
         raw["macos_deployment_target"], "macos_deployment_target"
     )
+    pyav_wheel = _load_pyav_wheel(raw["pyav_wheel"])
     sources = _load_sources(raw["sources"], _SOURCE_NAMES, "sources")
     tool_sources = _load_sources(
         raw["tool_sources"], _TOOL_SOURCE_NAMES, "tool_sources"
@@ -114,6 +124,7 @@ def load_manifest(path: Path) -> MediaStackManifest:
         targets=targets,
         python_abi=python_abi,
         macos_deployment_target=deployment_target,
+        pyav_wheel=pyav_wheel,
         sources=sources,
         tool_sources=tool_sources,
         tools=tools,
@@ -188,6 +199,18 @@ def _load_tools(value: Any) -> ToolVersions:
         for name in _TOOL_NAMES
     }
     return ToolVersions(**versions)
+
+
+def _load_pyav_wheel(value: Any) -> PyAVWheelTags:
+    wheel = _require_mapping(value, "pyav_wheel")
+    _require_keys(wheel, _PYAV_WHEEL_FIELDS, "pyav_wheel")
+    python_tag = _require_string(wheel["python_tag"], "pyav_wheel.python_tag")
+    abi_tag = _require_string(wheel["abi_tag"], "pyav_wheel.abi_tag")
+    if python_tag != "cp311":
+        raise ValueError("pyav_wheel.python_tag must be cp311")
+    if abi_tag != "abi3":
+        raise ValueError("pyav_wheel.abi_tag must be abi3")
+    return PyAVWheelTags(python_tag, abi_tag)
 
 
 def _load_verification(value: Any) -> VerificationContract:

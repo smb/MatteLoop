@@ -51,6 +51,8 @@ def test_manifest_pins_the_lgpl_media_sources() -> None:
     assert manifest.targets == ("macos-arm64", "windows-x64")
     assert manifest.python_abi == "cp313"
     assert manifest.macos_deployment_target == "13.0"
+    assert manifest.pyav_wheel.python_tag == "cp311"
+    assert manifest.pyav_wheel.abi_tag == "abi3"
     assert manifest.tools == ToolVersions(
         build="1.6.0",
         setuptools="84.0.0",
@@ -162,6 +164,22 @@ def test_manifest_rejects_an_unsupported_python_abi(tmp_path: Path) -> None:
     path = _write_manifest(tmp_path, ('python_abi = "cp313"', 'python_abi = "cp312"'))
 
     with pytest.raises(ValueError, match="python_abi"):
+        load_manifest(path)
+
+
+@pytest.mark.parametrize(
+    ("field", "original", "replacement"),
+    (("python_tag", "cp311", "cp313"), ("abi_tag", "abi3", "cp313")),
+)
+def test_manifest_rejects_a_pyav_wheel_tag_outside_the_exact_contract(
+    tmp_path: Path, field: str, original: str, replacement: str
+) -> None:
+    path = _write_manifest(
+        tmp_path,
+        (f'{field} = "{original}"', f'{field} = "{replacement}"'),
+    )
+
+    with pytest.raises(ValueError, match=f"pyav_wheel.{field}"):
         load_manifest(path)
 
 

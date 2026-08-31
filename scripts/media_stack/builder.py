@@ -406,6 +406,9 @@ def _build_and_repair_wheel(
         if existing_libraries:
             staged_libraries += os.pathsep + existing_libraries
         repair_environment["DYLD_LIBRARY_PATH"] = staged_libraries
+        repair_environment["MACOSX_DEPLOYMENT_TARGET"] = (
+            context.target.deployment_target
+        )
     _run_command(
         context,
         "repair",

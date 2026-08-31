@@ -17,6 +17,7 @@ from zipfile import BadZipFile, ZipFile
 
 from .manifest import (
     MediaStackManifest,
+    PyAVWheelTags,
     VerificationContract,
     load_manifest,
     media_stack_identity,
@@ -433,7 +434,9 @@ def _wheel_metadata_errors(
     pyav_version = next(
         source.version for source in manifest.sources if source.name == "pyav"
     )
-    errors = list(_wheel_filename_errors(wheel, pyav_version, target))
+    errors = list(
+        _wheel_filename_errors(wheel, pyav_version, manifest.pyav_wheel, target)
+    )
     try:
         with ZipFile(wheel) as archive:
             metadata_names = [
@@ -459,13 +462,17 @@ def _wheel_metadata_errors(
     if metadata.get("Version") != pyav_version:
         errors.append(f"wheel PyAV version must be {pyav_version}")
     tags = tuple(wheel_metadata.get_all("Tag", []))
-    if not any(_tag_matches(tag, target) for tag in tags):
-        errors.append(f"wheel tags do not match {target.python_tag}/{target.target_id}")
+    if not any(_tag_matches(tag, manifest.pyav_wheel, target) for tag in tags):
+        expected_abi = _expected_wheel_abi(manifest.pyav_wheel)
+        errors.append(f"wheel tags do not match {expected_abi}/{target.target_id}")
     return tuple(errors)
 
 
 def _wheel_filename_errors(
-    wheel: Path, pyav_version: str, target: BuildTarget
+    wheel: Path,
+    pyav_version: str,
+    wheel_tags: PyAVWheelTags,
+    target: BuildTarget,
 ) -> tuple[str, ...]:
     parts = wheel.name.removesuffix(".whl").split("-")
     if not wheel.name.endswith(".whl") or len(parts) != 5:
@@ -474,21 +481,27 @@ def _wheel_filename_errors(
     errors: list[str] = []
     if distribution.casefold() != "av" or version != pyav_version:
         errors.append(f"candidate must be the av {pyav_version} wheel")
-    if python_tag != target.python_tag or abi_tag != target.python_tag:
-        errors.append(f"candidate wheel ABI must be {target.python_tag}")
+    if python_tag != wheel_tags.python_tag or abi_tag != wheel_tags.abi_tag:
+        errors.append(f"candidate wheel ABI must be {_expected_wheel_abi(wheel_tags)}")
     if not _platform_matches(platform_tag, target):
         errors.append(f"candidate wheel platform must be {target.target_id}")
     return tuple(errors)
 
 
-def _tag_matches(tag: str, target: BuildTarget) -> bool:
+def _tag_matches(
+    tag: str, wheel_tags: PyAVWheelTags, target: BuildTarget
+) -> bool:
     parts = tag.split("-", 2)
     return (
         len(parts) == 3
-        and parts[0] == target.python_tag
-        and parts[1] == target.python_tag
+        and parts[0] == wheel_tags.python_tag
+        and parts[1] == wheel_tags.abi_tag
         and _platform_matches(parts[2], target)
     )
+
+
+def _expected_wheel_abi(wheel_tags: PyAVWheelTags) -> str:
+    return f"{wheel_tags.python_tag}-{wheel_tags.abi_tag}"
 
 
 def _platform_matches(platform_tag: str, target: BuildTarget) -> bool:

@@ -134,9 +134,11 @@ def pyav_build_command(
             "--dist-dir",
             str(output_dir),
         )
+    environment = ["env", f"PKG_CONFIG_PATH={prefix / 'lib' / 'pkgconfig'}"]
+    if target.target_id == "macos-arm64":
+        environment.append(f"MACOSX_DEPLOYMENT_TARGET={target.deployment_target}")
     return (
-        "env",
-        f"PKG_CONFIG_PATH={prefix / 'lib' / 'pkgconfig'}",
+        *environment,
         str(python),
         "-m",
         "build",

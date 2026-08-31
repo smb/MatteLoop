@@ -26,8 +26,8 @@ ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "packaging" / "media-stack" / "manifest.toml"
 MACOS = BuildTarget("darwin", "arm64", "macos-arm64", "cp313", "13.0")
 WINDOWS = BuildTarget("win32", "AMD64", "windows-x64", "cp313", "")
-WHEEL_NAME = "av-16.1.0-cp313-cp313-macosx_13_0_arm64.whl"
-WINDOWS_WHEEL_NAME = "av-16.1.0-cp313-cp313-win_amd64.whl"
+WHEEL_NAME = "av-16.1.0-cp311-abi3-macosx_13_0_arm64.whl"
+WINDOWS_WHEEL_NAME = "av-16.1.0-cp311-abi3-win_amd64.whl"
 
 
 class RecordingRunner:
@@ -398,6 +398,7 @@ def test_macos_repair_inherits_environment_with_staged_libraries_first(
     assert environment["DYLD_LIBRARY_PATH"] == (
         f"{staged_libraries}{os.pathsep}/existing/libraries"
     )
+    assert environment["MACOSX_DEPLOYMENT_TARGET"] == "13.0"
     assert environment["MATTELOOP_REPAIR_SENTINEL"] == "preserved"
 
 

@@ -3,6 +3,10 @@ targets = ["macos-arm64", "windows-x64"]
 python_abi = "cp313"
 macos_deployment_target = "13.0"
 
+[pyav_wheel]
+python_tag = "cp311"
+abi_tag = "abi3"
+
 [[sources]]
 name = "ffmpeg"
 version = "8.0.1"
