@@ -1,0 +1,29 @@
+schema_version = 1
+qt_version = "6.10.3"
+
+[distributions]
+PySide6 = "6.10.3"
+PySide6_Essentials = "6.10.3"
+PySide6_Addons = "6.10.3"
+shiboken6 = "6.10.3"
+
+[[sources]]
+name = "qtbase"
+version = "6.10.3"
+url = "https://download.qt.io/official_releases/qt/6.10/6.10.3/submodules/qtbase-everywhere-src-6.10.3.tar.xz"
+sha256 = "383dc907816338f0cba72088a524c07458dfc69ce684ca9132fcc4fe91c24b0b"
+archive_root = "qtbase-everywhere-src-6.10.3"
+
+[[sources]]
+name = "qtimageformats"
+version = "6.10.3"
+url = "https://download.qt.io/official_releases/qt/6.10/6.10.3/submodules/qtimageformats-everywhere-src-6.10.3.tar.xz"
+sha256 = "84605dd91037482b5b7c7ecc5c27aee8acc1cd7f1fe77bc564777ddf365d7d28"
+archive_root = "qtimageformats-everywhere-src-6.10.3"
+
+[[sources]]
+name = "pyside-setup"
+version = "6.10.3"
+url = "https://download.qt.io/official_releases/QtForPython/pyside6/PySide6-6.10.3-src/pyside-setup-everywhere-src-6.10.3.tar.xz"
+sha256 = "2c7462fe0cecb5b8ac0a3d92014b8d0b88bd4d9f8646709dab5286d9416f45bc"
+archive_root = "pyside-setup-everywhere-src-6.10.3"
