@@ -33,6 +33,11 @@ _FONT_FILES = (
     "IBMPlexSans-SemiBold.ttf",
     "IBMPlexMono-Regular.ttf",
 )
+# Qt style sheets resolve font-family entries as real family names; the CSS
+# generics "sans-serif" and "monospace" are not families, so naming them costs a
+# full alias sweep at startup and warns. List actual per-platform families.
+_UI_FALLBACKS = "'Helvetica Neue', 'Segoe UI', 'DejaVu Sans'"
+_MONO_FALLBACKS = "'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono'"
 
 
 def install_theme(
@@ -40,11 +45,14 @@ def install_theme(
 ) -> bool:
     """Install the approved palette and return whether every bundled font loaded."""
     loaded = load_packaged_fonts(runtime_root=runtime_root)
-    application.setFont(QFont(UI_FONT if loaded else "Sans Serif", 10))
+    base_font = QFont(UI_FONT, 10)
+    if not loaded:
+        base_font.setStyleHint(QFont.StyleHint.SansSerif)
+    application.setFont(base_font)
     application.setStyleSheet(
         f"""
         QWidget {{ background: {BACKGROUND_COLOR}; color: {TEXT_COLOR};
-                  font-family: '{UI_FONT}', sans-serif; font-size: 10pt; }}
+                  font-family: '{UI_FONT}', {_UI_FALLBACKS}; font-size: 10pt; }}
         QFrame#preview_stage {{ background: {CANVAS_COLOR};
                                 border: 1px solid {DIVIDER_COLOR}; }}
         QLabel#original_canvas, QLabel#result_canvas {{ background: {CANVAS_COLOR}; }}
@@ -77,7 +85,7 @@ def install_theme(
             color: {PRIMARY_ACTION_TEXT_COLOR}; border-color: {ACCENT_COLOR}; }}
         QLabel[secondary='true'] {{ color: {SECONDARY_COLOR}; }}
         QLabel[mono='true'], QAbstractSpinBox[mono='true'], QLineEdit[mono='true'] {{
-            font-family: '{MONO_FONT}', monospace;
+            font-family: '{MONO_FONT}', {_MONO_FALLBACKS};
         }}
         QLabel#model_status[status='ready'] {{ color: {SUCCESS_COLOR}; }}
         QLabel#model_status[status='downloading'] {{ color: {WARNING_COLOR}; }}
