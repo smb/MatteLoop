@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-import rembggui.resources as resources_module
-from rembggui.resources import (
+import matteloop.resources as resources_module
+from matteloop.resources import (
     read_resource_bytes,
     resource_path,
     status_icon_asset,
@@ -114,7 +114,7 @@ def test_resource_path_resolves_source_resource() -> None:
 def test_resource_path_resolves_wheel_package_resource(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    package = tmp_path / "site-packages" / "rembggui"
+    package = tmp_path / "site-packages" / "matteloop"
     package_resource = package / "resources" / "model-manifest.json"
     package_resource.parent.mkdir(parents=True)
     package_resource.write_text("{}", encoding="utf-8")
@@ -127,7 +127,7 @@ def test_resource_path_resolves_wheel_package_resource(
 def test_resource_path_fails_closed_when_source_resource_is_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    module_path = tmp_path / "src" / "rembggui" / "resources.py"
+    module_path = tmp_path / "src" / "matteloop" / "resources.py"
     monkeypatch.setattr(resources_module, "__file__", str(module_path))
 
     with pytest.raises(FileNotFoundError, match="resource not found"):
@@ -154,7 +154,7 @@ def test_status_icon_asset_chooses_minimum_or_high_dpi_source(
 def test_resource_path_resolves_frozen_standalone_resource(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    executable = tmp_path / "bin" / "rembggui"
+    executable = tmp_path / "bin" / "matteloop"
     expected = executable.parent / "resources" / "manifest.json"
     expected.parent.mkdir(parents=True)
     expected.write_text("{}", encoding="utf-8")
@@ -167,7 +167,7 @@ def test_resource_path_resolves_frozen_standalone_resource(
 def test_resource_path_fails_closed_when_frozen_resource_is_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    executable = tmp_path / "bin" / "rembggui"
+    executable = tmp_path / "bin" / "matteloop"
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable", str(executable))
 
@@ -178,7 +178,7 @@ def test_resource_path_fails_closed_when_frozen_resource_is_missing(
 def test_resource_path_resolves_macos_bundle_resource(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    executable = tmp_path / "App.app" / "Contents" / "MacOS" / "rembggui"
+    executable = tmp_path / "App.app" / "Contents" / "MacOS" / "matteloop"
     expected = executable.parents[1] / "Resources" / "manifest.json"
     expected.parent.mkdir(parents=True)
     expected.write_text("{}", encoding="utf-8")
@@ -191,7 +191,7 @@ def test_resource_path_resolves_macos_bundle_resource(
 def test_resource_path_rejects_ambiguous_frozen_copies(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    executable = tmp_path / "App.app" / "Contents" / "MacOS" / "rembggui"
+    executable = tmp_path / "App.app" / "Contents" / "MacOS" / "matteloop"
     first = executable.parent / "resources" / "manifest.json"
     second = executable.parents[1] / "Resources" / "manifest.json"
     for candidate in (first, second):

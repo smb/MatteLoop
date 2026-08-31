@@ -12,9 +12,9 @@ from typing import BinaryIO
 
 import pytest
 
-import rembggui.core.fingerprints as fingerprints_module
-from rembggui.core.errors import AppError, ErrorCode, ValidationError
-from rembggui.core.fingerprints import (
+import matteloop.core.fingerprints as fingerprints_module
+from matteloop.core.errors import AppError, ErrorCode, ValidationError
+from matteloop.core.fingerprints import (
     complete_source_sha256,
     cut_cache_key,
     cut_cache_key_inputs,
@@ -22,10 +22,10 @@ from rembggui.core.fingerprints import (
     render_fingerprint,
     union_fingerprint,
 )
-from rembggui.core.fingerprints import (
+from matteloop.core.fingerprints import (
     preview_fingerprint as _preview_fingerprint,
 )
-from rembggui.core.specs import (
+from matteloop.core.specs import (
     AlphaMattingSpec,
     CollisionPolicy,
     CropSpec,

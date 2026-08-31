@@ -1,1 +1,1 @@
-"""Synthetic media fixtures for rembgGUI tests."""
+"""Synthetic media fixtures for MatteLoop tests."""

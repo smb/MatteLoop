@@ -12,10 +12,10 @@ from typing import NoReturn
 
 import pytest
 
-from rembggui.core.errors import AppError, ErrorCode
-from rembggui.jobs.models.cache_fs import BoundModelDirectory
-from rembggui.jobs.models.catalog import ModelCatalog, ModelSpec
-from rembggui.jobs.models.download import (
+from matteloop.core.errors import AppError, ErrorCode
+from matteloop.jobs.models.cache_fs import BoundModelDirectory
+from matteloop.jobs.models.catalog import ModelCatalog, ModelSpec
+from matteloop.jobs.models.download import (
     DownloadHttpError,
     DownloadProxyError,
     ModelDownloader,
@@ -409,7 +409,7 @@ def test_single_flight_collision_opens_transport_once(tmp_path: Path) -> None:
 def test_single_flight_key_never_calls_path_resolve(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import rembggui.jobs.models.download as download_module
+    import matteloop.jobs.models.download as download_module
 
     target = tmp_path / "cache" / "2.0.72" / "u2net" / "u2net.onnx"
 
@@ -424,7 +424,7 @@ def test_single_flight_key_never_calls_path_resolve(
 def test_single_flight_lock_identity_survives_symlink_namespace_swap(
     tmp_path: Path,
 ) -> None:
-    import rembggui.jobs.models.download as download_module
+    import matteloop.jobs.models.download as download_module
 
     first_root = tmp_path / "first"
     second_root = tmp_path / "second"
@@ -445,7 +445,7 @@ def test_single_flight_lock_identity_survives_symlink_namespace_swap(
 def test_single_flight_key_normalizes_lexical_dotdot_and_windows_case(
     tmp_path: Path,
 ) -> None:
-    import rembggui.jobs.models.download as download_module
+    import matteloop.jobs.models.download as download_module
 
     direct = tmp_path / "cache" / "2.0.72" / "u2net" / "u2net.onnx"
     equivalent = (
@@ -463,7 +463,7 @@ def test_single_flight_key_normalizes_lexical_dotdot_and_windows_case(
 def test_success_fsyncs_file_and_parent_before_return(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import rembggui.jobs.models.download as download_module
+    import matteloop.jobs.models.download as download_module
 
     calls: list[int] = []
     real_fsync = os.fsync
@@ -504,7 +504,7 @@ def test_transport_failures_map_to_structured_errors(
 def test_permission_and_disk_write_failures_are_structured(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import rembggui.jobs.models.download as download_module
+    import matteloop.jobs.models.download as download_module
 
     data = b"payload"
     catalog, spec = _spec(data)
@@ -523,7 +523,7 @@ def test_permission_and_disk_write_failures_are_structured(
 def test_output_close_oserror_is_structured_and_part_cleanup_remains_visible(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import rembggui.jobs.models.download as download_module
+    import matteloop.jobs.models.download as download_module
 
     data = b"payload"
     catalog, spec = _spec(data)
@@ -570,7 +570,7 @@ def _swap_bound_parent(bound: BoundModelDirectory, outside: Path) -> tuple[bool,
 def test_parent_swap_cannot_redirect_cached_reuse(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import rembggui.jobs.models.download as download_module
+    import matteloop.jobs.models.download as download_module
 
     data = b"cached"
     catalog, spec = _spec(data)
@@ -605,7 +605,7 @@ def test_parent_swap_cannot_redirect_cached_reuse(
 def test_parent_swap_cannot_redirect_part_promotion_or_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import rembggui.jobs.models.download as download_module
+    import matteloop.jobs.models.download as download_module
 
     data = b"verified"
     catalog, spec = _spec(data)
@@ -639,7 +639,7 @@ def test_parent_swap_cannot_redirect_part_promotion_or_cleanup(
 def test_parent_swap_cannot_redirect_failed_download_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import rembggui.jobs.models.download as download_module
+    import matteloop.jobs.models.download as download_module
 
     expected = b"expected"
     catalog, spec = _spec(expected)

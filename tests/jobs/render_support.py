@@ -9,8 +9,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from rembggui.core.rgba import RgbaOwnershipTracker
-from rembggui.core.specs import (
+from matteloop.core.rgba import RgbaOwnershipTracker
+from matteloop.core.specs import (
     CollisionPolicy,
     CropSpec,
     EdgeMode,
@@ -20,18 +20,18 @@ from rembggui.core.specs import (
     SamplingSpec,
     SegmentationSpec,
 )
-from rembggui.core.state import JobKind
-from rembggui.core.webp import encode_lossless_webp
-from rembggui.jobs.context import CancellationState, JobContext
-from rembggui.jobs.protocol import SegmentRequest
-from rembggui.jobs.render import (
+from matteloop.core.state import JobKind
+from matteloop.core.webp import encode_lossless_webp
+from matteloop.jobs.context import CancellationState, JobContext
+from matteloop.jobs.protocol import SegmentRequest
+from matteloop.jobs.render import (
     AtomicOutputPublisher,
     FilesystemWorkspacePort,
     PreparedSegmentation,
     RenderService,
     ValidatedCandidate,
 )
-from rembggui.jobs.source import DecodedFrame, SourceRevision
+from matteloop.jobs.source import DecodedFrame, SourceRevision
 
 
 @dataclass(frozen=True)

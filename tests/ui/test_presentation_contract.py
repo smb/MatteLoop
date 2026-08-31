@@ -6,10 +6,10 @@ from pathlib import Path
 import pytest
 from PySide6.QtCore import QSettings
 
-from rembggui.core.crop_state import CropChanged, CropToggleChanged, ResetCrop
-from rembggui.core.errors import AppError, ErrorCode
-from rembggui.core.specs import CropSpec
-from rembggui.core.state import (
+from matteloop.core.crop_state import CropChanged, CropToggleChanged, ResetCrop
+from matteloop.core.errors import AppError, ErrorCode
+from matteloop.core.specs import CropSpec
+from matteloop.core.state import (
     AppState,
     ArtifactResult,
     CancelRequested,
@@ -29,10 +29,10 @@ from rembggui.core.state import (
     SourceLoadRequested,
     reduce,
 )
-from rembggui.ui.crop_presentation import CropPresentation
-from rembggui.ui.inspector import Inspector
-from rembggui.ui.presenter import present
-from rembggui.ui.theme import load_packaged_fonts
+from matteloop.ui.crop_presentation import CropPresentation
+from matteloop.ui.inspector import Inspector
+from matteloop.ui.presenter import present
+from matteloop.ui.theme import load_packaged_fonts
 
 _SOURCE_ERROR_CASES = [
     (ErrorCode.SOURCE_NOT_LOCAL, "Open a video stored on this Mac."),
@@ -138,7 +138,7 @@ def test_edited_cuts_recovery_state_remains_truthful() -> None:
 
 
 def test_presenter_has_no_qt_or_job_imports() -> None:
-    path = Path("src/rembggui/ui/presenter.py")
+    path = Path("src/matteloop/ui/presenter.py")
     module = ast.parse(path.read_text(encoding="utf-8"))
     imports = [
         alias.name
@@ -150,7 +150,7 @@ def test_presenter_has_no_qt_or_job_imports() -> None:
         for node in ast.walk(module)
         if isinstance(node, ast.ImportFrom)
     ]
-    assert not any(name.startswith(("PySide6", "rembggui.jobs")) for name in imports)
+    assert not any(name.startswith(("PySide6", "matteloop.jobs")) for name in imports)
 
 
 @pytest.mark.parametrize(
@@ -194,7 +194,7 @@ def test_inspector_uses_defaults_for_malformed_disclosure_settings(qtbot) -> Non
     settings = QSettings(
         QSettings.IniFormat,
         QSettings.UserScope,
-        "rembggui-test",
+        "matteloop-test",
         "malformed-settings",
     )
     settings.clear()
@@ -208,7 +208,7 @@ def test_inspector_uses_defaults_for_malformed_disclosure_settings(qtbot) -> Non
 
 def test_inspector_crop_fields_mirror_values_and_emit_reducer_commands(qtbot) -> None:
     settings = QSettings(
-        QSettings.IniFormat, QSettings.UserScope, "rembggui-test", "crop-fields"
+        QSettings.IniFormat, QSettings.UserScope, "matteloop-test", "crop-fields"
     )
     settings.clear()
     inspector = Inspector(settings)

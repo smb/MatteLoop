@@ -3,7 +3,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QListWidget, QListWidgetItem
 
-from rembggui.ui.aligned_rows import (
+from matteloop.ui.aligned_rows import (
     ACCESSIBLE_DESCRIPTION_ROLE,
     STATUS_ROLE,
     AlignedColumn,

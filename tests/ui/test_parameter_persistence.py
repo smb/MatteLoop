@@ -5,24 +5,24 @@ from pathlib import Path
 
 from PySide6.QtCore import QSettings
 
-from rembggui.core.execution_providers import (
+from matteloop.core.execution_providers import (
     CPU_EXECUTION_PROVIDER,
     CUDA_EXECUTION_PROVIDER,
     ProviderOption,
 )
-from rembggui.core.parameters import OutputFilenameChanged, ParameterState
-from rembggui.core.specs import EdgeMode
-from rembggui.core.state import AppState, SourceState
-from rembggui.ui.controller import SourceController
-from rembggui.ui.preferences import load_parameters, persist_parameters
-from rembggui.ui.store import ReducerStore
+from matteloop.core.parameters import OutputFilenameChanged, ParameterState
+from matteloop.core.specs import EdgeMode
+from matteloop.core.state import AppState, SourceState
+from matteloop.ui.controller import SourceController
+from matteloop.ui.preferences import load_parameters, persist_parameters
+from matteloop.ui.store import ReducerStore
 
 
 def _settings() -> QSettings:
     settings = QSettings(
         QSettings.IniFormat,
         QSettings.UserScope,
-        "rembggui-test",
+        "matteloop-test",
         "parameter-persistence",
     )
     settings.clear()

@@ -12,10 +12,10 @@ import av
 import pytest
 from PIL import Image
 
-import rembggui.jobs.source as source_module
-from rembggui.core.errors import AppError, ErrorCode
-from rembggui.core.rgba import RgbaOwnershipHandle, RgbaOwnershipTracker
-from rembggui.jobs.source import (
+import matteloop.jobs.source as source_module
+from matteloop.core.errors import AppError, ErrorCode
+from matteloop.core.rgba import RgbaOwnershipHandle, RgbaOwnershipTracker
+from matteloop.jobs.source import (
     MAX_TIMELINE_DECODED_FRAMES,
     DecodedFrame,
     SourceRevision,
@@ -466,7 +466,7 @@ def test_timeline_fallback_cancels_between_decoded_frames():
 
 
 def test_timeline_bound_counts_frames_without_pts(monkeypatch):
-    import rembggui.jobs.source as source_module
+    import matteloop.jobs.source as source_module
 
     stream = _color_stream(matrix=0)
     stream.time_base = Fraction(1, 60)
@@ -617,7 +617,7 @@ def test_retarget_during_decode_is_rejected_after_native_access(tmp_path, monkey
         Fraction(2),
     )
     info = probe_source(path)
-    import rembggui.jobs.source as source_module
+    import matteloop.jobs.source as source_module
 
     real_normalize = source_module._normalized_image
 
@@ -671,7 +671,7 @@ def test_every_probe_and_decode_owns_and_closes_its_container(tmp_path, monkeypa
         _solid_frames()[:2],
         Fraction(2),
     )
-    import rembggui.jobs.source as source_module
+    import matteloop.jobs.source as source_module
 
     real_open = source_module.av.open
     containers = []
@@ -710,7 +710,7 @@ def test_decode_closes_container_when_normalization_raises_baseexception(
     tmp_path, monkeypatch
 ):
     path = make_video(tmp_path / "baseexception.mp4", _solid_frames(), Fraction(2))
-    import rembggui.jobs.source as source_module
+    import matteloop.jobs.source as source_module
 
     real_open = source_module.av.open
     containers = []
@@ -756,7 +756,7 @@ def test_late_decode_seeks_to_a_nearby_keyframe_instead_of_retaining_whole_video
     tmp_path, monkeypatch
 ):
     path = _make_seekable_video(tmp_path / "seekable.mkv")
-    import rembggui.jobs.source as source_module
+    import matteloop.jobs.source as source_module
 
     real_open = source_module.av.open
     yielded_since_seek = 0

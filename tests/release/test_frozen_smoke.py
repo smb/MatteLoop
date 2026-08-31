@@ -4,6 +4,7 @@ import configparser
 import importlib.util
 import json
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -15,9 +16,9 @@ from pathlib import Path
 import pytest
 from PySide6.QtGui import QImage
 
-import rembggui.smoke as smoke_module
-from rembggui.jobs.models.catalog import ModelCatalog
-from rembggui.smoke import SmokeResult, run_smoke
+import matteloop.smoke as smoke_module
+from matteloop.jobs.models.catalog import ModelCatalog
+from matteloop.smoke import SmokeResult, run_smoke
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
@@ -405,7 +406,7 @@ def test_catalog_resources_resolve_from_a_frozen_runtime_root(
     )
     assert ModelCatalog.load_resource(runtime_root=tmp_path).ids
     monkeypatch.setattr(sys, "frozen", True, raising=False)
-    monkeypatch.setattr(sys, "executable", str(tmp_path / "rembggui"))
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "matteloop"))
     assert ModelCatalog.resource_path() == resource_dir / "model-manifest.json"
     assert ModelCatalog.provenance_path() == resource_dir / "model-provenance.json"
 
@@ -417,11 +418,18 @@ def test_pyside_deploy_spec_parses_to_required_native_bundle_contract() -> None:
     )
     parser.read(spec_path, encoding="utf-8")
 
-    assert parser.get("app", "title") == "rembgGUI"
+    assert parser.get("app", "title") == "MatteLoop"
     assert parser.get("app", "project_dir") == "."
     assert parser.get("app", "input_file") == "packaging/entrypoint.py"
     assert parser.get("app", "exec_directory") == "dist"
     assert parser.get("python", "packages") == "Nuitka==2.8.10"
+    assert set(parser.get("qt", "modules").split(",")) >= {
+        "Core",
+        "DBus",
+        "Gui",
+        "Network",
+        "Widgets",
+    }
     assert set(parser.get("qt", "plugins").split(",")) == {
         "imageformats",
         "platforms",
@@ -429,12 +437,14 @@ def test_pyside_deploy_spec_parses_to_required_native_bundle_contract() -> None:
     assert parser.get("nuitka", "mode") == "standalone"
 
     args = set(shlex.split(parser.get("nuitka", "extra_args")))
-    assert "--include-package=rembggui" in args
-    assert "--include-module=rembggui.smoke_child" in args
+    assert "--include-package=matteloop" in args
+    assert "--include-module=matteloop.smoke_child" in args
     assert "--include-package=rembg.sessions" in args
     assert "--include-package=onnxruntime" in args
-    assert "--include-package=av" in args
-    assert "--include-package-data=av" in args
+    assert "--nofollow-import-to=av" in args
+    assert "--disable-cache=ccache" in args
+    assert "--include-module=PIL._imaging" in args
+    assert "--include-module=PIL._webp" in args
     assert "--include-module=PIL.PngImagePlugin" in args
     assert "--include-module=PIL.WebPImagePlugin" in args
     assert (
@@ -451,17 +461,19 @@ def test_pyside_deploy_spec_parses_to_required_native_bundle_contract() -> None:
     assert "--noinclude-data-files=**/*token*" in args
 
 
-def test_pyside_deploy_accepts_spec_in_dry_run_mode() -> None:
+def test_pyside_deploy_accepts_spec_in_dry_run_mode(tmp_path: Path) -> None:
     executable_name = (
         "pyside6-deploy.exe" if sys.platform == "win32" else "pyside6-deploy"
     )
     deploy = Path(sys.executable).with_name(executable_name)
     assert deploy.is_file()
+    temporary_spec = tmp_path / "pysidedeploy.spec"
+    shutil.copy2(REPOSITORY_ROOT / "packaging" / "pysidedeploy.spec", temporary_spec)
     completed = subprocess.run(
         [
             str(deploy),
             "-c",
-            str(REPOSITORY_ROOT / "packaging" / "pysidedeploy.spec"),
+            str(temporary_spec),
             "--dry-run",
             "--force",
         ],
@@ -484,13 +496,15 @@ def test_release_workflow_has_only_manual_unsigned_native_builds() -> None:
     assert workflow["on"] == {"workflow_dispatch": {}}
     job = workflow["jobs"]["native-package"]
     includes = job["strategy"]["matrix"]["include"]
-    assert {(item["os"], item["arch"]) for item in includes} == {
-        ("windows-2022", "x64"),
-        ("macos-15-intel", "x64"),
-        ("macos-15", "arm64"),
-        ("ubuntu-22.04", "x64"),
+    assert {(item["target"], item["os"]) for item in includes} == {
+        ("windows-2022-x64", "windows-2022"),
+        ("macos-15-arm64", "macos-15"),
     }
     assert job["permissions"] == {"contents": "read"}
+    assert workflow["concurrency"] == {
+        "group": "matteloop-native-release",
+        "cancel-in-progress": False,
+    }
 
     steps = job["steps"]
     setup = next(step for step in steps if step.get("id") == "setup-uv")
@@ -500,24 +514,17 @@ def test_release_workflow_has_only_manual_unsigned_native_builds() -> None:
         "version": "0.11.32",
     }
     commands = "\n".join(str(step.get("run", "")) for step in steps)
-    assert "uv sync --frozen --all-groups --no-cache" in commands
-    assert (
-        "pyside6-deploy packaging/entrypoint.py -c packaging/pysidedeploy.spec --force"
-    ) in commands
-    assert "packaging/smoke_child.py" in commands
-    assert "xvfb-run" in commands
-
-    patch_tool = next(step for step in steps if step.get("id") == "verify-patchelf")
-    assert patch_tool["if"] == "runner.os == 'Linux'"
-    assert "version('patchelf') == '0.17.2.4'" in patch_tool["run"]
-    assert "shutil.which('patchelf')" in patch_tool["run"]
+    assert "uv sync --frozen --all-groups" in commands
+    assert "--no-cache" not in commands
+    assert "python scripts/build.py" in commands
+    assert "xvfb-run" not in commands
     build = next(
         step for step in steps if step["name"] == "Build native standalone bundle"
     )
-    assert build["run"].startswith("uv run --frozen --no-sync ")
+    assert build["run"] == "uv run --frozen --no-sync python scripts/build.py"
 
     upload = next(step for step in steps if step.get("id") == "upload")
-    assert upload["with"]["name"] == "rembgGUI-unsigned-${{ matrix.target }}"
+    assert upload["with"]["name"] == "MatteLoop-unsigned-${{ matrix.target }}"
     assert upload["with"]["path"] == "dist"
     serialized = json.dumps(workflow).lower()
     assert "secrets." not in serialized
@@ -530,13 +537,13 @@ def test_release_workflow_has_only_manual_unsigned_native_builds() -> None:
 def test_packaging_smoke_launcher_is_importable_without_shadowing_packaging() -> None:
     launcher_path = REPOSITORY_ROOT / "packaging" / "smoke_child.py"
     spec = importlib.util.spec_from_file_location(
-        "rembggui_packaging_smoke", launcher_path
+        "matteloop_packaging_smoke", launcher_path
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
-    assert module.spawn_smoke_target.__module__ == "rembggui.smoke_child"
+    assert module.spawn_smoke_target.__module__ == "matteloop.smoke_child"
 
 
 def test_linux_patch_tool_is_exactly_pinned_in_project_and_lock() -> None:
@@ -552,7 +559,7 @@ def test_linux_patch_tool_is_exactly_pinned_in_project_and_lock() -> None:
     )
     assert patch_tool["version"] == "0.17.2.4"
     application = next(
-        package for package in lock["package"] if package["name"] == "rembggui"
+        package for package in lock["package"] if package["name"] == "matteloop"
     )
     assert {
         "name": "patchelf",

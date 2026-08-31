@@ -1,89 +1,89 @@
 {
-  "src/rembggui/core/geometry.py": {
+  "src/matteloop/core/geometry.py": {
     "lines": 1057,
     "long_functions": 1
   },
-  "src/rembggui/core/state.py": {
+  "src/matteloop/core/state.py": {
     "lines": 880,
     "long_functions": 1
   },
-  "src/rembggui/core/webp.py": {
+  "src/matteloop/core/webp.py": {
     "lines": 1672,
     "long_functions": 5
   },
-  "src/rembggui/jobs/models/cache_fs.py": {
+  "src/matteloop/jobs/models/cache_fs.py": {
     "lines": 1522,
     "long_functions": 4
   },
-  "src/rembggui/jobs/models/download.py": {
+  "src/matteloop/jobs/models/download.py": {
     "lines": 604,
     "long_functions": 2
   },
-  "src/rembggui/jobs/models/session.py": {
+  "src/matteloop/jobs/models/session.py": {
     "lines": 399,
     "long_functions": 1
   },
-  "src/rembggui/jobs/render.py": {
+  "src/matteloop/jobs/render.py": {
     "lines": 2938,
     "long_functions": 11
   },
-  "src/rembggui/jobs/segmentation_host.py": {
+  "src/matteloop/jobs/segmentation_host.py": {
     "lines": 1805,
     "long_functions": 8
   },
-  "src/rembggui/jobs/source.py": {
+  "src/matteloop/jobs/source.py": {
     "lines": 1636,
     "long_functions": 5
   },
-  "src/rembggui/jobs/thumbnails.py": {
+  "src/matteloop/jobs/thumbnails.py": {
     "lines": 280,
     "long_functions": 2
   },
-  "src/rembggui/jobs/workspace/_cut_ops.py": {
+  "src/matteloop/jobs/workspace/_cut_ops.py": {
     "lines": 444,
     "long_functions": 1
   },
-  "src/rembggui/jobs/workspace/_filesystem.py": {
+  "src/matteloop/jobs/workspace/_filesystem.py": {
     "lines": 686,
     "long_functions": 1
   },
-  "src/rembggui/jobs/workspace/_manifest.py": {
+  "src/matteloop/jobs/workspace/_manifest.py": {
     "lines": 434,
     "long_functions": 2
   },
-  "src/rembggui/jobs/workspace/_manifest_io.py": {
+  "src/matteloop/jobs/workspace/_manifest_io.py": {
     "lines": 378,
     "long_functions": 2
   },
-  "src/rembggui/jobs/workspace/_manifest_validation.py": {
+  "src/matteloop/jobs/workspace/_manifest_validation.py": {
     "lines": 344,
     "long_functions": 1
   },
-  "src/rembggui/jobs/workspace/_recovery.py": {
+  "src/matteloop/jobs/workspace/_recovery.py": {
     "lines": 653,
     "long_functions": 3
   },
-  "src/rembggui/jobs/workspace/_scan.py": {
+  "src/matteloop/jobs/workspace/_scan.py": {
     "lines": 334,
     "long_functions": 2
   },
-  "src/rembggui/jobs/workspace/_snapshot_ops.py": {
+  "src/matteloop/jobs/workspace/_snapshot_ops.py": {
     "lines": 432,
     "long_functions": 3
   },
-  "src/rembggui/smoke.py": {
-    "lines": 464,
+  "src/matteloop/smoke.py": {
+    "lines": 498,
     "long_functions": 1
   },
-  "src/rembggui/smoke_child.py": {
+  "src/matteloop/smoke_child.py": {
     "lines": 81,
     "long_functions": 1
   },
-  "src/rembggui/ui/main_window.py": {
+  "src/matteloop/ui/main_window.py": {
     "lines": 380,
     "long_functions": 1
   },
-  "src/rembggui/ui/presenter.py": {
+  "src/matteloop/ui/presenter.py": {
     "lines": 171,
     "long_functions": 1
   }

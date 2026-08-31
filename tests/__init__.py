@@ -1,1 +1,1 @@
-"""Test support package for rembgGUI."""
+"""Test support package for MatteLoop."""

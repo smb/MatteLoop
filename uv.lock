@@ -619,7 +619,7 @@ cpu = [
 ]
 
 [[package]]
-name = "rembggui"
+name = "matteloop"
 source = { editable = "." }
 dependencies = [
     { name = "av" },

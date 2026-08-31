@@ -6,7 +6,7 @@ from pathlib import Path
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 
-from rembggui.core.timeline import (
+from matteloop.core.timeline import (
     PlayheadChanged,
     ResetRange,
     SetEndToPlayhead,
@@ -14,8 +14,8 @@ from rembggui.core.timeline import (
     StepFrame,
     TimelineState,
 )
-from rembggui.ui.timeline import TimelineWidget
-from rembggui.ui.timeline_presentation import TimelinePresentation
+from matteloop.ui.timeline import TimelineWidget
+from matteloop.ui.timeline_presentation import TimelinePresentation
 
 
 def _presentation(*, playhead: Fraction = Fraction(0)) -> TimelinePresentation:

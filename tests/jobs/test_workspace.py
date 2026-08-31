@@ -19,10 +19,11 @@ import psutil
 import pytest
 from PIL import Image
 
-from rembggui.core.errors import AppError, ErrorCode
-from rembggui.core.fingerprints import cut_cache_key
-from rembggui.core.rgba import RgbaOwnershipTracker
-from rembggui.core.specs import (
+import matteloop.paths as paths_module
+from matteloop.core.errors import AppError, ErrorCode
+from matteloop.core.fingerprints import cut_cache_key
+from matteloop.core.rgba import RgbaOwnershipTracker
+from matteloop.core.specs import (
     CropSpec,
     FramingSpec,
     OutputSpec,
@@ -30,9 +31,9 @@ from rembggui.core.specs import (
     SamplingSpec,
     SegmentationSpec,
 )
-from rembggui.jobs import workspace as workspace_module
-from rembggui.jobs.models.cache_fs import BoundDirectoryCloseError, UnsafeCacheError
-from rembggui.jobs.workspace import (
+from matteloop.jobs import workspace as workspace_module
+from matteloop.jobs.models.cache_fs import BoundDirectoryCloseError, UnsafeCacheError
+from matteloop.jobs.workspace import (
     MANIFEST_FILENAME,
     MAX_MANIFEST_BYTES,
     CutManifest,
@@ -367,7 +368,7 @@ class _ExclusiveWindowsCutsApi:
         )
 
     def file_attributes(self, handle: int) -> int:
-        from rembggui.jobs.models import cache_fs
+        from matteloop.jobs.models import cache_fs
 
         path = self.handle_paths[handle]
         attributes = cache_fs._FILE_ATTRIBUTE_DIRECTORY if path.is_dir() else 0
@@ -648,7 +649,7 @@ def test_windows_recovery_lstat_is_compatible_with_held_writable_descriptor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    recovery_path = tmp_path / ".rembggui-recovery"
+    recovery_path = tmp_path / ".matteloop-recovery"
     recovery_path.mkdir(mode=0o700)
     sharing_api = _PublicationSharingWindowsApi(tmp_path)
     _install_exclusive_windows_cuts_api(
@@ -671,7 +672,7 @@ def test_windows_recovery_replace_is_compatible_with_held_writable_descriptor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    recovery_path = tmp_path / ".rembggui-recovery"
+    recovery_path = tmp_path / ".matteloop-recovery"
     recovery_path.mkdir(mode=0o700)
     sharing_api = _PublicationSharingWindowsApi(tmp_path)
     _install_exclusive_windows_cuts_api(
@@ -702,7 +703,7 @@ def test_windows_existing_recovery_remains_shareable_while_read_write_fd_is_held
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    recovery_path = tmp_path / ".rembggui-recovery"
+    recovery_path = tmp_path / ".matteloop-recovery"
     recovery_path.mkdir(mode=0o700)
     (recovery_path / "output.recovery").write_bytes(b"old-output")
     sharing_api = _PublicationSharingWindowsApi(tmp_path)
@@ -726,7 +727,7 @@ def test_windows_existing_recovery_remains_shareable_while_read_write_fd_is_held
 def test_private_output_lock_is_process_exclusive_and_stale_name_is_reusable(
     tmp_path: Path,
 ) -> None:
-    private_path = tmp_path / ".rembggui-publish"
+    private_path = tmp_path / ".matteloop-publish"
     private_path.mkdir(mode=0o700)
     context = multiprocessing.get_context("fork")
     ready = context.Event()
@@ -804,7 +805,7 @@ def test_output_lock_anchor_is_parent_bound_and_stale_pending_reuses_exact_inode
 ) -> None:
     publication = workspace_module.PublicationDirectory.open(tmp_path)
     private = publication.open_private_directory(
-        ".rembggui-publish",
+        ".matteloop-publish",
         "publication",
     )
     key = publication.target_key(tmp_path / "output.webp")
@@ -848,7 +849,7 @@ def test_parent_anchored_output_lock_is_reusable_after_process_death(
     def acquire_then_die() -> None:
         publication = workspace_module.PublicationDirectory.open(tmp_path)
         private = publication.open_private_directory(
-            ".rembggui-publish",
+            ".matteloop-publish",
             "publication",
         )
         key = publication.target_key(tmp_path / "output.webp")
@@ -864,7 +865,7 @@ def test_parent_anchored_output_lock_is_reusable_after_process_death(
 
     publication = workspace_module.PublicationDirectory.open(tmp_path)
     private = publication.open_private_directory(
-        ".rembggui-publish",
+        ".matteloop-publish",
         "publication",
     )
     key = publication.target_key(tmp_path / "output.webp")
@@ -882,7 +883,7 @@ def test_fixed_output_slot_is_reusable_after_process_death(tmp_path: Path) -> No
     def acquire_slot_then_die() -> None:
         publication = workspace_module.PublicationDirectory.open(tmp_path)
         private = publication.open_private_directory(
-            ".rembggui-publish",
+            ".matteloop-publish",
             "publication",
         )
         key = publication.target_key(tmp_path / "output.webp")
@@ -900,7 +901,7 @@ def test_fixed_output_slot_is_reusable_after_process_death(tmp_path: Path) -> No
 
     publication = workspace_module.PublicationDirectory.open(tmp_path)
     private = publication.open_private_directory(
-        ".rembggui-publish",
+        ".matteloop-publish",
         "publication",
     )
     key = publication.target_key(tmp_path / "output.webp")
@@ -921,7 +922,7 @@ def test_locked_hardlink_slot_is_never_truncated_as_stale(tmp_path: Path) -> Non
     source.write_bytes(b"held-source")
     publication = workspace_module.PublicationDirectory.open(tmp_path)
     private = publication.open_private_directory(
-        ".rembggui-publish",
+        ".matteloop-publish",
         "publication",
     )
     key = publication.target_key(source)
@@ -955,7 +956,7 @@ def test_owned_replace_keeps_same_inode_alias_instead_of_blind_unlink(
 ) -> None:
     publication = workspace_module.PublicationDirectory.open(tmp_path)
     private = publication.open_private_directory(
-        ".rembggui-publish",
+        ".matteloop-publish",
         "publication",
     )
     key = publication.target_key(tmp_path / "output.webp")
@@ -989,7 +990,7 @@ def test_owned_replace_keeps_same_inode_alias_instead_of_blind_unlink(
 def test_existing_private_pending_without_anchored_owner_is_never_unlinked(
     tmp_path: Path,
 ) -> None:
-    private_path = tmp_path / ".rembggui-publish"
+    private_path = tmp_path / ".matteloop-publish"
     private_path.mkdir(mode=0o700)
     pending = private_path / ".pending"
     pending.write_bytes(b"foreign-pending")
@@ -1010,7 +1011,7 @@ def test_existing_private_pending_without_anchored_owner_is_never_unlinked(
 def test_private_output_locks_for_different_targets_do_not_serialize(
     tmp_path: Path,
 ) -> None:
-    private_path = tmp_path / ".rembggui-publish"
+    private_path = tmp_path / ".matteloop-publish"
     private_path.mkdir(mode=0o700)
     directory = RecoveryDirectory.open(tmp_path, private_path.name)
     first = directory.acquire_advisory_lock("first.transaction.lock")
@@ -1029,7 +1030,7 @@ def test_parent_anchored_locks_for_distinct_targets_are_independent(
 ) -> None:
     publication = workspace_module.PublicationDirectory.open(tmp_path)
     private = publication.open_private_directory(
-        ".rembggui-publish",
+        ".matteloop-publish",
         "publication",
     )
     first = publication.acquire_output_lock(
@@ -1056,7 +1057,7 @@ def test_post_open_anchor_disappearance_closes_the_abandoned_descriptor(
 ) -> None:
     publication = workspace_module.PublicationDirectory.open(tmp_path)
     private = publication.open_private_directory(
-        ".rembggui-publish",
+        ".matteloop-publish",
         "publication",
     )
     key = publication.target_key(tmp_path / "output.webp")
@@ -1094,7 +1095,7 @@ def test_post_open_anchor_disappearance_surfaces_ambiguous_close_error(
 ) -> None:
     publication = workspace_module.PublicationDirectory.open(tmp_path)
     private = publication.open_private_directory(
-        ".rembggui-publish",
+        ".matteloop-publish",
         "publication",
     )
     key = publication.target_key(tmp_path / "output.webp")
@@ -1158,7 +1159,7 @@ def test_parent_anchor_close_then_raise_is_consumed_without_fd_retry(
 ) -> None:
     publication = workspace_module.PublicationDirectory.open(tmp_path)
     private = publication.open_private_directory(
-        ".rembggui-publish",
+        ".matteloop-publish",
         "publication",
     )
     key = publication.target_key(tmp_path / "output.webp")
@@ -1208,7 +1209,7 @@ def test_transaction_lock_stays_exclusive_until_descriptor_close_completes(
     def close_owner() -> None:
         publication = workspace_module.PublicationDirectory.open(tmp_path)
         private = publication.open_private_directory(
-            ".rembggui-publish",
+            ".matteloop-publish",
             "publication",
         )
         key = publication.target_key(tmp_path / "output.webp")
@@ -1242,7 +1243,7 @@ def test_transaction_lock_stays_exclusive_until_descriptor_close_completes(
     acquired = False
     try:
         assert close_started.wait(5)
-        lock_path = next((tmp_path / ".rembggui-publish").glob("*.transaction.lock"))
+        lock_path = next((tmp_path / ".matteloop-publish").glob("*.transaction.lock"))
         original_bytes = lock_path.read_bytes()
         contender_descriptor = os.open(lock_path, os.O_RDWR)
         contender = workspace_module._SystemAdvisoryFileLock()
@@ -1262,7 +1263,7 @@ def test_transaction_lock_stays_exclusive_until_descriptor_close_completes(
     assert result.get(timeout=2) == ("ok", "")
     publication = workspace_module.PublicationDirectory.open(tmp_path)
     private = publication.open_private_directory(
-        ".rembggui-publish",
+        ".matteloop-publish",
         "publication",
     )
     key = publication.target_key(tmp_path / "output.webp")
@@ -1284,7 +1285,7 @@ def test_fixed_slot_lock_stays_exclusive_until_descriptor_close_completes(
     def close_owner() -> None:
         publication = workspace_module.PublicationDirectory.open(tmp_path)
         private = publication.open_private_directory(
-            ".rembggui-publish",
+            ".matteloop-publish",
             "publication",
         )
         key = publication.target_key(tmp_path / "output.webp")
@@ -1320,7 +1321,7 @@ def test_fixed_slot_lock_stays_exclusive_until_descriptor_close_completes(
     acquired = False
     try:
         assert close_started.wait(5)
-        slot_path = next((tmp_path / ".rembggui-publish").glob(".*.publish-pending"))
+        slot_path = next((tmp_path / ".matteloop-publish").glob(".*.publish-pending"))
         contender_descriptor = os.open(slot_path, os.O_RDWR)
         contender = workspace_module._SystemAdvisoryFileLock()
         acquired = contender.acquire_nonblocking(contender_descriptor)
@@ -1337,7 +1338,7 @@ def test_fixed_slot_lock_stays_exclusive_until_descriptor_close_completes(
 
     assert process.exitcode == 0
     assert result.get(timeout=2) == ("ok", "")
-    slot_path = next((tmp_path / ".rembggui-publish").glob(".*.publish-pending"))
+    slot_path = next((tmp_path / ".matteloop-publish").glob(".*.publish-pending"))
     descriptor = os.open(slot_path, os.O_RDWR)
     adapter = workspace_module._SystemAdvisoryFileLock()
     try:
@@ -1353,7 +1354,7 @@ def test_locked_slot_close_then_raise_consumes_fd_without_retry(
 ) -> None:
     publication = workspace_module.PublicationDirectory.open(tmp_path)
     private = publication.open_private_directory(
-        ".rembggui-publish",
+        ".matteloop-publish",
         "publication",
     )
     key = publication.target_key(tmp_path / "output.webp")
@@ -1405,7 +1406,7 @@ def test_transaction_close_then_raise_consumes_fd_without_retry(
 ) -> None:
     publication = workspace_module.PublicationDirectory.open(tmp_path)
     private = publication.open_private_directory(
-        ".rembggui-publish",
+        ".matteloop-publish",
         "publication",
     )
     key = publication.target_key(tmp_path / "output.webp")
@@ -1449,7 +1450,7 @@ def test_private_output_lock_serializes_threads_even_if_platform_lock_reenters(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    private_path = tmp_path / ".rembggui-publish"
+    private_path = tmp_path / ".matteloop-publish"
     private_path.mkdir(mode=0o700)
     monkeypatch.setattr(
         workspace_module._SystemAdvisoryFileLock,
@@ -1474,10 +1475,10 @@ def test_fixed_slot_serializes_threads_even_if_platform_lock_reenters(
 ) -> None:
     publication = workspace_module.PublicationDirectory.open(tmp_path)
     first_directory = publication.open_private_directory(
-        ".rembggui-publish",
+        ".matteloop-publish",
         "publication",
     )
-    second_directory = RecoveryDirectory.open(tmp_path, ".rembggui-publish")
+    second_directory = RecoveryDirectory.open(tmp_path, ".matteloop-publish")
     key = publication.target_key(tmp_path / "output.webp")
     owner = publication.acquire_output_lock(first_directory, key)
     monkeypatch.setattr(
@@ -1505,7 +1506,7 @@ def test_contended_output_close_then_raise_is_consumed_without_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    private_path = tmp_path / ".rembggui-publish"
+    private_path = tmp_path / ".matteloop-publish"
     private_path.mkdir(mode=0o700)
     blocked_descriptor: int | None = None
     actual_close = workspace_module.os.close
@@ -1563,7 +1564,7 @@ def test_transaction_adapter_construction_failure_closes_owned_descriptor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    private_path = tmp_path / ".rembggui-publish"
+    private_path = tmp_path / ".matteloop-publish"
     private_path.mkdir(mode=0o700)
     directory = RecoveryDirectory.open(tmp_path, private_path.name)
     opened_descriptor: int | None = None
@@ -1600,7 +1601,7 @@ def test_slot_acquisition_close_then_raise_is_consumed_without_retry(
 ) -> None:
     publication = workspace_module.PublicationDirectory.open(tmp_path)
     private = publication.open_private_directory(
-        ".rembggui-publish",
+        ".matteloop-publish",
         "publication",
     )
     key = publication.target_key(tmp_path / "output.webp")
@@ -1738,7 +1739,7 @@ def test_windows_recovery_directory_uses_bound_copy_replace_and_flush(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    recovery_path = tmp_path / ".rembggui-recovery"
+    recovery_path = tmp_path / ".matteloop-recovery"
     recovery_path.mkdir(mode=0o700)
     api = _install_exclusive_windows_cuts_api(monkeypatch, tmp_path)
     replacements: list[tuple[int, str, str]] = []
@@ -2124,7 +2125,7 @@ def test_workspace_rejects_noncanonical_cache_keys(
 def test_workspace_rejects_symlinked_root_component(tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
-    (tmp_path / ".rembggui-work").symlink_to(outside, target_is_directory=True)
+    (tmp_path / ".matteloop-work").symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(AppError) as exc:
         CutWorkspace.create_staging(tmp_path, "a" * 64, "job-1")
@@ -2150,7 +2151,7 @@ def test_component_binding_rejects_real_ancestor_swap(
     ) -> int:
         nonlocal swapped
         if (
-            path == ".rembggui-work"
+            path == ".matteloop-work"
             and kwargs.get("dir_fd") is not None
             and not swapped
         ):
@@ -2221,9 +2222,7 @@ def test_nonlocal_workspace_uses_deterministic_local_fallback(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     cache_root = tmp_path / "user-cache"
-    monkeypatch.setattr(
-        workspace_module, "user_cache_dir", lambda _app: str(cache_root)
-    )
+    monkeypatch.setattr(paths_module, "user_cache_dir", lambda _app: str(cache_root))
     monkeypatch.setattr(
         workspace_module,
         "_default_local_filesystem_probe",
@@ -2238,7 +2237,7 @@ def test_nonlocal_workspace_uses_deterministic_local_fallback(
     assert layout.workspace_root == cache_root / "workspaces" / (
         hashlib.sha256(os.fsencode(str(tmp_path))).hexdigest()
     )
-    assert layout.workspace_root != tmp_path / ".rembggui-work"
+    assert layout.workspace_root != tmp_path / ".matteloop-work"
 
 
 @pytest.mark.parametrize(
@@ -2266,7 +2265,7 @@ def test_linux_mountinfo_uses_a_fail_closed_local_filesystem_allowlist(
 def test_windows_component_binding_rejects_reparse_and_closes_all_handles(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from rembggui.jobs.models import cache_fs
+    from matteloop.jobs.models import cache_fs
 
     class FakeApi:
         def __init__(self) -> None:
@@ -2305,7 +2304,7 @@ def test_windows_component_binding_rejects_reparse_and_closes_all_handles(
 def test_windows_publication_parent_has_scoped_access_and_bidirectional_share(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from rembggui.jobs.models import cache_fs
+    from matteloop.jobs.models import cache_fs
 
     class FakeApi:
         def __init__(self) -> None:
@@ -2383,7 +2382,7 @@ def test_windows_publication_parent_has_scoped_access_and_bidirectional_share(
 def test_windows_publication_parent_sharing_is_bidirectionally_compatible(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from rembggui.jobs.models import cache_fs
+    from matteloop.jobs.models import cache_fs
 
     api = _ExclusiveWindowsCutsApi(tmp_path)
     publication_share = cache_fs._WINDOWS_PUBLICATION_SHARE
@@ -2441,7 +2440,7 @@ def test_publication_close_attaches_retry_owner_when_registry_is_full(
     del publication
     gc.collect()
 
-    owners = getattr(primary, "_rembggui_bound_directory_close_owners")
+    owners = getattr(primary, "_matteloop_bound_directory_close_owners")
     assert owners == (bound,)
     assert bound.owns_resources()
     api.fail = False
@@ -2452,7 +2451,7 @@ def test_publication_close_attaches_retry_owner_when_registry_is_full(
 def test_failed_windows_publication_open_retains_unclosed_ancestor_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from rembggui.jobs.models import cache_fs
+    from matteloop.jobs.models import cache_fs
 
     class FailingApi:
         fail_close = True
@@ -2489,7 +2488,7 @@ def test_failed_windows_publication_open_retains_unclosed_ancestor_owner(
         )
 
     gc.collect()
-    owners = getattr(exc.value, "_rembggui_bound_directory_close_owners")
+    owners = getattr(exc.value, "_matteloop_bound_directory_close_owners")
     assert len(owners) == 1
     assert owners[0].owns_resources()
     api.fail_close = False
@@ -2552,7 +2551,7 @@ def test_windows_bound_enumeration_and_recursive_delete_ignore_lexical_redirect(
             return 51
 
         def file_attributes(self, handle: int) -> int:
-            from rembggui.jobs.models import cache_fs
+            from matteloop.jobs.models import cache_fs
 
             assert handle == 51
             return cache_fs._FILE_ATTRIBUTE_DIRECTORY
@@ -2801,7 +2800,7 @@ def test_deferred_close_registry_is_bounded_and_overflow_stays_with_primary(
 def test_windows_open_child_preserves_redirect_error_and_retains_failed_close(
     tmp_path: Path,
 ) -> None:
-    from rembggui.jobs.models import cache_fs
+    from matteloop.jobs.models import cache_fs
 
     class FakeApi:
         def __init__(self) -> None:

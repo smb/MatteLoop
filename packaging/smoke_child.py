@@ -9,7 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from rembggui.smoke_child import spawn_smoke_target
+from matteloop.smoke_child import spawn_smoke_target
 
 __all__ = ["find_frozen_executable", "main", "spawn_smoke_target"]
 
@@ -20,13 +20,13 @@ def find_frozen_executable(dist_dir: Path) -> Path:
     if sys.platform == "darwin":
         candidates = tuple(
             path
-            for path in (dist_dir / "rembgGUI.app" / "Contents" / "MacOS").glob("*")
+            for path in (dist_dir / "MatteLoop.app" / "Contents" / "MacOS").glob("*")
             if path.is_file() and os.access(path, os.X_OK)
         )
     else:
         suffix = ".exe" if os.name == "nt" else ""
-        bundle = dist_dir / "rembgGUI.dist"
-        preferred = bundle / f"rembggui{suffix}"
+        bundle = dist_dir / "MatteLoop.dist"
+        preferred = bundle / f"matteloop{suffix}"
         fallback = bundle / f"__main__{suffix}"
         candidates = tuple(path for path in (preferred, fallback) if path.is_file())
     if len(candidates) != 1:

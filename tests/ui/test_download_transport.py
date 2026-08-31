@@ -12,15 +12,15 @@ from typing import ClassVar
 
 import pytest
 
-from rembggui.core.errors import AppError, ErrorCode
-from rembggui.jobs.models.catalog import ModelCatalog, ModelSpec
-from rembggui.jobs.models.download import (
+from matteloop.core.errors import AppError, ErrorCode
+from matteloop.jobs.models.catalog import ModelCatalog, ModelSpec
+from matteloop.jobs.models.download import (
     DownloadHttpError,
     DownloadResponse,
     DownloadTransport,
     ModelDownloader,
 )
-from rembggui.ui.preview_controller import _QtNetworkDownloadTransport
+from matteloop.ui.preview_controller import _QtNetworkDownloadTransport
 
 
 @dataclass(frozen=True)

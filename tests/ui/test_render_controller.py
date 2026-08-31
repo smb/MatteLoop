@@ -9,9 +9,9 @@ from PIL import Image
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QDesktopServices, QImage
 
-from rembggui.core.crop_state import CropChanged
-from rembggui.core.specs import CropSpec
-from rembggui.core.state import (
+from matteloop.core.crop_state import CropChanged
+from matteloop.core.specs import CropSpec
+from matteloop.core.state import (
     AppState,
     ArtifactState,
     JobKind,
@@ -26,20 +26,20 @@ from rembggui.core.state import (
     SourceLoadRequested,
     reduce,
 )
-from rembggui.core.timeline import EndChanged, StartChanged
-from rembggui.core.webp import validate_webp
-from rembggui.jobs.context import CancellationState, JobContext, ProgressEvent
-from rembggui.jobs.render import ImmutableRgba, PreparedSegmentation, RenderArtifact
-from rembggui.jobs.workspace import CutWorkspace, WorkspaceLifecycle
-from rembggui.ui.controller import SourceController
-from rembggui.ui.ports import (
+from matteloop.core.timeline import EndChanged, StartChanged
+from matteloop.core.webp import validate_webp
+from matteloop.jobs.context import CancellationState, JobContext, ProgressEvent
+from matteloop.jobs.render import ImmutableRgba, PreparedSegmentation, RenderArtifact
+from matteloop.jobs.workspace import CutWorkspace, WorkspaceLifecycle
+from matteloop.ui.controller import SourceController
+from matteloop.ui.ports import (
     OpenOutputFolderRequested,
     OpenOutputRequested,
     RenderVideoRequested,
 )
-from rembggui.ui.preview_controller import PreviewRuntime
-from rembggui.ui.render_pipeline import _StageReporter, render_prepared
-from rembggui.ui.store import ReducerStore
+from matteloop.ui.preview_controller import PreviewRuntime
+from matteloop.ui.render_pipeline import _StageReporter, render_prepared
+from matteloop.ui.store import ReducerStore
 from tests.fixtures.media_factory import make_video
 
 
@@ -521,12 +521,12 @@ def test_matching_cut_set_offers_three_choices_with_rebuild_default(
 ) -> None:
     source = tmp_path / "source.mp4"
     source.write_bytes(b"fixture")
-    cuts_root = tmp_path / ".rembggui-work" / "cuts"
+    cuts_root = tmp_path / ".matteloop-work" / "cuts"
     workspace = CutWorkspace(
         tmp_path,
-        tmp_path / ".rembggui-work",
+        tmp_path / ".matteloop-work",
         cuts_root,
-        tmp_path / ".rembggui-work" / "scratch",
+        tmp_path / ".matteloop-work" / "scratch",
         "a" * 64,
         cuts_root / "source-aaaaaaaa",
         WorkspaceLifecycle.PROMOTED,

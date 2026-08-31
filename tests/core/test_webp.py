@@ -13,11 +13,11 @@ from typing import Any
 import pytest
 from PIL import Image, ImageSequence
 
-import rembggui.core.webp as webp_module
-from rembggui.core.errors import AppError, ErrorCode, ValidationError
-from rembggui.core.rgba import RgbaOwnershipTracker
-from rembggui.core.specs import MAX_FINAL_DIMENSION
-from rembggui.core.webp import (
+import matteloop.core.webp as webp_module
+from matteloop.core.errors import AppError, ErrorCode, ValidationError
+from matteloop.core.rgba import RgbaOwnershipTracker
+from matteloop.core.specs import MAX_FINAL_DIMENSION
+from matteloop.core.webp import (
     EncodeSummary,
     encode_lossless_webp,
     fit_webp_to_size,
@@ -215,7 +215,7 @@ def test_pillow_decompression_bombs_are_structured_without_allocating(
 
 
 def test_specs_exposes_one_shared_local_path_syntax_policy() -> None:
-    import rembggui.core.specs as specs_module
+    import matteloop.core.specs as specs_module
 
     policy = specs_module.is_local_path_syntax
 

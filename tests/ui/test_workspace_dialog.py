@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from rembggui.core.state import JobKind
-from rembggui.jobs.models.catalog import ModelCatalog
-from rembggui.ui.aligned_rows import ACCESSIBLE_DESCRIPTION_ROLE, STATUS_ROLE
-from rembggui.ui.workspace_dialog import SUMMARY_ROLE, WorkspacePickerDialog
+from matteloop.core.state import JobKind
+from matteloop.jobs.models.catalog import ModelCatalog
+from matteloop.ui.aligned_rows import ACCESSIBLE_DESCRIPTION_ROLE, STATUS_ROLE
+from matteloop.ui.workspace_dialog import SUMMARY_ROLE, WorkspacePickerDialog
 from tests.jobs.render_support import job, render_service, request
 
 

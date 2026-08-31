@@ -4,7 +4,7 @@ from dataclasses import FrozenInstanceError, dataclass
 
 import pytest
 
-from rembggui.core.state import (
+from matteloop.core.state import (
     AppState,
     ArtifactResult,
     ArtifactState,

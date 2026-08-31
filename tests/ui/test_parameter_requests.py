@@ -5,11 +5,11 @@ from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 
-from rembggui.core.execution_providers import CUDA_EXECUTION_PROVIDER
-from rembggui.core.parameters import ParameterState
-from rembggui.core.specs import EdgeMode
-from rembggui.core.timeline import TimelineState
-from rembggui.ui.preview_controller import _preview_inputs, _render_request
+from matteloop.core.execution_providers import CUDA_EXECUTION_PROVIDER
+from matteloop.core.parameters import ParameterState
+from matteloop.core.specs import EdgeMode
+from matteloop.core.timeline import TimelineState
+from matteloop.ui.preview_controller import _preview_inputs, _render_request
 
 
 @dataclass(frozen=True)
@@ -55,6 +55,6 @@ def test_preview_and_render_requests_share_every_inspector_parameter() -> None:
 
 
 def timeline_to_sampling(timeline: TimelineState):
-    from rembggui.core.specs import SamplingSpec
+    from matteloop.core.specs import SamplingSpec
 
     return SamplingSpec(timeline.start, timeline.end, timeline.fps)

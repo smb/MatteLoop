@@ -4,9 +4,9 @@ from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
 
-from rembggui.core.state import AppState, SourceLoaded, SourceLoadRequested, reduce
-from rembggui.ui.presenter import present
-from rembggui.ui.source_presentation import (
+from matteloop.core.state import AppState, SourceLoaded, SourceLoadRequested, reduce
+from matteloop.ui.presenter import present
+from matteloop.ui.source_presentation import (
     DownloadRateEstimator,
     format_download_speed,
     format_model_download_detail,
@@ -46,7 +46,7 @@ def test_present_formats_integer_frame_rate_without_trailing_zeroes() -> None:
 
 
 def test_present_middle_elides_long_filename_while_preserving_extension() -> None:
-    path = Path("/Users/sb/private/video/" + "source-" + "x" * 60 + ".mp4")
+    path = Path("/tmp/matteloop-fixtures/video/" + "source-" + "x" * 60 + ".mp4")
     model = present(_ready(SimpleNamespace(path=path)))
 
     assert model.source_filename.endswith(".mp4")

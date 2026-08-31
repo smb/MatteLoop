@@ -9,8 +9,8 @@ from decimal import Decimal, Inexact, localcontext
 import pytest
 from PIL import Image
 
-from rembggui.core.errors import ErrorCode, ValidationError
-from rembggui.core.geometry import (
+from matteloop.core.errors import ErrorCode, ValidationError
+from matteloop.core.geometry import (
     FramingPlan,
     PixelBounds,
     alpha_bounds,

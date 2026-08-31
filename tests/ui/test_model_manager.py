@@ -7,7 +7,7 @@ from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QMessageBox
 
-from rembggui.core.state import (
+from matteloop.core.state import (
     ActiveJob,
     AppState,
     FocusTarget,
@@ -15,10 +15,10 @@ from rembggui.core.state import (
     JobState,
     SourceState,
 )
-from rembggui.jobs.models.catalog import ModelCatalog
-from rembggui.ui.aligned_rows import ROW_DATA_ROLE, AlignedRow, AlignedRowDelegate
-from rembggui.ui.model_manager import ModelManagerController, ModelManagerDialog
-from rembggui.ui.store import ReducerStore
+from matteloop.jobs.models.catalog import ModelCatalog
+from matteloop.ui.aligned_rows import ROW_DATA_ROLE, AlignedRow, AlignedRowDelegate
+from matteloop.ui.model_manager import ModelManagerController, ModelManagerDialog
+from matteloop.ui.store import ReducerStore
 
 
 class FakeModelRemovalService:

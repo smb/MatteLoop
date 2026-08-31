@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from PySide6.QtCore import QSettings
 
-from rembggui.core.state import (
+from matteloop.core.state import (
     AppState,
     PreviewInvalidated,
     PreviewRequested,
@@ -18,8 +18,8 @@ from rembggui.core.state import (
     SourceLoadRequested,
     reduce,
 )
-from rembggui.ui.main_window import MainWindow
-from rembggui.ui.preview_canvas import StatusLabel
+from matteloop.ui.main_window import MainWindow
+from matteloop.ui.preview_canvas import StatusLabel
 
 
 class Store:
@@ -66,7 +66,7 @@ def _source_error() -> AppState:
 @pytest.fixture
 def window(qtbot):
     settings = QSettings(
-        QSettings.IniFormat, QSettings.UserScope, "rembggui-icon-tests", "ui"
+        QSettings.IniFormat, QSettings.UserScope, "matteloop-icon-tests", "ui"
     )
     settings.clear()
     value = MainWindow(Store(AppState()), Services([]), settings)

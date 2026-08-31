@@ -6,7 +6,7 @@ from fractions import Fraction
 
 import pytest
 
-from rembggui.core.geometry import (
+from matteloop.core.geometry import (
     CropGeometryState,
     InteractionGeometry,
     MediaTransform,
@@ -397,6 +397,6 @@ def test_media_transform_rejects_invalid_finite_geometry(
 
 
 def test_core_geometry_imports_no_qt_modules() -> None:
-    import rembggui.core.geometry as geometry_module
+    import matteloop.core.geometry as geometry_module
 
     assert all("PySide" not in value for value in geometry_module.__dict__ if value)

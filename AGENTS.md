@@ -84,8 +84,8 @@ Authority order when documents disagree:
 
 1. `docs/engineering-guardrails.md` — how to work
 2. `docs/v1-scope.md` — what is in scope right now
-3. `docs/designs/rembggui-desktop-app.md` — the eventual product
-4. `docs/superpowers/plans/2026-08-28-rembggui-implementation.md` — historical
+3. `docs/designs/matteloop-desktop-app.md` — the eventual product
+4. `docs/superpowers/plans/2026-08-28-matteloop-implementation.md` — historical
 
 Most-broken rules:
 

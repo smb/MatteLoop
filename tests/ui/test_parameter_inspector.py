@@ -3,24 +3,24 @@ from __future__ import annotations
 import pytest
 from PySide6.QtCore import QSettings, Qt
 
-from rembggui.core.execution_providers import (
+from matteloop.core.execution_providers import (
     COREML_EXECUTION_PROVIDER,
     CPU_EXECUTION_PROVIDER,
     ProviderOption,
 )
-from rembggui.ui.aligned_rows import (
+from matteloop.ui.aligned_rows import (
     ACCESSIBLE_DESCRIPTION_ROLE,
     ROW_DATA_ROLE,
     STATUS_ROLE,
 )
-from rembggui.ui.inspector import Inspector
+from matteloop.ui.inspector import Inspector
 
 
 def _settings() -> QSettings:
     settings = QSettings(
         QSettings.IniFormat,
         QSettings.UserScope,
-        "rembggui-test",
+        "matteloop-test",
         "parameter-inspector",
     )
     settings.clear()
@@ -117,7 +117,7 @@ def test_output_directory_middle_elides_while_preserving_full_path_semantics(
 ) -> None:
     inspector = Inspector(_settings())
     qtbot.addWidget(inspector)
-    path = "/Users/sb/" + "very-long-directory-name/" * 8 + "exports"
+    path = "/tmp/matteloop/" + "very-long-directory-name/" * 8 + "exports"
 
     inspector.output_directory_edit.resize(140, 32)
     inspector.output_directory_edit.setText(path)

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from rembggui.app import main
+from matteloop.app import main
 
 _GUARDED_HEADLESS_SCRIPT = """
 import builtins
@@ -47,7 +47,7 @@ def guarded_open(file, *args, **kwargs):
 
 builtins.open = guarded_open
 
-from rembggui.app import main
+from matteloop.app import main
 
 raise SystemExit(main([sys.argv[1]]))
 """
@@ -57,9 +57,9 @@ def _run_guarded_smoke_command(
     tmp_path: Path, argument: str
 ) -> subprocess.CompletedProcess[str]:
     environment = os.environ | {
-        "DISPLAY": "rembggui-smoke-display-must-not-open",
+        "DISPLAY": "matteloop-smoke-display-must-not-open",
         "HOME": str(tmp_path),
-        "QT_QPA_PLATFORM": "rembggui-smoke-platform-must-not-initialize",
+        "QT_QPA_PLATFORM": "matteloop-smoke-platform-must-not-initialize",
         "U2NET_HOME": str(tmp_path / "model-guard"),
     }
     return subprocess.run(
@@ -79,13 +79,13 @@ def _run_guarded_smoke_command(
 
 def test_main_reports_version_without_opening_qt(capsys):
     assert main(["--version"]) == 0
-    assert capsys.readouterr().out.strip().startswith("rembgGUI ")
+    assert capsys.readouterr().out.strip().startswith("MatteLoop ")
 
 
 def test_main_delegates_normal_launch_to_lazy_gui_seam(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import rembggui.app as app
+    import matteloop.app as app
 
     calls: list[bool] = []
     monkeypatch.setattr(
@@ -99,7 +99,7 @@ def test_main_delegates_normal_launch_to_lazy_gui_seam(
 def test_main_smoke_test_prints_machine_readable_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from rembggui import smoke
+    from matteloop import smoke
 
     monkeypatch.setattr(
         smoke,
@@ -117,7 +117,7 @@ def test_main_smoke_test_prints_machine_readable_success(
             peak_full_res_rgba_owners=2,
         ),
     )
-    monkeypatch.setenv("REMBGGUI_SMOKE_WORK_DIR", str(tmp_path))
+    monkeypatch.setenv("MATTELOOP_SMOKE_WORK_DIR", str(tmp_path))
 
     assert main(["--smoke-test"]) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -128,14 +128,14 @@ def test_main_smoke_test_prints_machine_readable_success(
 def test_main_smoke_test_prints_structured_nonzero_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from rembggui import smoke
+    from matteloop import smoke
 
     def fail(_work_dir: Path, use_fake_model: bool = True) -> smoke.SmokeResult:
         del use_fake_model
         raise RuntimeError("intentional smoke failure")
 
     monkeypatch.setattr(smoke, "run_smoke", fail)
-    monkeypatch.setenv("REMBGGUI_SMOKE_WORK_DIR", str(tmp_path))
+    monkeypatch.setenv("MATTELOOP_SMOKE_WORK_DIR", str(tmp_path))
 
     assert main(["--smoke-test"]) != 0
     payload = json.loads(capsys.readouterr().out)
@@ -151,7 +151,7 @@ def test_main_smoke_test_prints_structured_nonzero_failure(
 @pytest.mark.parametrize(
     ("argument", "expected_output"),
     [
-        ("--version", f"rembgGUI {version('rembggui')}"),
+        ("--version", f"MatteLoop {version('matteloop')}"),
     ],
 )
 def test_headless_commands_run_in_fresh_guarded_interpreters(

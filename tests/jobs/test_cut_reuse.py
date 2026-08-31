@@ -3,10 +3,10 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
-from rembggui.core.state import JobKind
-from rembggui.jobs.render import FilesystemWorkspacePort
-from rembggui.jobs.workspace import CutWorkspace, list_workspaces
-from rembggui.jobs.workspace_names import readable_workspace_name
+from matteloop.core.state import JobKind
+from matteloop.jobs.render import FilesystemWorkspacePort
+from matteloop.jobs.workspace import CutWorkspace, list_workspaces
+from matteloop.jobs.workspace_names import readable_workspace_name
 from tests.jobs.render_support import (
     FakeEncoder,
     FakeSegmenter,

@@ -1,19 +1,19 @@
 from __future__ import annotations
 
-from rembggui.core.crop import (
+from matteloop.core.crop import (
     crop_from_drag,
     nudge_crop,
     oriented_point_from_widget,
     oriented_rect_to_source_rect,
 )
-from rembggui.core.geometry import (
+from matteloop.core.geometry import (
     CropGeometryState,
     PointF,
     RectF,
     SizeF,
     build_crop_geometry,
 )
-from rembggui.core.specs import CropSpec
+from matteloop.core.specs import CropSpec
 
 
 def test_dragging_crop_moves_and_clamps_in_oriented_source_pixels() -> None:

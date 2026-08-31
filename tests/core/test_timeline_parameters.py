@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
 
-from rembggui.core.state import (
+from matteloop.core.state import (
     AppState,
     DurationChanged,
     PreviewRequested,

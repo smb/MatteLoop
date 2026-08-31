@@ -7,10 +7,10 @@ from fractions import Fraction
 import numpy as np
 import pytest
 
-from rembggui.core.errors import ErrorCode, ValidationError
-from rembggui.core.specs import EdgeMode, FramingSpec, SegmentationSpec
-from rembggui.core.state import JobKind
-from rembggui.jobs.render import (
+from matteloop.core.errors import ErrorCode, ValidationError
+from matteloop.core.specs import EdgeMode, FramingSpec, SegmentationSpec
+from matteloop.core.state import JobKind
+from matteloop.jobs.render import (
     FilesystemWorkspacePort,
     PreparedSegmentation,
     PreviewService,
@@ -27,7 +27,7 @@ from tests.jobs.render_support import (
 
 
 def test_preview_matches_render_cut_before_global_framing(tmp_path) -> None:
-    from rembggui.jobs.render import (
+    from matteloop.jobs.render import (
         AtomicOutputPublisher,
         RenderService,
     )

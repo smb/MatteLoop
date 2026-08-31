@@ -14,26 +14,26 @@ import psutil
 import pytest
 from PIL import Image
 
-import rembggui.jobs.render as render_module
-import rembggui.jobs.workspace as workspace_module
-from rembggui.core.errors import AppError, ErrorCode
-from rembggui.core.specs import (
+import matteloop.jobs.render as render_module
+import matteloop.jobs.workspace as workspace_module
+from matteloop.core.errors import AppError, ErrorCode
+from matteloop.core.specs import (
     CollisionPolicy,
     CropSpec,
     FramingSpec,
     OutputSpec,
     SamplingSpec,
 )
-from rembggui.core.state import JobKind
-from rembggui.core.webp import EncodeSummary, encode_lossless_webp, validate_webp
-from rembggui.jobs.context import (
+from matteloop.core.state import JobKind
+from matteloop.core.webp import EncodeSummary, encode_lossless_webp, validate_webp
+from matteloop.jobs.context import (
     CancellationState,
     JobContext,
     JobTerminalState,
     ProgressEvent,
 )
-from rembggui.jobs.models.cache_fs import BoundDirectoryCloseError, UnsafeCacheError
-from rembggui.jobs.render import (
+from matteloop.jobs.models.cache_fs import BoundDirectoryCloseError, UnsafeCacheError
+from matteloop.jobs.render import (
     AtomicOutputPublisher,
     FilesystemWorkspacePort,
     LocalSourcePort,
@@ -74,7 +74,7 @@ def _validated_candidate(
 def _replace_output_coordinator(
     output_directory: Path,
 ) -> tuple[Path, Path, Path, Path]:
-    publish_directory = output_directory / ".rembggui-publish"
+    publish_directory = output_directory / ".matteloop-publish"
     lock = next(publish_directory.glob("*.transaction.lock"))
     key = lock.name.removesuffix(".transaction.lock")
     anchor = output_directory / f".{key}.transaction-anchor"
@@ -87,7 +87,7 @@ def _replace_output_coordinator(
     lock_info = lock.stat()
     anchor.write_bytes(
         (
-            "rembggui-output-lock-anchor-v1\n"
+            "matteloop-output-lock-anchor-v1\n"
             f"{directory_info.st_dev}:{directory_info.st_ino}\n"
             f"{lock_info.st_dev}:{lock_info.st_ino}\n"
         ).encode("ascii")
@@ -112,7 +112,7 @@ def test_candidate_path_is_owned_by_the_explicit_private_work_directory(
 ) -> None:
     publisher = AtomicOutputPublisher()
     output = tmp_path / "exports" / "output.webp"
-    work_dir = tmp_path / ".rembggui-work" / "scratch" / "render-private"
+    work_dir = tmp_path / ".matteloop-work" / "scratch" / "render-private"
     work_dir.mkdir(parents=True)
 
     candidate = publisher.candidate_path(output, "render-private", work_dir)
@@ -190,7 +190,7 @@ def test_same_target_process_cannot_replace_live_publication_stage(
         assert stage_ready.wait(10)
         private_stages = tuple(
             path
-            for path in (output_directory / ".rembggui-publish").glob("*.publish")
+            for path in (output_directory / ".matteloop-publish").glob("*.publish")
             if not path.name.startswith(".")
         )
         assert len(private_stages) == 1
@@ -265,7 +265,7 @@ def test_replaced_lock_entry_cannot_bypass_live_publication_owner(
     replacement_lock: Path | None = None
     try:
         assert stage_ready.wait(10)
-        publish_directory = tmp_path / ".rembggui-publish"
+        publish_directory = tmp_path / ".matteloop-publish"
         live_stage = next(
             path
             for path in publish_directory.glob("*.publish")
@@ -291,7 +291,7 @@ def test_replaced_lock_entry_cannot_bypass_live_publication_owner(
         assert (lock_path.stat().st_dev, lock_path.stat().st_ino) == foreign_identity
         assert lock_path.read_bytes() == b"foreign-lock"
     finally:
-        publish_directory = tmp_path / ".rembggui-publish"
+        publish_directory = tmp_path / ".matteloop-publish"
         lock_paths = tuple(publish_directory.glob("*.transaction.lock"))
         if saved_lock is not None and saved_lock.exists() and lock_paths:
             os.replace(lock_paths[0], replacement_lock)
@@ -361,7 +361,7 @@ def test_replaced_anchor_and_lock_cannot_recycle_live_publication_slot(
         assert stage_ready.wait(10)
         live_stage = next(
             path
-            for path in (tmp_path / ".rembggui-publish").glob("*.publish")
+            for path in (tmp_path / ".matteloop-publish").glob("*.publish")
             if not path.name.startswith(".")
         )
         live_identity = live_stage.stat().st_dev, live_stage.stat().st_ino
@@ -439,7 +439,7 @@ def test_rewritten_anchor_payload_cannot_recycle_live_publication_slot(
         assert stage_ready.wait(10)
         live_stage = next(
             path
-            for path in (tmp_path / ".rembggui-publish").glob("*.publish")
+            for path in (tmp_path / ".matteloop-publish").glob("*.publish")
             if not path.name.startswith(".")
         )
         live_identity = live_stage.stat().st_dev, live_stage.stat().st_ino
@@ -514,11 +514,11 @@ def test_replaced_publish_directory_cannot_bypass_live_transaction(
 
     process = context.Process(target=publish_a)
     process.start()
-    displaced = tmp_path / ".rembggui-publish-held"
-    foreign = tmp_path / ".rembggui-publish-foreign"
+    displaced = tmp_path / ".matteloop-publish-held"
+    foreign = tmp_path / ".matteloop-publish-foreign"
     try:
         assert stage_ready.wait(10)
-        publish_directory = tmp_path / ".rembggui-publish"
+        publish_directory = tmp_path / ".matteloop-publish"
         live_stage = next(
             path
             for path in publish_directory.glob("*.publish")
@@ -548,7 +548,7 @@ def test_replaced_publish_directory_cannot_bypass_live_transaction(
         )
         assert marker.read_bytes() == b"foreign-directory"
     finally:
-        publish_directory = tmp_path / ".rembggui-publish"
+        publish_directory = tmp_path / ".matteloop-publish"
         if displaced.exists():
             if publish_directory.exists():
                 os.replace(publish_directory, foreign)
@@ -620,7 +620,7 @@ def test_same_target_process_cannot_replace_live_recovery_shadow_pending(
     try:
         assert pending_ready.wait(10)
         pending_files = tuple(
-            (tmp_path / ".rembggui-recovery").glob(".*.recovery-shadow-pending")
+            (tmp_path / ".matteloop-recovery").glob(".*.recovery-shadow-pending")
         )
         assert len(pending_files) == 1
         pending = pending_files[0]
@@ -720,7 +720,7 @@ def test_same_target_process_cannot_replace_live_rollback_restore_pending(
     coordinator: tuple[Path, Path, Path, Path] | None = None
     try:
         assert pending_ready.wait(10)
-        restore_files = tuple((tmp_path / ".rembggui-recovery").glob(".*.restore-0"))
+        restore_files = tuple((tmp_path / ".matteloop-recovery").glob(".*.restore-0"))
         assert len(restore_files) == 1
         restore = restore_files[0]
         restore_identity = restore.stat().st_dev, restore.stat().st_ino
@@ -784,7 +784,7 @@ def test_render_samples_half_open_range_and_uses_private_encoder_inputs(
         artifact.cut_workspace.path not in path.parents for path in encoded_paths
     )
     assert "scratch/render-half-open" in encoder.calls[0][2].as_posix()
-    assert not (tmp_path / ".rembggui-work" / "scratch" / "render-half-open").exists()
+    assert not (tmp_path / ".matteloop-work" / "scratch" / "render-half-open").exists()
     assert artifact.ownership_peak <= 3
     assert artifact.ownership_current == 0
     assert validate_webp(artifact.output_path, 2, 1000).lossless
@@ -866,7 +866,7 @@ def test_busy_output_transaction_transfers_retryable_lock_close_owner(
 
     owner = RetryOwner()
     busy = BlockingIOError(errno.EWOULDBLOCK, "synthetic output contention")
-    setattr(busy, "_rembggui_bound_directory_close_owners", (owner,))
+    setattr(busy, "_matteloop_bound_directory_close_owners", (owner,))
     publisher = AtomicOutputPublisher()
     target = tmp_path / "output.webp"
     candidate = _validated_candidate(publisher, target, tmp_path, "busy-owner")
@@ -888,7 +888,7 @@ def test_busy_output_transaction_transfers_retryable_lock_close_owner(
 
     assert exc.value.code is ErrorCode.INVALID_OUTPUT
     assert exc.value.stage == "output"
-    assert getattr(exc.value, "_rembggui_bound_directory_close_owners") == (owner,)
+    assert getattr(exc.value, "_matteloop_bound_directory_close_owners") == (owner,)
     assert not owner.closed
     assert workspace_module._drain_attached_bound_directory_closes(exc.value) == 1
     assert owner.closed
@@ -913,14 +913,14 @@ def test_successful_commit_surfaces_retryable_publication_close_owner(
         if primary is not None:
             setattr(
                 primary,
-                "_rembggui_bound_directory_close_owners",
+                "_matteloop_bound_directory_close_owners",
                 (owner,),
             )
             return
         error = UnsafeCacheError("synthetic publication CloseHandle failure")
         setattr(
             error,
-            "_rembggui_bound_directory_close_owners",
+            "_matteloop_bound_directory_close_owners",
             (owner,),
         )
         raise error
@@ -954,7 +954,7 @@ def test_publication_open_error_transfers_its_retryable_close_owner(
     native_error = OSError(errno.EIO, "synthetic publication-parent open failure")
     setattr(
         native_error,
-        "_rembggui_bound_directory_close_owners",
+        "_matteloop_bound_directory_close_owners",
         (owner,),
     )
     publisher = AtomicOutputPublisher()
@@ -973,7 +973,7 @@ def test_publication_open_error_transfers_its_retryable_close_owner(
         candidate.close()
 
     assert exc.value.code is ErrorCode.INVALID_OUTPUT
-    assert getattr(exc.value, "_rembggui_bound_directory_close_owners") == (owner,)
+    assert getattr(exc.value, "_matteloop_bound_directory_close_owners") == (owner,)
     assert not owner.closed
     assert workspace_module._drain_attached_bound_directory_closes(exc.value) == 1
     assert owner.closed
@@ -1007,7 +1007,7 @@ def test_primary_publish_error_is_preserved_while_close_owner_is_attached(
         assert received_primary is primary
         setattr(
             received_primary,
-            "_rembggui_bound_directory_close_owners",
+            "_matteloop_bound_directory_close_owners",
             (owner,),
         )
         return actual_close(self, received_primary)
@@ -1024,7 +1024,7 @@ def test_primary_publish_error_is_preserved_while_close_owner_is_attached(
         candidate.close()
 
     assert exc.value is primary
-    assert getattr(primary, "_rembggui_bound_directory_close_owners") == (owner,)
+    assert getattr(primary, "_matteloop_bound_directory_close_owners") == (owner,)
     assert workspace_module._drain_attached_bound_directory_closes(primary) == 1
 
 
@@ -1464,7 +1464,7 @@ def test_impossible_size_after_promotion_keeps_output_and_cuts(tmp_path) -> None
         == 2
     )
     assert not tuple(tmp_path.glob(".output.webp.*.candidate"))
-    assert not (tmp_path / ".rembggui-work" / "scratch" / "impossible").exists()
+    assert not (tmp_path / ".matteloop-work" / "scratch" / "impossible").exists()
 
 
 def test_low_disk_preflight_is_advisory(tmp_path) -> None:
@@ -1511,7 +1511,7 @@ def test_cancel_before_promotion_discards_stage_and_preserves_output(
     assert exc.value.code is ErrorCode.JOB_CANCELLED
     assert context.terminal_state is JobTerminalState.CANCELLED
     assert render_request.output.path.read_bytes() == b"old-output"
-    cuts = tmp_path / ".rembggui-work" / "cuts"
+    cuts = tmp_path / ".matteloop-work" / "cuts"
     assert not cuts.exists() or not tuple(cuts.iterdir())
 
 
@@ -1611,7 +1611,7 @@ def test_stale_source_before_staging_preserves_old_output(tmp_path) -> None:
 
     assert exc.value.code is ErrorCode.SOURCE_CHANGED
     assert render_request.output.path.read_bytes() == b"old-output"
-    assert not (tmp_path / ".rembggui-work").exists()
+    assert not (tmp_path / ".matteloop-work").exists()
 
 
 @pytest.mark.parametrize(
@@ -1700,7 +1700,7 @@ def test_no_clobber_policies_lose_atomic_collision_race_safely(
     assert exc.value.stage == "publish"
     assert target.read_bytes() == b"racer"
     assert candidate.path.read_bytes() == candidate_bytes
-    retained_stages = tuple((tmp_path / ".rembggui-publish").glob("*.publish"))
+    retained_stages = tuple((tmp_path / ".matteloop-publish").glob("*.publish"))
     assert len(retained_stages) == 1
     assert retained_stages[0].read_bytes() == candidate_bytes
 
@@ -1725,7 +1725,7 @@ def test_repeated_no_clobber_collisions_reuse_one_bounded_private_stage(
             candidate.close()
 
     assert target.read_bytes() == b"existing-output"
-    assert len(tuple((tmp_path / ".rembggui-publish").glob("*.publish"))) == 1
+    assert len(tuple((tmp_path / ".matteloop-publish").glob("*.publish"))) == 1
 
 
 def test_replace_policy_commits_candidate_atomically(tmp_path) -> None:
@@ -1962,7 +1962,7 @@ def test_replace_retains_precommit_recovery_when_restore_cannot_allocate(
     finally:
         candidate.close()
 
-    recovery_files = tuple((tmp_path / ".rembggui-recovery").glob("*.recovery"))
+    recovery_files = tuple((tmp_path / ".matteloop-recovery").glob("*.recovery"))
     assert exc.value.stage == "publish-rollback"
     assert exc.value.retry_action == "recover-output"
     assert len(recovery_files) == 1
@@ -2082,7 +2082,7 @@ def test_recovery_directory_fsync_failure_leaves_no_pending_after_next_success(
 
     def fail_first_recovery_directory_fsync(directory: Path) -> None:
         nonlocal failed_once
-        if directory.name == ".rembggui-recovery" and not failed_once:
+        if directory.name == ".matteloop-recovery" and not failed_once:
             failed_once = True
             raise OSError(errno.EIO, "synthetic recovery-directory fsync failure")
         actual_fsync_directory(directory)
@@ -2102,7 +2102,7 @@ def test_recovery_directory_fsync_failure_leaves_no_pending_after_next_success(
 
     assert failed_once
     assert target.read_bytes() == old_bytes
-    recovery_directory = tmp_path / ".rembggui-recovery"
+    recovery_directory = tmp_path / ".matteloop-recovery"
     assert tuple(recovery_directory.glob("*.recovery-pending"))
 
     second = _validated_candidate(publisher, target, tmp_path, "recovery-fsync-second")
@@ -2121,7 +2121,7 @@ def test_recovery_namespace_swap_never_modifies_the_foreign_replacement(
     target = tmp_path / "output.webp"
     old_bytes = b"old-output"
     target.write_bytes(old_bytes)
-    recovery_directory = tmp_path / ".rembggui-recovery"
+    recovery_directory = tmp_path / ".matteloop-recovery"
     recovery_directory.mkdir(mode=0o700)
     foreign_directory = tmp_path / ".foreign-recovery-directory"
     foreign_directory.mkdir(mode=0o700)
@@ -2230,10 +2230,12 @@ def test_no_clobber_parent_swap_never_consumes_foreign_stage_or_creates_output(
 
     def swap_parent_at_no_clobber_commit(*args):
         nonlocal foreign_stage_name, swapped
-        original_stages = tuple((output_parent / ".rembggui-publish").glob("*.publish"))
+        original_stages = tuple(
+            (output_parent / ".matteloop-publish").glob("*.publish")
+        )
         assert len(original_stages) == 1
         foreign_stage_name = original_stages[0].name
-        foreign_stages = foreign_parent / ".rembggui-publish"
+        foreign_stages = foreign_parent / ".matteloop-publish"
         foreign_stages.mkdir(mode=0o700)
         (foreign_stages / foreign_stage_name).write_bytes(foreign_stage_bytes)
         actual_replace(output_parent, moved_parent)
@@ -2262,7 +2264,7 @@ def test_no_clobber_parent_swap_never_consumes_foreign_stage_or_creates_output(
     assert exc.value.code is ErrorCode.INVALID_OUTPUT
     assert not (output_parent / target.name).exists()
     assert (
-        output_parent / ".rembggui-publish" / foreign_stage_name
+        output_parent / ".matteloop-publish" / foreign_stage_name
     ).read_bytes() == foreign_stage_bytes
 
 
@@ -2270,7 +2272,7 @@ def test_unsafe_recovery_namespace_is_reported_as_an_output_error(tmp_path) -> N
     target = tmp_path / "output.webp"
     old_bytes = b"old-output"
     target.write_bytes(old_bytes)
-    recovery_directory = tmp_path / ".rembggui-recovery"
+    recovery_directory = tmp_path / ".matteloop-recovery"
     recovery_directory.mkdir(mode=0o755)
     publisher = AtomicOutputPublisher()
     candidate = _validated_candidate(
@@ -2357,7 +2359,7 @@ def test_current_recovery_slot_is_reused_without_a_pending_hardlink(
         first.close()
 
     assert target.read_bytes() == old_bytes
-    recovery_directory = tmp_path / ".rembggui-recovery"
+    recovery_directory = tmp_path / ".matteloop-recovery"
     recovery = tuple(recovery_directory.glob("*.recovery"))
     assert len(recovery) == 1
     assert recovery[0].read_bytes() == old_bytes
@@ -2655,7 +2657,7 @@ def test_no_clobber_publishes_held_copy_when_candidate_path_is_swapped(
     assert target.read_bytes() == candidate_bytes
     assert candidate.path.read_bytes() == attacker_bytes
     assert notes == []
-    assert not tuple((tmp_path / ".rembggui-publish").glob("*.publish"))
+    assert not tuple((tmp_path / ".matteloop-publish").glob("*.publish"))
 
 
 def test_no_clobber_never_unlinks_a_concurrent_output_after_reservation(
@@ -2711,7 +2713,7 @@ def test_no_clobber_never_unlinks_a_concurrent_output_after_reservation(
     for descriptor in staged_descriptors:
         with pytest.raises(OSError):
             os.fstat(descriptor)
-    assert not tuple((tmp_path / ".rembggui-publish").glob("*.publish"))
+    assert not tuple((tmp_path / ".matteloop-publish").glob("*.publish"))
 
 
 def test_no_clobber_rejects_a_destination_swap_during_held_sha_verification(
@@ -2848,7 +2850,7 @@ def test_no_clobber_leaves_caller_owned_candidate_unchanged_without_note(
     assert target.read_bytes() == candidate_bytes
     assert candidate.path.read_bytes() == candidate_bytes
     assert notes == []
-    assert not tuple((tmp_path / ".rembggui-publish").glob("*.publish"))
+    assert not tuple((tmp_path / ".matteloop-publish").glob("*.publish"))
 
 
 def test_framed_png_cleanup_failure_is_not_primary(
@@ -2905,7 +2907,7 @@ def test_all_fallible_artifact_identity_work_finishes_before_publish(
 
 
 def _only_durable_workspace(output_directory: Path):
-    cuts = output_directory / ".rembggui-work" / "cuts"
+    cuts = output_directory / ".matteloop-work" / "cuts"
     durable_paths = tuple(
         path for path in cuts.iterdir() if not path.name.startswith(".")
     )

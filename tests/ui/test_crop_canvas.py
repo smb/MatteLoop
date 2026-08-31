@@ -4,12 +4,12 @@ import pytest
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QImage
 
-from rembggui.core.crop_state import CropChanged
-from rembggui.core.geometry import MediaTransform, PointF
-from rembggui.core.specs import CropSpec
-from rembggui.ui.crop_canvas import CropCanvas
-from rembggui.ui.crop_presentation import CropPresentation
-from rembggui.ui.preview_canvas import PreviewStage
+from matteloop.core.crop_state import CropChanged
+from matteloop.core.geometry import MediaTransform, PointF
+from matteloop.core.specs import CropSpec
+from matteloop.ui.crop_canvas import CropCanvas
+from matteloop.ui.crop_presentation import CropPresentation
+from matteloop.ui.preview_canvas import PreviewStage
 
 
 def _presentation(crop: CropSpec = CropSpec(10, 10, 40, 20)) -> CropPresentation:

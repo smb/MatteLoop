@@ -1,10 +1,17 @@
 # V1 Scope
 
-**Authoritative.** Where this file and `docs/designs/rembggui-desktop-app.md` or
-`docs/superpowers/plans/2026-08-28-rembggui-implementation.md` disagree, **this
+**Authoritative.** Where this file and `docs/designs/matteloop-desktop-app.md` or
+`docs/superpowers/plans/2026-08-28-matteloop-implementation.md` disagree, **this
 file wins**. Read it together with `docs/engineering-guardrails.md`.
 
-Revision: 2026-08-30, following the concept-and-implementation review.
+Revision: 2026-08-31, following the publication packaging decision.
+
+Product rename, 2026-08-31: `rembgGUI` is now **MatteLoop**. New installs use
+the `matteloop` package, command, settings identity, cache, and workspace
+names. Every existing subdirectory of `~/Library/Caches/rembggui/` — model
+weights, compiled provider caches and thumbnails — and
+`<output-directory>/.rembggui-work/` data remain readable, with new locations
+preferred when both exist.
 
 ---
 
@@ -27,7 +34,7 @@ remaining scope can be decided with a working tool in hand instead of on paper.
 
 ## Definition of done for V1
 
-> On macOS, a user launches rembgGUI, drops in a video, scrubs the source,
+> On macOS, a user launches MatteLoop, drops in a video, scrubs the source,
 > selects an export range and a crop, previews a single frame with
 > `birefnet-portrait`, and renders a lossless animated transparent WebP that
 > opens correctly — without touching a terminal.
@@ -40,7 +47,7 @@ Nothing else gates V1. When that sentence is true end to end, V1 is done.
 
 | Area | V1 commitment |
 |---|---|
-| Platform | **macOS 13+ arm64 only.** Run from source (`uv run rembggui`) is sufficient; a packaged `.app` is a stretch goal, not a gate. |
+| Platform | **macOS 13+ arm64 and Windows x64 packaged artifacts.** Run from source (`uv run matteloop`) remains supported; Linux stays deferred. |
 | Models | **13 models**: `birefnet-portrait` (default), `u2net`, `u2netp`, `u2net_human_seg`, `silueta`, `isnet-general-use`, `isnet-anime`, `birefnet-general`, `birefnet-general-lite`, `birefnet-dis`, `birefnet-hrsod`, `birefnet-cod`, `birefnet-massive`. Excluded: `bria-rmbg` (model-specific licence requires its own consent flow) and `u2net_cloth_seg` (needs a clothing-category input the UI cannot provide). |
 | Edge treatment | `Standard` and `Decontaminate colors`. |
 | Source media | Local 8-bit SDR MP4/MOV, H.264/H.265. |
@@ -62,6 +69,11 @@ Nothing else gates V1. When that sentence is true end to end, V1 is done.
   render may run unattended for minutes, and the user needs to see what was
   produced when they return. The existing success banner remains for later
   reference.
+- **Windows packaging, 2026-08-31:** an unsigned Windows x64 artifact is back
+  in V1 scope for publication preparation. The repository will be public, so
+  its Actions build has no paid-minute constraint; this adds the second
+  committed packaging target without reopening Linux artifacts or any other
+  deferred item.
 
 ---
 
@@ -75,7 +87,7 @@ code that already exists stays as it is; it is not deleted, and it is not grown.
 | **Custom `QAccessible` virtual-child tree** for timeline and crop | Task 14 | Standard-widget accessibility is committed for V1. A bespoke accessible tree for custom-painted canvases is a large, untestable-on-one-machine surface. |
 | **`bria-rmbg` and `u2net_cloth_seg`** | Design catalog | `bria-rmbg` requires a model-specific licence consent flow; `u2net_cloth_seg` needs a clothing-category input the UI cannot provide. |
 | `ViTMatte`, alpha-matting edge mode | Design | Already outside committed scope; stays there. |
-| **Windows and Linux artifacts**, four-target build matrix | Task 10 / 17 | One platform proves the product. Porting is mechanical afterwards. |
+| **Linux artifacts and the remaining four-target build matrix** | Task 10 / 17 | macOS arm64 and Windows x64 are the committed packaging targets; Linux and additional target variants stay deferred. |
 | **Manual four-artifact release qualification** | Design | Presupposes artifacts that V1 does not promise. |
 | WebM / MKV / VP8 / VP9 source support | Design media table | Best-effort if PyAV handles it; not verified, not promised. |
 | Model Manager UI, Workspace Manager UI | Task 15 | Download progress inside the job dialog covers the V1 need. |
@@ -91,14 +103,14 @@ The plan's task numbering is kept only so older commits stay readable.
 | Task | Subject | Status |
 |---|---|---|
 | 1–9 | Foundation, specs, reducer, timebase, geometry, WebP, source, jobs, models | Implemented |
-| 10 | Packaging / streaming-encoder spike | Encoder question resolved (PyAV `libwebp_anim`, streaming). Packaging deferred. |
+| 10 | Packaging / streaming-encoder spike | Encoder question resolved (PyAV `libwebp_anim`, streaming). macOS arm64 and Windows x64 packaging is in progress; Linux remains deferred. |
 | 11 | Durable cut workspaces | Implemented, **frozen** — see guardrail G3 |
 | 12 | Preview / render / Rebuild orchestration | Preview + render + Rebuild implemented |
 | 13 | Application shell | Implemented |
 | **14** | Timeline, crop editor, keyboard contexts | **V1 — in progress**, minus the custom accessibility tree |
 | **15** | Preview integration, job dialog | **V1 — in progress**, minus Model/Workspace manager UIs |
 | 16 | (deferred in the original plan) | Deferred |
-| 17 | E2E qualification, release docs, packaging | Deferred except a single macOS smoke path |
+| 17 | E2E qualification, release docs, packaging | Packaging preparation is in progress for macOS arm64 and Windows x64; broader qualification remains deferred |
 
 ---
 

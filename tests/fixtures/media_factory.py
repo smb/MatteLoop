@@ -12,7 +12,7 @@ import av
 from PIL import Image
 
 _ROTATION_SIDECAR_SCHEMA_VERSION = 1
-_ROTATION_SIDECAR_SUFFIX = ".rembggui.json"
+_ROTATION_SIDECAR_SUFFIX = ".matteloop.json"
 
 
 def _write_rotation_sidecar(path: Path, rotation: int) -> None:
@@ -45,7 +45,7 @@ def make_video(
     spaced according to ``fps``. The caller controls every source image and
     timestamp, keeping fixture content deterministic. ``rotation`` is the
     counter-clockwise presentation rotation in the adjacent, versioned
-    ``<video>.rembggui.json`` fixture sidecar. PyAV 16 cannot author portable
+    ``<video>.matteloop.json`` fixture sidecar. PyAV 16 cannot author portable
     MP4 display-matrix side data, so later source-decoder fixture tests must
     consume this explicit contract rather than infer rotation from the video.
     """

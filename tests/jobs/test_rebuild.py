@@ -6,10 +6,10 @@ from decimal import Decimal
 import pytest
 from PIL import Image
 
-from rembggui.core.errors import AppError, ErrorCode
-from rembggui.core.specs import FramingSpec
-from rembggui.core.state import JobKind
-from rembggui.jobs.render import (
+from matteloop.core.errors import AppError, ErrorCode
+from matteloop.core.specs import FramingSpec
+from matteloop.core.state import JobKind
+from matteloop.jobs.render import (
     AtomicOutputPublisher,
     FilesystemWorkspacePort,
     PreparedSegmentation,
@@ -259,7 +259,7 @@ def test_rebuild_encode_failure_preserves_edited_cuts_and_old_output(
     with Image.open(edited_path) as persisted:
         assert persisted.getpixel((0, 0)) == (99, 88, 77, 255)
     assert not tuple(tmp_path.glob(".output.webp.*.candidate"))
-    assert not (tmp_path / ".rembggui-work" / "scratch" / "rebuild-failure").exists()
+    assert not (tmp_path / ".matteloop-work" / "scratch" / "rebuild-failure").exists()
     assert not any(
         "output-candidate retained" in note
         for note in getattr(exc.value, "__notes__", ())
@@ -317,10 +317,10 @@ def test_cross_output_rebuild_cleans_the_actual_snapshot_owner(tmp_path) -> None
     assert artifact.output_path.parent == rebuilt_output
     assert original.cut_workspace.path.is_dir()
     assert not (
-        cuts_output / ".rembggui-work" / "scratch" / "cross-output-success"
+        cuts_output / ".matteloop-work" / "scratch" / "cross-output-success"
     ).exists()
     assert not (
-        rebuilt_output / ".rembggui-work" / "scratch" / "cross-output-success"
+        rebuilt_output / ".matteloop-work" / "scratch" / "cross-output-success"
     ).exists()
 
 
@@ -364,8 +364,8 @@ def test_cross_output_rebuild_failure_cleans_snapshot_and_preserves_state(
     assert rebuild_request.output.path.read_bytes() == b"old-output"
     assert original.cut_workspace.path.is_dir()
     assert not (
-        cuts_output / ".rembggui-work" / "scratch" / "cross-output-failure"
+        cuts_output / ".matteloop-work" / "scratch" / "cross-output-failure"
     ).exists()
     assert not (
-        rebuilt_output / ".rembggui-work" / "scratch" / "cross-output-failure"
+        rebuilt_output / ".matteloop-work" / "scratch" / "cross-output-failure"
     ).exists()

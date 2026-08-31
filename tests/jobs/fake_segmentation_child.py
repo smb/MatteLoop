@@ -10,7 +10,7 @@ from typing import Any
 
 import numpy as np
 
-from rembggui.jobs.protocol import (
+from matteloop.jobs.protocol import (
     CONTROL_JOB_ID,
     MAX_PROTOCOL_MESSAGE_BYTES,
     PROTOCOL_VERSION,

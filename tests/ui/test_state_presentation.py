@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import pytest
 from PySide6.QtCore import QSettings, Qt
 
-from rembggui.core.state import (
+from matteloop.core.state import (
     AppState,
     ArtifactResult,
     EditedCutsChanged,
@@ -25,8 +25,8 @@ from rembggui.core.state import (
     SourceLoadRequested,
     reduce,
 )
-from rembggui.ui.main_window import MainWindow
-from rembggui.ui.ports import (
+from matteloop.ui.main_window import MainWindow
+from matteloop.ui.ports import (
     ChooseVideoRequested,
     OpenOutputFolderRequested,
     OpenOutputRequested,
@@ -98,7 +98,7 @@ def window(qtbot):
     store = Store(AppState())
     services = Services([])
     settings = QSettings(
-        QSettings.IniFormat, QSettings.UserScope, "rembggui-test", "ui"
+        QSettings.IniFormat, QSettings.UserScope, "matteloop-test", "ui"
     )
     settings.clear()
     value = MainWindow(store, services, settings)

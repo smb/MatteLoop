@@ -4,8 +4,8 @@ from fractions import Fraction
 
 import pytest
 
-from rembggui.core.errors import ErrorCode, ValidationError
-from rembggui.core.timebase import sample_times, webp_delays
+from matteloop.core.errors import ErrorCode, ValidationError
+from matteloop.core.timebase import sample_times, webp_delays
 
 
 def test_sampling_is_half_open_and_exact() -> None:

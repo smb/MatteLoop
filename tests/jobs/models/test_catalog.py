@@ -5,8 +5,8 @@ from dataclasses import FrozenInstanceError, fields, replace
 
 import pytest
 
-from rembggui.core.errors import AppError, ErrorCode
-from rembggui.jobs.models.catalog import (
+from matteloop.core.errors import AppError, ErrorCode
+from matteloop.jobs.models.catalog import (
     ClothCategory,
     ExecutionClass,
     InferenceDefaults,

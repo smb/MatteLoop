@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import rembggui.jobs.models.cache_fs as cache_fs
-from rembggui.jobs.models.cache_fs import UnsafeCacheError, _bind_windows
+import matteloop.jobs.models.cache_fs as cache_fs
+from matteloop.jobs.models.cache_fs import UnsafeCacheError, _bind_windows
 
 _FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400

@@ -30,7 +30,7 @@ do not add a runtime model ID, and must not be read as a commitment to ship.
 - The historical catalog sketch used the ID `sam` and a separate
   `ExecutionClass.SAM_PREVIEW` capability rather than a downloadable local
   artifact. That ID and execution class are not part of the current catalog.
-- A future `src/rembggui/jobs/models/sam.py` could provide `SamPoint` and
+- A future `src/matteloop/jobs/models/sam.py` could provide `SamPoint` and
   `build_sam_extras(points, oriented_crop_size)` while keeping the session
   boundary responsible for lifecycle, errors, and cancellation.
 - The adapter would map normalized `(x, y)` into crop pixels and pass rembg's
@@ -66,7 +66,7 @@ do not add a runtime model ID, and must not be read as a commitment to ship.
 
 ### Historical planned locations
 
-The earlier draft mentioned `src/rembggui/jobs/models/sam.py`, prompt UI work
-under `src/rembggui/ui/`, corresponding model/session tests, and a dedicated
+The earlier draft mentioned `src/matteloop/jobs/models/sam.py`, prompt UI work
+under `src/matteloop/ui/`, corresponding model/session tests, and a dedicated
 release qualification check. Those files and tasks are historical planning
 notes only; they are not current V1 work.

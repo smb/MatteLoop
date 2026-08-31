@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
 
-from rembggui.core.state import AppState, SourceLoaded, SourceLoadRequested, reduce
-from rembggui.ui.parameter_presentation import present_parameters
+from matteloop.core.state import AppState, SourceLoaded, SourceLoadRequested, reduce
+from matteloop.ui.parameter_presentation import present_parameters
 
 
 @dataclass(frozen=True)

@@ -5,9 +5,9 @@ from collections.abc import Callable
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
-from rembggui.core.state import AppState, SourceLoaded, SourceLoadRequested, reduce
-from rembggui.ui.main_window import MainWindow
-from rembggui.ui.theme import install_theme
+from matteloop.core.state import AppState, SourceLoaded, SourceLoadRequested, reduce
+from matteloop.ui.main_window import MainWindow
+from matteloop.ui.theme import install_theme
 
 
 class Store:
@@ -34,7 +34,7 @@ def test_minimum_layout_keeps_side_by_side_stage_timeline_and_shelf(qtbot) -> No
         SourceLoaded("source", "load", "metadata"),
     )
     settings = QSettings(
-        QSettings.IniFormat, QSettings.UserScope, "rembggui-test", "layout"
+        QSettings.IniFormat, QSettings.UserScope, "matteloop-test", "layout"
     )
     settings.clear()
     window = MainWindow(Store(state), Services(), settings)
@@ -68,7 +68,7 @@ def test_inspector_content_minimum_width_fits_each_scroll_viewport(qtbot) -> Non
         settings = QSettings(
             QSettings.IniFormat,
             QSettings.UserScope,
-            "rembggui-test",
+            "matteloop-test",
             "inspector-width",
         )
         settings.clear()
@@ -99,7 +99,7 @@ def test_inspector_content_minimum_width_fits_each_scroll_viewport(qtbot) -> Non
 
 def test_empty_has_only_restrained_source_surface(qtbot) -> None:
     settings = QSettings(
-        QSettings.IniFormat, QSettings.UserScope, "rembggui-test", "empty"
+        QSettings.IniFormat, QSettings.UserScope, "matteloop-test", "empty"
     )
     settings.clear()
     window = MainWindow(Store(AppState()), Services(), settings)
@@ -124,7 +124,7 @@ def test_long_source_filename_is_middle_elided_with_full_path_accessibility_desc
         SourceLoaded("source", "load", Metadata()),
     )
     settings = QSettings(
-        QSettings.IniFormat, QSettings.UserScope, "rembggui-test", "path"
+        QSettings.IniFormat, QSettings.UserScope, "matteloop-test", "path"
     )
     settings.clear()
     window = MainWindow(Store(state), Services(), settings)

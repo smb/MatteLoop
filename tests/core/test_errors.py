@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from rembggui.core.errors import AppError, ErrorCode, ValidationError
+from matteloop.core.errors import AppError, ErrorCode, ValidationError
 
 
 def test_app_error_round_trips_json_primitives() -> None:

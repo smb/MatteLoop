@@ -4,12 +4,18 @@ import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+_CURRENT_SDD = REPO_ROOT / ".superpowers/sdd/2026-08-28-matteloop-implementation"
+_LEGACY_SDD = REPO_ROOT / ".superpowers/sdd/2026-08-28-rembggui-implementation"
+_SDD = (
+    _CURRENT_SDD
+    if _CURRENT_SDD.exists() or not _LEGACY_SDD.exists()
+    else _LEGACY_SDD
+)
 CURRENT_CONTRACT_FILES = (
-    REPO_ROOT / "docs/designs/rembggui-desktop-app.md",
-    REPO_ROOT / "docs/superpowers/plans/2026-08-28-rembggui-implementation.md",
-    REPO_ROOT / ".superpowers/sdd/2026-08-28-rembggui-implementation/task-9-report.md",
-    REPO_ROOT
-    / ".superpowers/sdd/2026-08-28-rembggui-implementation/scope-removal-report.md",
+    REPO_ROOT / "docs/designs/matteloop-desktop-app.md",
+    REPO_ROOT / "docs/superpowers/plans/2026-08-28-matteloop-implementation.md",
+    _SDD / "task-9-report.md",
+    _SDD / "scope-removal-report.md",
 )
 FUTURE_ENHANCEMENTS = REPO_ROOT / "docs/future-enhancements.md"
 

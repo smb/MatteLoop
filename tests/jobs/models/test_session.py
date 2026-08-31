@@ -10,16 +10,16 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from rembggui.core.errors import AppError, ErrorCode
-from rembggui.core.execution_providers import (
+from matteloop.core.errors import AppError, ErrorCode
+from matteloop.core.execution_providers import (
     CPU_EXECUTION_PROVIDER,
     CUDA_EXECUTION_PROVIDER,
 )
-from rembggui.jobs.models.cache_fs import BoundModelDirectory
-from rembggui.jobs.models.catalog import ExecutionClass, ModelCatalog, ModelSpec
-from rembggui.jobs.models.session import ModelSessionManager, PreparationResult
-from rembggui.jobs.protocol import SegmentOptions
-from rembggui.jobs.segmentation_host import (
+from matteloop.jobs.models.cache_fs import BoundModelDirectory
+from matteloop.jobs.models.catalog import ExecutionClass, ModelCatalog, ModelSpec
+from matteloop.jobs.models.session import ModelSessionManager, PreparationResult
+from matteloop.jobs.protocol import SegmentOptions
+from matteloop.jobs.segmentation_host import (
     _create_rembg_session,
     _instantiate_verified_rembg_session,
     _PreparedRembgSession,
@@ -430,7 +430,7 @@ def test_remove_rejects_symlink_traversal_and_unknown_ids(tmp_path: Path) -> Non
 def test_remove_parent_swap_never_unlinks_outside_bound_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import rembggui.jobs.models.session as session_module
+    import matteloop.jobs.models.session as session_module
 
     manager, _downloader, _clients, _events = _manager(tmp_path)
     target = tmp_path / "2.0.72" / "u2net" / "u2net.onnx"
@@ -630,7 +630,7 @@ def test_child_launch_rejects_tampering_and_symlinked_artifact(tmp_path: Path) -
 def test_child_creates_session_only_after_hash_proof_without_parent_env_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import rembggui.jobs.segmentation_host as host_module
+    import matteloop.jobs.segmentation_host as host_module
 
     catalog, payload, artifact_path = _verified_launch(tmp_path)
     calls: list[tuple[str, bytes, str, tuple[tuple[str, str], ...]]] = []
@@ -778,7 +778,7 @@ def test_failed_hardware_provider_falls_back_to_cpu_with_a_startup_notice() -> N
 def test_session_consumes_verified_bytes_even_if_path_swaps_back_during_creation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import rembggui.jobs.segmentation_host as host_module
+    import matteloop.jobs.segmentation_host as host_module
 
     catalog, payload, artifact_path = _verified_launch(tmp_path)
     good = artifact_path.read_bytes()

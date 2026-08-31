@@ -8,12 +8,12 @@ from typing import Any
 import pytest
 from PIL import Image
 
-from rembggui.core.webp import encode_lossless_webp
+from matteloop.core.webp import encode_lossless_webp
 
 
 def tracker_type() -> Any:
     try:
-        module = importlib.import_module("rembggui.core.rgba")
+        module = importlib.import_module("matteloop.core.rgba")
     except ModuleNotFoundError:
         pytest.fail("RGBA ownership tracker module is missing")
     return module.RgbaOwnershipTracker

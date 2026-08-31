@@ -9,11 +9,13 @@ coverage.xml
 htmlcov/
 build/
 dist/
+nuitka-crash-report.xml
 *.egg-info/
 .u2net/
 .rembg/
 .cache/rembg/
+.matteloop-work/
 .rembggui-work/
-.rembggui-local-media/
+.matteloop-local-media/
 .worktrees/
 onnxruntime_profile__*.json

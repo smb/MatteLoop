@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
 
-from rembggui.core.specs import CropSpec
-from rembggui.core.state import (
+from matteloop.core.specs import CropSpec
+from matteloop.core.state import (
     AppState,
     CropChanged,
     CropToggleChanged,
@@ -18,7 +18,7 @@ from rembggui.core.state import (
     SourceLoadRequested,
     reduce,
 )
-from rembggui.core.timeline import (
+from matteloop.core.timeline import (
     EndChanged,
     PlayheadChanged,
     StartChanged,

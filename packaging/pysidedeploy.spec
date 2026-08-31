@@ -1,10 +1,10 @@
 [app]
-title = rembgGUI
+title = MatteLoop
 project_dir = .
 input_file = packaging/entrypoint.py
 exec_directory = dist
 project_file =
-icon =
+icon = assets/branding/matteloop/derived/matteloop.icns
 
 [python]
 python_path =
@@ -14,7 +14,7 @@ android_packages =
 [qt]
 qml_files =
 excluded_qml_plugins =
-modules = Core,DBus,Gui,Widgets
+modules = Core,DBus,Gui,Network,Widgets
 plugins = platforms,imageformats
 
 [android]
@@ -27,18 +27,21 @@ macos.permissions =
 mode = standalone
 extra_args =
 	--quiet
+	--no-deployment-flag=self-execution
+	--disable-cache=ccache
 	--noinclude-qt-translations
-	--output-filename=rembggui
+	--output-filename=matteloop
 	--include-qt-plugins=platforms,imageformats
-	--include-package=rembggui
-	--include-module=rembggui.smoke_child
+	--include-package=matteloop
+	--include-module=matteloop.smoke_child
 	--include-module=multiprocessing.resource_tracker
 	--include-module=multiprocessing.spawn
 	--include-package=rembg.sessions
 	--include-package=onnxruntime
 	--include-package-data=onnxruntime
-	--include-package=av
-	--include-package-data=av
+	--nofollow-import-to=av
+	--include-module=PIL._imaging
+	--include-module=PIL._webp
 	--include-module=PIL.PngImagePlugin
 	--include-module=PIL.WebPImagePlugin
 	--include-data-files=resources/model-manifest.json=resources/model-manifest.json
@@ -47,6 +50,18 @@ extra_args =
 	--include-data-files=resources/fonts/IBMPlexSans-SemiBold.ttf=resources/fonts/IBMPlexSans-SemiBold.ttf
 	--include-data-files=resources/fonts/IBMPlexMono-Regular.ttf=resources/fonts/IBMPlexMono-Regular.ttf
 	--include-data-files=resources/fonts/OFL.txt=resources/fonts/OFL.txt
+	--include-data-files=resources/icons/error-24.png=resources/icons/error-24.png
+	--include-data-files=resources/icons/error-32.png=resources/icons/error-32.png
+	--include-data-files=resources/icons/error-48.png=resources/icons/error-48.png
+	--include-data-files=resources/icons/error-64.png=resources/icons/error-64.png
+	--include-data-files=resources/icons/preview-24.png=resources/icons/preview-24.png
+	--include-data-files=resources/icons/preview-32.png=resources/icons/preview-32.png
+	--include-data-files=resources/icons/preview-48.png=resources/icons/preview-48.png
+	--include-data-files=resources/icons/preview-64.png=resources/icons/preview-64.png
+	--include-data-files=resources/icons/stale-24.png=resources/icons/stale-24.png
+	--include-data-files=resources/icons/stale-32.png=resources/icons/stale-32.png
+	--include-data-files=resources/icons/stale-48.png=resources/icons/stale-48.png
+	--include-data-files=resources/icons/stale-64.png=resources/icons/stale-64.png
 	--nofollow-import-to=tests
 	--nofollow-import-to=pytest
 	--noinclude-data-files=**/tests/**

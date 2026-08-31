@@ -53,7 +53,7 @@ def test_make_video_round_trips_rotation_and_fractional_timestamps(tmp_path):
         duration = Fraction(stream.duration) * stream.time_base
 
     rotation_sidecar = json.loads(
-        path.with_suffix(".mp4.rembggui.json").read_text(encoding="utf-8")
+        path.with_suffix(".mp4.matteloop.json").read_text(encoding="utf-8")
     )
     assert rotation_sidecar == {"rotation_ccw": 90, "schema_version": 1}
     assert [Fraction(frame.pts) * frame.time_base for frame in decoded] == [

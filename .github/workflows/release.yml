@@ -3,6 +3,10 @@
   "on": {
     "workflow_dispatch": {}
   },
+  "concurrency": {
+    "group": "matteloop-native-release",
+    "cancel-in-progress": false
+  },
   "permissions": {
     "contents": "read"
   },
@@ -19,23 +23,11 @@
           "include": [
             {
               "target": "windows-2022-x64",
-              "os": "windows-2022",
-              "arch": "x64"
-            },
-            {
-              "target": "macos-15-intel-x64",
-              "os": "macos-15-intel",
-              "arch": "x64"
+              "os": "windows-2022"
             },
             {
               "target": "macos-15-arm64",
-              "os": "macos-15",
-              "arch": "arm64"
-            },
-            {
-              "target": "ubuntu-22.04-x64",
-              "os": "ubuntu-22.04",
-              "arch": "x64"
+              "os": "macos-15"
             }
           ]
         }
@@ -57,39 +49,18 @@
         },
         {
           "name": "Install frozen dependencies",
-          "run": "uv sync --frozen --all-groups --no-cache"
-        },
-        {
-          "name": "Verify pinned Linux patch tool",
-          "id": "verify-patchelf",
-          "if": "runner.os == 'Linux'",
-          "run": "uv run --frozen --no-sync python -c \"import shutil; from importlib.metadata import version; assert version('patchelf') == '0.17.2.4'; assert shutil.which('patchelf')\""
-        },
-        {
-          "name": "Install Linux headless runtime",
-          "if": "runner.os == 'Linux'",
-          "run": "sudo apt-get update && sudo apt-get install --yes xvfb libegl1 libxkbcommon-x11-0"
+          "run": "uv sync --frozen --all-groups"
         },
         {
           "name": "Build native standalone bundle",
-          "run": "uv run --frozen --no-sync pyside6-deploy packaging/entrypoint.py -c packaging/pysidedeploy.spec --force"
-        },
-        {
-          "name": "Smoke native Linux bundle",
-          "if": "runner.os == 'Linux'",
-          "run": "xvfb-run -a uv run --frozen --no-sync python packaging/smoke_child.py dist"
-        },
-        {
-          "name": "Smoke native macOS or Windows bundle",
-          "if": "runner.os != 'Linux'",
-          "run": "uv run --frozen --no-sync python packaging/smoke_child.py dist"
+          "run": "uv run --frozen --no-sync python scripts/build.py"
         },
         {
           "name": "Upload unsigned bundle",
           "id": "upload",
           "uses": "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
           "with": {
-            "name": "rembgGUI-unsigned-${{ matrix.target }}",
+            "name": "MatteLoop-unsigned-${{ matrix.target }}",
             "path": "dist",
             "if-no-files-found": "error"
           }

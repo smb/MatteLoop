@@ -1,4 +1,4 @@
-# rembgGUI desktop design
+# MatteLoop desktop design
 
 The desktop shell is a focused, timeline-first editor: compact source identity,
 one shared Original/Result stage, timeline space, a continuous inspector rail,

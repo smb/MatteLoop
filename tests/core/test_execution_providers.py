@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from rembggui.core.execution_providers import (
+from matteloop.core.execution_providers import (
     COREML_EXECUTION_PROVIDER,
     CPU_EXECUTION_PROVIDER,
     CUDA_EXECUTION_PROVIDER,

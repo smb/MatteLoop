@@ -9,9 +9,9 @@ import pytest
 from PIL import Image
 from PySide6.QtCore import QSettings, Qt
 
-from rembggui.core.crop_state import CropChanged
-from rembggui.core.specs import CropSpec
-from rembggui.core.state import (
+from matteloop.core.crop_state import CropChanged
+from matteloop.core.specs import CropSpec
+from matteloop.core.state import (
     CancelRequested,
     JobStageChanged,
     ModelPrepared,
@@ -19,18 +19,18 @@ from rembggui.core.state import (
     PreviewState,
     PreviewSucceeded,
 )
-from rembggui.core.timeline import EndChanged, PlayheadChanged, StartChanged
-from rembggui.jobs.context import JobContext, ProgressEvent
-from rembggui.jobs.render import ImmutableRgba, PreparedSegmentation, PreviewResult
-from rembggui.ui.controller import SourceController, SourceLoadResult
-from rembggui.ui.main_window import MainWindow
-from rembggui.ui.ports import PreviewFrameRequested, VideoDropped
-from rembggui.ui.preview_controller import (
+from matteloop.core.timeline import EndChanged, PlayheadChanged, StartChanged
+from matteloop.jobs.context import JobContext, ProgressEvent
+from matteloop.jobs.render import ImmutableRgba, PreparedSegmentation, PreviewResult
+from matteloop.ui.controller import SourceController, SourceLoadResult
+from matteloop.ui.main_window import MainWindow
+from matteloop.ui.ports import PreviewFrameRequested, VideoDropped
+from matteloop.ui.preview_controller import (
     PreviewController,
     PreviewJobDialog,
     PreviewRuntime,
 )
-from rembggui.ui.store import ReducerStore
+from matteloop.ui.store import ReducerStore
 
 
 @dataclass(frozen=True)
@@ -134,7 +134,7 @@ class RecordingStore(ReducerStore):
 
 def _settings() -> QSettings:
     settings = QSettings(
-        QSettings.IniFormat, QSettings.UserScope, "rembggui-preview-test", "ui"
+        QSettings.IniFormat, QSettings.UserScope, "matteloop-preview-test", "ui"
     )
     settings.clear()
     return settings

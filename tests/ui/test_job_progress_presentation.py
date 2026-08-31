@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from rembggui.ui.source_presentation import (
+from matteloop.ui.source_presentation import (
     JobProgressPresenter,
     format_elapsed,
     format_frame_rate,

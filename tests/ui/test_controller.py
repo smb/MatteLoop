@@ -10,14 +10,14 @@ from PIL import Image
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication, QFileDialog
 
-from rembggui.core.errors import AppError, ErrorCode
-from rembggui.core.state import SourceState
-from rembggui.jobs.source import decode_frame, probe_source
-from rembggui.ui.controller import SourceController, SourceLoadResult
-from rembggui.ui.main_window import MainWindow
-from rembggui.ui.ports import ChooseVideoRequested, VideoDropped
-from rembggui.ui.source_presentation import format_source_file_size
-from rembggui.ui.store import ReducerStore
+from matteloop.core.errors import AppError, ErrorCode
+from matteloop.core.state import SourceState
+from matteloop.jobs.source import decode_frame, probe_source
+from matteloop.ui.controller import SourceController, SourceLoadResult
+from matteloop.ui.main_window import MainWindow
+from matteloop.ui.ports import ChooseVideoRequested, VideoDropped
+from matteloop.ui.source_presentation import format_source_file_size
+from matteloop.ui.store import ReducerStore
 from tests.fixtures.media_factory import make_video
 
 
@@ -39,7 +39,7 @@ class FakeSourceAdapter:
 
 def _settings(name: str) -> QSettings:
     settings = QSettings(
-        QSettings.IniFormat, QSettings.UserScope, "rembggui-test", name
+        QSettings.IniFormat, QSettings.UserScope, "matteloop-test", name
     )
     settings.clear()
     return settings

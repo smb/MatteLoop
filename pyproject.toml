@@ -3,13 +3,13 @@ requires = ["hatchling>=1.27,<2"]
 build-backend = "hatchling.build"
 
 [project]
-name = "rembggui"
+name = "matteloop"
 dynamic = ["version"]
 description = "A cross-platform desktop app for video background removal."
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 license = { text = "MIT" }
-authors = [{ name = "rembgGUI contributors" }]
+authors = [{ name = "MatteLoop contributors" }]
 dependencies = [
   "PySide6~=6.10.1",
   "av>=16,<17",
@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.scripts]
-rembggui = "rembggui.app:main"
+matteloop = "matteloop.app:main"
 
 [dependency-groups]
 dev = [
@@ -36,30 +36,30 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/rembggui"]
+packages = ["src/matteloop"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"resources/model-manifest.json" = "rembggui/resources/model-manifest.json"
-"resources/model-provenance.json" = "rembggui/resources/model-provenance.json"
-"resources/fonts/IBMPlexSans-Regular.ttf" = "rembggui/resources/fonts/IBMPlexSans-Regular.ttf"
-"resources/fonts/IBMPlexSans-SemiBold.ttf" = "rembggui/resources/fonts/IBMPlexSans-SemiBold.ttf"
-"resources/fonts/IBMPlexMono-Regular.ttf" = "rembggui/resources/fonts/IBMPlexMono-Regular.ttf"
-"resources/fonts/OFL.txt" = "rembggui/resources/fonts/OFL.txt"
-"resources/icons/error-24.png" = "rembggui/resources/icons/error-24.png"
-"resources/icons/error-32.png" = "rembggui/resources/icons/error-32.png"
-"resources/icons/error-48.png" = "rembggui/resources/icons/error-48.png"
-"resources/icons/error-64.png" = "rembggui/resources/icons/error-64.png"
-"resources/icons/preview-24.png" = "rembggui/resources/icons/preview-24.png"
-"resources/icons/preview-32.png" = "rembggui/resources/icons/preview-32.png"
-"resources/icons/preview-48.png" = "rembggui/resources/icons/preview-48.png"
-"resources/icons/preview-64.png" = "rembggui/resources/icons/preview-64.png"
-"resources/icons/stale-24.png" = "rembggui/resources/icons/stale-24.png"
-"resources/icons/stale-32.png" = "rembggui/resources/icons/stale-32.png"
-"resources/icons/stale-48.png" = "rembggui/resources/icons/stale-48.png"
-"resources/icons/stale-64.png" = "rembggui/resources/icons/stale-64.png"
+"resources/model-manifest.json" = "matteloop/resources/model-manifest.json"
+"resources/model-provenance.json" = "matteloop/resources/model-provenance.json"
+"resources/fonts/IBMPlexSans-Regular.ttf" = "matteloop/resources/fonts/IBMPlexSans-Regular.ttf"
+"resources/fonts/IBMPlexSans-SemiBold.ttf" = "matteloop/resources/fonts/IBMPlexSans-SemiBold.ttf"
+"resources/fonts/IBMPlexMono-Regular.ttf" = "matteloop/resources/fonts/IBMPlexMono-Regular.ttf"
+"resources/fonts/OFL.txt" = "matteloop/resources/fonts/OFL.txt"
+"resources/icons/error-24.png" = "matteloop/resources/icons/error-24.png"
+"resources/icons/error-32.png" = "matteloop/resources/icons/error-32.png"
+"resources/icons/error-48.png" = "matteloop/resources/icons/error-48.png"
+"resources/icons/error-64.png" = "matteloop/resources/icons/error-64.png"
+"resources/icons/preview-24.png" = "matteloop/resources/icons/preview-24.png"
+"resources/icons/preview-32.png" = "matteloop/resources/icons/preview-32.png"
+"resources/icons/preview-48.png" = "matteloop/resources/icons/preview-48.png"
+"resources/icons/preview-64.png" = "matteloop/resources/icons/preview-64.png"
+"resources/icons/stale-24.png" = "matteloop/resources/icons/stale-24.png"
+"resources/icons/stale-32.png" = "matteloop/resources/icons/stale-32.png"
+"resources/icons/stale-48.png" = "matteloop/resources/icons/stale-48.png"
+"resources/icons/stale-64.png" = "matteloop/resources/icons/stale-64.png"
 
 [tool.hatch.version]
-path = "src/rembggui/__init__.py"
+path = "src/matteloop/__init__.py"
 
 [tool.ruff]
 target-version = "py313"

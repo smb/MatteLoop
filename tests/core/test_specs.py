@@ -8,9 +8,9 @@ from pathlib import Path
 
 import pytest
 
-import rembggui.core.specs as core_specs
-from rembggui.core.errors import ErrorCode, ValidationError
-from rembggui.core.specs import (
+import matteloop.core.specs as core_specs
+from matteloop.core.errors import ErrorCode, ValidationError
+from matteloop.core.specs import (
     MAX_ALPHA_MATTING_ERODE_SIZE,
     AlphaMattingSpec,
     CollisionPolicy,

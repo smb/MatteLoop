@@ -11,11 +11,11 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-import rembggui.app as app_module
-import rembggui.jobs.segmentation_host as segmentation_host_module
-from rembggui.core.errors import AppError, ErrorCode
-from rembggui.core.specs import MAX_ALPHA_MATTING_ERODE_SIZE
-from rembggui.jobs.protocol import (
+import matteloop.app as app_module
+import matteloop.jobs.segmentation_host as segmentation_host_module
+from matteloop.core.errors import AppError, ErrorCode
+from matteloop.core.specs import MAX_ALPHA_MATTING_ERODE_SIZE
+from matteloop.jobs.protocol import (
     CONTROL_JOB_ID,
     MAX_PROTOCOL_MESSAGE_BYTES,
     PROTOCOL_VERSION,
@@ -34,7 +34,7 @@ from rembggui.jobs.protocol import (
     encode_child_message,
     encode_parent_message,
 )
-from rembggui.jobs.segmentation_host import (
+from matteloop.jobs.segmentation_host import (
     SegmentationClient,
     _PreparedRembgSession,
     _run_rembg,

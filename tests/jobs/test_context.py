@@ -5,16 +5,16 @@ from threading import Event, Thread
 
 import pytest
 
-from rembggui.core.errors import AppError, ErrorCode
-from rembggui.core.state import JobKind
-from rembggui.jobs.context import (
+from matteloop.core.errors import AppError, ErrorCode
+from matteloop.core.state import JobKind
+from matteloop.jobs.context import (
     CancellationState,
     ExclusiveJobScheduler,
     JobContext,
     JobTerminalState,
     ProgressEvent,
 )
-from rembggui.jobs.protocol import PROTOCOL_VERSION, CancelAck
+from matteloop.jobs.protocol import PROTOCOL_VERSION, CancelAck
 
 
 def test_scheduler_rejects_second_heavy_job(tmp_path: Path) -> None:

@@ -63,6 +63,22 @@ at a time.**
 This is the failure mode to avoid. It is cheap to enter, it produces green
 tests and clean type checks the whole way down, and it feels like diligence.
 
+### Product rename — 2026-08-31
+
+The product was renamed from `rembgGUI` to **MatteLoop**. New source, package,
+executable, settings, workspace, and documentation surfaces use MatteLoop.
+Existing data under `~/Library/Caches/rembggui/` — model weights, compiled
+provider caches, thumbnails and fallback workspaces — and promoted cut sets
+under `<output-directory>/.rembggui-work/` remain discoverable for backward
+compatibility; when both names exist, the new MatteLoop location is preferred.
+A rename must never orphan user-owned data, so a single helper,
+`paths.cache_subdirectory`, decides this for every cache subdirectory rather
+than each call site repeating the rule.
+
+The persisted `rembggui-cut-manifest` and `rembggui-fingerprint` schema tokens
+are deliberately unchanged: they feed cut cache keys, so renaming them would
+leave promoted cut sets on disk but unreachable.
+
 ---
 
 ## 2. The rules
@@ -125,7 +141,7 @@ failed with "color primaries 2 cannot be proven as BT.709/sRGB".
 requires. Before adding capability to anything under `jobs/` or `core/`, the
 end-to-end path that uses it must already be reachable from the running GUI.
 
-"Reachable" means: a person launches `uv run rembggui`, clicks, and the code
+"Reachable" means: a person launches `uv run matteloop`, clicks, and the code
 executes. Not "a test calls it". Not "it will be wired in Task 15".
 
 **Why.** 22 485 lines of engine were written and validated against imagined
@@ -172,7 +188,7 @@ one-paragraph note to the user and let them decide.
 `jobs/workspace.py` proved via hand-written `ctypes` `statfs` structs (macOS),
 `/proc/self/mountinfo` parsing (Linux) and `GetDriveTypeW` (Windows) that the
 work directory was on local storage — and aborted the entire render otherwise.
-Because the workspace lives at `<output-directory>/.rembggui-work/`, a user
+Because the workspace lives at `<output-directory>/.matteloop-work/`, a user
 whose output folder sits on a NAS or SMB mount could not render at all. The
 design document excluded network *sources*, never network *outputs*.
 
@@ -220,7 +236,7 @@ nothing about which behaviour broke.
 
 ### G8 — Scope is a ceiling, not a target
 
-**Rule.** The design document (`docs/designs/rembggui-desktop-app.md`) describes
+**Rule.** The design document (`docs/designs/matteloop-desktop-app.md`) describes
 the *eventual* product. `docs/v1-scope.md` describes what is being built **now**.
 When they disagree, `docs/v1-scope.md` wins. Do not implement a design-document
 requirement that the V1 scope defers, however well specified it is.
@@ -288,7 +304,7 @@ The implementation model for this repository is
 
 - **Read this file and `docs/v1-scope.md` first.** They override the design
   document and the implementation plan wherever they disagree.
-- The implementation plan `docs/superpowers/plans/2026-08-28-rembggui-implementation.md`
+- The implementation plan `docs/superpowers/plans/2026-08-28-matteloop-implementation.md`
   is historical. Task numbering there is retained for reference only; the
   deferral table in `docs/v1-scope.md` is authoritative.
 - Finish the assignment given and stop. Do not continue into adjacent

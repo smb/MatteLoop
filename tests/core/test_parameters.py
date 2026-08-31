@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from rembggui.core.parameters import (
+from matteloop.core.parameters import (
     V1_MODEL_IDS,
     AlphaThresholdChanged,
     EdgeModeChanged,
@@ -23,8 +23,8 @@ from rembggui.core.parameters import (
     StretchChanged,
     parameters_from_values,
 )
-from rembggui.core.specs import EdgeMode
-from rembggui.core.state import (
+from matteloop.core.specs import EdgeMode
+from matteloop.core.state import (
     AppState,
     PreviewRequested,
     PreviewResult,
@@ -34,7 +34,7 @@ from rembggui.core.state import (
     SourceLoadRequested,
     reduce,
 )
-from rembggui.jobs.models.catalog import ModelCatalog
+from matteloop.jobs.models.catalog import ModelCatalog
 
 
 @dataclass(frozen=True)

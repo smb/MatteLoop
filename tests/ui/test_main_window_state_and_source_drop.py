@@ -10,8 +10,8 @@ from PySide6.QtGui import QDropEvent, QFontMetrics
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
-from rembggui.core.errors import AppError, ErrorCode
-from rembggui.core.state import (
+from matteloop.core.errors import AppError, ErrorCode
+from matteloop.core.state import (
     AppState,
     ArtifactResult,
     CancelRequested,
@@ -32,10 +32,10 @@ from rembggui.core.state import (
     SourceLoadRequested,
     reduce,
 )
-from rembggui.ui.main_window import MainWindow
-from rembggui.ui.ports import ChooseVideoRequested
-from rembggui.ui.presenter import present
-from rembggui.ui.source_strip import SourceDropSurface
+from matteloop.ui.main_window import MainWindow
+from matteloop.ui.ports import ChooseVideoRequested
+from matteloop.ui.presenter import present
+from matteloop.ui.source_strip import SourceDropSurface
 
 
 class Store:
@@ -202,7 +202,7 @@ def _state_rows() -> list[tuple[str, AppState, str | None, str, bool, bool]]:
 def window(qtbot):
     services = Services([])
     settings = QSettings(
-        QSettings.IniFormat, QSettings.UserScope, "rembggui-review", "ui"
+        QSettings.IniFormat, QSettings.UserScope, "matteloop-review", "ui"
     )
     settings.clear()
     value = MainWindow(Store(AppState()), services, settings)

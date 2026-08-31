@@ -13,15 +13,15 @@ from PIL import Image
 from PySide6.QtCore import QSize, QSizeF
 from PySide6.QtGui import QBitmap, QColor, QImage
 
-from rembggui.core.errors import AppError, ErrorCode
-from rembggui.jobs.cache import (
+from matteloop.core.errors import AppError, ErrorCode
+from matteloop.jobs.cache import (
     PixmapCache,
     ThumbnailCacheKey,
     ThumbnailDiskCache,
     _pixmap_cost,
 )
-from rembggui.jobs.source import SourceRevision, probe_source
-from rembggui.jobs.thumbnails import (
+from matteloop.jobs.source import SourceRevision, probe_source
+from matteloop.jobs.thumbnails import (
     MAX_THUMBNAIL_DIMENSION,
     MAX_THUMBNAIL_PIXELS,
     ThumbnailRequest,
@@ -83,7 +83,7 @@ def test_filmstrip_reuses_one_proof_and_each_thumbnail_decode_is_keyframe_local(
     tmp_path, monkeypatch
 ):
     path = _make_seekable_vfr_video(tmp_path / "filmstrip.mkv")
-    import rembggui.jobs.source as source_module
+    import matteloop.jobs.source as source_module
 
     real_open = source_module.av.open
     real_derive = source_module._derive_timeline
@@ -443,7 +443,7 @@ def test_disk_cache_removes_atomic_temporary_after_baseexception(tmp_path, monke
     key = _key()
     image = QImage(10, 10, QImage.Format.Format_RGBA8888)
     image.fill(0)
-    import rembggui.jobs.cache as cache_module
+    import matteloop.jobs.cache as cache_module
 
     class FatalWrite(BaseException):
         pass
@@ -582,7 +582,7 @@ def test_pixmap_cost_accounts_native_monochrome_row_alignment(qapp):
 def test_pixmap_cache_rejects_qcore_only_process():
     script = """
 from PySide6.QtCore import QCoreApplication
-from rembggui.jobs.cache import PixmapCache
+from matteloop.jobs.cache import PixmapCache
 app = QCoreApplication([])
 try:
     PixmapCache()
