@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tarfile
@@ -370,6 +371,29 @@ def test_tool_environment_installs_only_the_target_specific_manifest_pins(
         "wheel==0.48.0",
         "delocate==0.13.0",
     )
+
+
+def test_macos_repair_inherits_environment_with_staged_libraries_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DYLD_LIBRARY_PATH", "/existing/libraries")
+    monkeypatch.setenv("MATTELOOP_REPAIR_SENTINEL", "preserved")
+    runner = RecordingRunner()
+
+    ensure_media_stack(ROOT, tmp_path, runner=runner)
+
+    repair_command, repair_kwargs = next(
+        (command, kwargs)
+        for command, kwargs in runner.calls
+        if "delocate-wheel" in command[0]
+    )
+    raw_wheel = Path(repair_command[-1])
+    staged_libraries = raw_wheel.parent.parent / "prefix" / "lib"
+    environment = repair_kwargs["env"]
+    assert environment["DYLD_LIBRARY_PATH"] == (
+        f"{staged_libraries}{os.pathsep}/existing/libraries"
+    )
+    assert environment["MATTELOOP_REPAIR_SENTINEL"] == "preserved"
 
 
 def test_windows_build_uses_delvewheel_and_archives_its_licence(

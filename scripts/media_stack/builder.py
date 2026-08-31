@@ -397,7 +397,21 @@ def _build_and_repair_wheel(
     repair = repair_wheel_command(
         context.target, raw_wheel, prefix, repaired_output, context.tool_python
     )
-    _run_command(context, "repair", repair, record=True)
+    repair_environment = None
+    if context.target.target_id == "macos-arm64":
+        repair_environment = os.environ.copy()
+        staged_libraries = str(prefix / "lib")
+        existing_libraries = repair_environment.get("DYLD_LIBRARY_PATH")
+        if existing_libraries:
+            staged_libraries += os.pathsep + existing_libraries
+        repair_environment["DYLD_LIBRARY_PATH"] = staged_libraries
+    _run_command(
+        context,
+        "repair",
+        repair,
+        environment=repair_environment,
+        record=True,
+    )
     return _one_wheel(repaired_output, "repair", context)
 
 
