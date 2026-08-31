@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -33,6 +34,7 @@ _PROVENANCE_FIELDS = frozenset(
     )
 )
 _GPL_WITHOUT_L_PREFIX = re.compile(r"(?<!l)gpl")
+_ARCHIVE_ERRORS = (BadZipFile, OSError, RuntimeError, NotImplementedError)
 _ROOT = Path(__file__).resolve().parents[2]
 _INSPECTION_SCRIPT = r"""
 import json
@@ -105,6 +107,14 @@ class VerificationReport:
     evidence: RuntimeEvidence
 
 
+@dataclass(frozen=True, slots=True)
+class _InputSnapshots:
+    manifest: Path
+    wheel: Path
+    provenance: Path
+    wheel_filename: str
+
+
 class MediaStackVerificationError(ValueError):
     """One or more reasons a candidate wheel cannot be trusted."""
 
@@ -152,6 +162,7 @@ def forbidden_bundle_entries(
         entry
         for entry in root.rglob("*")
         if any(fragment in entry.name.casefold() for fragment in normalized)
+        or _has_forbidden_license_marker(entry.relative_to(root).as_posix())
     )
     return tuple(sorted(matches, key=lambda path: path.as_posix()))
 
@@ -169,24 +180,51 @@ def verify_media_wheel(
     fixture_dir: Path | None = None,
 ) -> VerificationReport:
     """Verify provenance, wheel metadata, runtime evidence, and native dependencies."""
-    if not wheel.is_file():
-        _fail((f"wheel does not exist: {wheel}",))
-    manifest = load_manifest(manifest_path)
-    expected = _expected_provenance(wheel, manifest_path, target)
-    provenance = _load_provenance(provenance_path(wheel))
+    return _verify_input_paths(wheel, manifest_path, target, fixture_dir)
+
+
+def _verify_input_paths(
+    wheel: Path,
+    manifest_path: Path,
+    target: BuildTarget | None,
+    fixture_dir: Path | None = None,
+) -> VerificationReport:
+    with tempfile.TemporaryDirectory(prefix="matteloop-media-inputs-") as raw:
+        snapshots = _snapshot_inputs(wheel, manifest_path, Path(raw))
+        manifest = load_manifest(snapshots.manifest)
+        resolved_target = target or detect_target(
+            python_tag=manifest.python_abi,
+            deployment_target=manifest.macos_deployment_target,
+        )
+        return _verify_snapshots(snapshots, manifest, resolved_target, fixture_dir)
+
+
+def _verify_snapshots(
+    snapshots: _InputSnapshots,
+    manifest: MediaStackManifest,
+    target: BuildTarget,
+    fixture_dir: Path | None,
+) -> VerificationReport:
+    expected = _expected_provenance(
+        snapshots.wheel,
+        snapshots.manifest,
+        target,
+        wheel_filename=snapshots.wheel_filename,
+    )
+    provenance = _load_provenance(snapshots.provenance)
     _fail_if(_provenance_errors(provenance, expected))
-    _fail_if(_wheel_metadata_errors(wheel, manifest, target))
+    _fail_if(_wheel_metadata_errors(snapshots.wheel, manifest, target))
 
     with tempfile.TemporaryDirectory(prefix="matteloop-media-verification-") as raw:
         extracted_root = Path(raw) / "wheel"
         extracted_root.mkdir()
         try:
-            with ZipFile(wheel) as archive:
+            with ZipFile(snapshots.wheel) as archive:
                 archive.extractall(extracted_root)
-        except (BadZipFile, OSError) as error:
+        except _ARCHIVE_ERRORS as error:
             _fail((f"wheel extraction failed: {error}",))
         payload = _inspect_runtime(extracted_root, fixture_dir)
-        dependencies = _collect_dependencies(wheel, target)
+        dependencies = _collect_dependencies(snapshots.wheel, target)
         evidence = _runtime_evidence(payload, dependencies)
         ffmpeg_version = next(
             source.version for source in manifest.sources if source.name == "ffmpeg"
@@ -208,7 +246,7 @@ def verify_media_wheel(
         manifest_sha256=expected["manifest_sha256"],
         target_id=target.target_id,
         python_tag=target.python_tag,
-        wheel_filename=wheel.name,
+        wheel_filename=snapshots.wheel_filename,
         wheel_sha256=expected["wheel_sha256"],
         evidence=evidence,
     )
@@ -222,18 +260,14 @@ def main(argv: list[str] | None = None) -> int:
         parser.add_argument("--manifest", required=True, type=Path)
         parser.add_argument("--report", required=True, type=Path)
         arguments = parser.parse_args(argv)
-        manifest = load_manifest(arguments.manifest)
-        target = detect_target(
-            python_tag=manifest.python_abi,
-            deployment_target=manifest.macos_deployment_target,
-        )
-        report = verify_media_wheel(arguments.wheel, arguments.manifest, target)
-        arguments.report.write_text(_canonical_json(asdict(report)), encoding="utf-8")
+        report = _verify_input_paths(arguments.wheel, arguments.manifest, None)
+        _publish_report(arguments.report, report)
     except (MediaStackVerificationError, OSError, ValueError) as error:
         errors = getattr(error, "errors", (str(error),))
         print("Media stack verification failed:", file=sys.stderr)
         for message in errors:
-            print(f"- {message}", file=sys.stderr)
+            for line in str(message).splitlines() or ("",):
+                print(f"- {line}", file=sys.stderr)
         return 1
     return 0
 
@@ -244,7 +278,7 @@ def _license_errors(licenses: tuple[str, ...]) -> tuple[str, ...]:
     errors: list[str] = []
     for license_text in licenses:
         normalized = license_text.casefold()
-        if "nonfree" in normalized or _GPL_WITHOUT_L_PREFIX.search(normalized):
+        if _has_forbidden_license_marker(normalized):
             errors.append(f"forbidden FFmpeg licence: {license_text}")
         elif "lgpl" not in normalized:
             errors.append(f"FFmpeg library is not LGPL: {license_text}")
@@ -284,6 +318,11 @@ def _dependency_errors(
         normalized_line = dependency.casefold()
         basename = PurePosixPath(dependency.replace("\\", "/").split(" ", 1)[0]).name
         normalized_basename = basename.casefold()
+        if _has_forbidden_license_marker(
+            normalized_line
+        ) or _has_forbidden_license_marker(normalized_basename):
+            errors.append(f"forbidden native dependency: {dependency}")
+            continue
         for fragment in normalized_fragments:
             if fragment in normalized_line or fragment in normalized_basename:
                 errors.append(f"forbidden native dependency: {dependency}")
@@ -291,8 +330,55 @@ def _dependency_errors(
     return tuple(errors)
 
 
+def _has_forbidden_license_marker(value: str) -> bool:
+    normalized = value.casefold()
+    return (
+        "nonfree" in normalized or _GPL_WITHOUT_L_PREFIX.search(normalized) is not None
+    )
+
+
+def _snapshot_inputs(wheel: Path, manifest: Path, destination: Path) -> _InputSnapshots:
+    wheel_snapshot = _snapshot_file(
+        wheel, destination / "wheel", f"wheel does not exist: {wheel}"
+    )
+    manifest_snapshot = _snapshot_file(
+        manifest,
+        destination / "manifest",
+        f"manifest does not exist: {manifest}",
+    )
+    sidecar = provenance_path(wheel)
+    provenance_snapshot = _snapshot_file(
+        sidecar,
+        destination / "provenance",
+        f"provenance sidecar is missing: {sidecar}",
+    )
+    return _InputSnapshots(
+        manifest_snapshot,
+        wheel_snapshot,
+        provenance_snapshot,
+        wheel.name,
+    )
+
+
+def _snapshot_file(source: Path, directory: Path, missing_error: str) -> Path:
+    if not source.is_file():
+        _fail((missing_error,))
+    destination = directory / source.name
+    try:
+        directory.mkdir()
+        with source.open("rb") as input_file, destination.open("xb") as output_file:
+            shutil.copyfileobj(input_file, output_file)
+    except OSError as error:
+        _fail((f"could not snapshot {source}: {error}",))
+    return destination
+
+
 def _expected_provenance(
-    wheel: Path, manifest_path: Path, target: BuildTarget
+    wheel: Path,
+    manifest_path: Path,
+    target: BuildTarget,
+    *,
+    wheel_filename: str | None = None,
 ) -> dict[str, str]:
     return {
         "identity": media_stack_identity(
@@ -305,7 +391,7 @@ def _expected_provenance(
         "manifest_sha256": _sha256(manifest_path),
         "target_id": target.target_id,
         "python_tag": target.python_tag,
-        "wheel_filename": wheel.name,
+        "wheel_filename": wheel.name if wheel_filename is None else wheel_filename,
         "wheel_sha256": _sha256(wheel),
     }
 
@@ -366,7 +452,7 @@ def _wheel_metadata_errors(
             wheel_metadata = Parser().parsestr(
                 archive.read(wheel_names[0]).decode("utf-8")
             )
-    except (BadZipFile, OSError, UnicodeError) as error:
+    except (*_ARCHIVE_ERRORS, UnicodeError) as error:
         return (*errors, f"wheel metadata could not be read: {error}")
     if metadata.get("Name", "").casefold() != "av":
         errors.append("wheel distribution name must be av")
@@ -515,6 +601,28 @@ def _sha256(path: Path) -> str:
 
 def _canonical_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
+
+
+def _publish_report(path: Path, report: VerificationReport) -> None:
+    descriptor = -1
+    temporary: Path | None = None
+    try:
+        descriptor, raw_path = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+        )
+        temporary = Path(raw_path)
+        output = os.fdopen(descriptor, "w", encoding="utf-8")
+        descriptor = -1
+        with output:
+            output.write(_canonical_json(asdict(report)))
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def _fail_if(errors: tuple[str, ...]) -> None:

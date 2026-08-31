@@ -11,6 +11,7 @@ import pytest
 from scripts.media_stack.manifest import load_manifest, media_stack_identity
 from scripts.media_stack.platforms import BuildTarget
 from scripts.media_stack.verifier import (
+    MediaStackVerificationError,
     RuntimeEvidence,
     VerificationReport,
     configuration_errors,
@@ -87,16 +88,18 @@ def _write_fake_wheel(
         )
 
 
-def _provenance_payload(wheel: Path, target: BuildTarget) -> dict[str, str]:
+def _provenance_payload(
+    wheel: Path, target: BuildTarget, manifest_path: Path = MANIFEST
+) -> dict[str, str]:
     return {
         "identity": media_stack_identity(
-            MANIFEST,
+            manifest_path,
             os_name=target.os_name,
             machine=target.machine,
             python_tag=target.python_tag,
             deployment_target=target.deployment_target,
         ),
-        "manifest_sha256": hashlib.sha256(MANIFEST.read_bytes()).hexdigest(),
+        "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
         "target_id": target.target_id,
         "python_tag": target.python_tag,
         "wheel_filename": wheel.name,
@@ -107,9 +110,10 @@ def _provenance_payload(wheel: Path, target: BuildTarget) -> dict[str, str]:
 def _write_provenance(
     wheel: Path,
     target: BuildTarget,
+    manifest_path: Path = MANIFEST,
     **replacements: str,
 ) -> None:
-    payload = _provenance_payload(wheel, target)
+    payload = _provenance_payload(wheel, target, manifest_path)
     payload.update(replacements)
     provenance_path(wheel).write_text(
         json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
@@ -179,6 +183,29 @@ def test_configuration_checks_dependency_basenames_and_full_lines() -> None:
     assert any("LIBX265.DLL" in error for error in errors)
 
 
+@pytest.mark.parametrize(
+    "dependency",
+    (
+        "/wheel/lib/libGPLCodec.dylib",
+        "/wheel/nonfree/libavcodec.62.dylib",
+    ),
+)
+def test_configuration_rejects_gpl_and_nonfree_native_dependency_evidence(
+    dependency: str,
+) -> None:
+    errors = configuration_errors(
+        _evidence(dependencies=(dependency,)), load_manifest(MANIFEST).verification
+    )
+
+    assert any(dependency in error for error in errors)
+
+
+def test_configuration_accepts_lgpl_native_dependency_evidence() -> None:
+    evidence = _evidence(dependencies=("/wheel/lib/libLGPLCodec.dylib",))
+
+    assert configuration_errors(evidence, load_manifest(MANIFEST).verification) == ()
+
+
 def test_bundle_scan_finds_forbidden_filenames_recursively(tmp_path: Path) -> None:
     forbidden = tmp_path / "av" / ".dylibs" / "libOpenH264.7.dylib"
     allowed = tmp_path / "av" / ".dylibs" / "libwebp.7.dylib"
@@ -189,6 +216,17 @@ def test_bundle_scan_finds_forbidden_filenames_recursively(tmp_path: Path) -> No
     assert forbidden_bundle_entries(tmp_path, ("x264", "x265", "openh264")) == (
         forbidden,
     )
+
+
+def test_bundle_scan_rejects_gpl_and_nonfree_but_accepts_lgpl(tmp_path: Path) -> None:
+    gpl = tmp_path / "nested" / "libGPLCodec.dylib"
+    nonfree = tmp_path / "nested" / "nonfree-codec.dll"
+    lgpl = tmp_path / "nested" / "libLGPLCodec.dylib"
+    gpl.parent.mkdir()
+    for path in (gpl, nonfree, lgpl):
+        path.write_bytes(b"library")
+
+    assert forbidden_bundle_entries(tmp_path, ()) == (gpl, nonfree)
 
 
 def test_runtime_evidence_and_report_are_frozen_and_slotted() -> None:
@@ -259,6 +297,30 @@ def test_verification_rejects_noncanonical_provenance_json(tmp_path: Path) -> No
         verify_media_wheel(wheel, MANIFEST, MACOS)
 
 
+@pytest.mark.parametrize(
+    "archive_error",
+    (RuntimeError("encrypted wheel entry"), NotImplementedError("unsupported ZIP")),
+)
+def test_verification_converts_expected_archive_extraction_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_error: Exception,
+) -> None:
+    from scripts.media_stack import verifier
+
+    wheel = _wheel_path(tmp_path)
+    _write_fake_wheel(wheel)
+    _write_provenance(wheel, MACOS)
+
+    def fail_extraction(*_args: object, **_kwargs: object) -> None:
+        raise archive_error
+
+    monkeypatch.setattr(verifier.ZipFile, "extractall", fail_extraction)
+
+    with pytest.raises(MediaStackVerificationError, match="wheel extraction failed"):
+        verify_media_wheel(wheel, MANIFEST, MACOS)
+
+
 def test_verification_inspects_the_extracted_wheel_with_current_cpython(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -284,7 +346,10 @@ def test_verification_inspects_the_extracted_wheel_with_current_cpython(
 
     report = verify_media_wheel(wheel, MANIFEST, MACOS)
 
-    assert dependency_commands == [("delocate-listdeps", "--all", str(wheel))]
+    assert len(dependency_commands) == 1
+    assert dependency_commands[0][:2] == ("delocate-listdeps", "--all")
+    assert Path(dependency_commands[0][-1]) != wheel
+    assert Path(dependency_commands[0][-1]).name == wheel.name
     assert report.evidence == _evidence(
         configurations=("--ENABLE-SHARED --DISABLE-GPL",),
         licenses=("LGPL VERSION 2.1 OR LATER",),
@@ -293,6 +358,50 @@ def test_verification_inspects_the_extracted_wheel_with_current_cpython(
         dependencies=("@rpath/LIBWEBP.7.DYLIB",),
     )
     assert report.wheel_filename == wheel.name
+
+
+def test_verification_uses_private_snapshots_after_original_paths_are_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts.media_stack import verifier
+
+    manifest = tmp_path / "manifest.toml"
+    manifest.write_bytes(MANIFEST.read_bytes())
+    wheel = _wheel_path(tmp_path)
+    _write_fake_wheel(wheel)
+    _write_provenance(wheel, MACOS, manifest)
+    expected = _provenance_payload(wheel, MACOS, manifest)
+    real_load_provenance = verifier._load_provenance
+    real_run = subprocess.run
+    dependency_wheels: list[Path] = []
+
+    def load_then_replace_originals(path: Path) -> dict[str, str]:
+        payload = real_load_provenance(path)
+        manifest.write_text("replaced manifest", encoding="utf-8")
+        wheel.write_bytes(b"replaced wheel")
+        provenance_path(wheel).write_text("{}\n", encoding="utf-8")
+        return payload
+
+    def run(
+        command: tuple[str, ...], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        if command[0] == "delocate-listdeps":
+            dependency_wheels.append(Path(command[-1]))
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        return real_run(command, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(verifier, "_load_provenance", load_then_replace_originals)
+    monkeypatch.setattr(verifier.subprocess, "run", run)
+
+    report = verify_media_wheel(wheel, manifest, MACOS)
+
+    assert report.identity == expected["identity"]
+    assert report.manifest_sha256 == expected["manifest_sha256"]
+    assert report.wheel_sha256 == expected["wheel_sha256"]
+    assert report.wheel_filename == wheel.name
+    assert len(dependency_wheels) == 1
+    assert dependency_wheels[0] != wheel
+    assert dependency_wheels[0].name == wheel.name
 
 
 def test_verification_never_falls_back_to_the_installed_av_package(
@@ -354,9 +463,15 @@ def test_windows_dependency_inventory_uses_delvewheel_module(
 
     verify_media_wheel(wheel, MANIFEST, WINDOWS)
 
-    assert dependency_commands == [
-        (sys.executable, "-m", "delvewheel", "show", str(wheel))
-    ]
+    assert len(dependency_commands) == 1
+    assert dependency_commands[0][:4] == (
+        sys.executable,
+        "-m",
+        "delvewheel",
+        "show",
+    )
+    assert Path(dependency_commands[0][-1]) != wheel
+    assert Path(dependency_commands[0][-1]).name == wheel.name
 
 
 def test_cli_writes_canonical_report_only_after_success(
@@ -375,8 +490,7 @@ def test_cli_writes_canonical_report_only_after_success(
         wheel_sha256="b" * 64,
         evidence=_evidence(licenses=("LGPL Original Case",)),
     )
-    monkeypatch.setattr(verifier, "detect_target", lambda **_kwargs: MACOS)
-    monkeypatch.setattr(verifier, "verify_media_wheel", lambda *_args: report)
+    monkeypatch.setattr(verifier, "_verify_input_paths", lambda *_args: report)
 
     status = main(
         [str(wheel), "--manifest", str(MANIFEST), "--report", str(report_path)]
@@ -411,6 +525,40 @@ def test_cli_reports_bulleted_errors_without_publishing_a_report(
     assert not report_path.exists()
 
 
+def test_cli_publication_failure_preserves_an_existing_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from scripts.media_stack import verifier
+
+    wheel = _wheel_path(tmp_path)
+    report_path = tmp_path / "report.json"
+    report_path.write_text("previous report\n", encoding="utf-8")
+    report = VerificationReport(
+        identity="identity",
+        manifest_sha256="a" * 64,
+        target_id="macos-arm64",
+        python_tag="cp313",
+        wheel_filename=wheel.name,
+        wheel_sha256="b" * 64,
+        evidence=_evidence(),
+    )
+    monkeypatch.setattr(verifier, "_verify_input_paths", lambda *_args: report)
+
+    def refuse_replace(_source: Path, _destination: Path) -> None:
+        raise OSError("publication refused")
+
+    monkeypatch.setattr(verifier.os, "replace", refuse_replace)
+
+    status = main(
+        [str(wheel), "--manifest", str(MANIFEST), "--report", str(report_path)]
+    )
+
+    assert status == 1
+    assert report_path.read_text(encoding="utf-8") == "previous report\n"
+    assert not tuple(tmp_path.glob(".report.json.*.tmp"))
+    assert capsys.readouterr().err.endswith("- publication refused\n")
+
+
 def test_cli_formats_argument_errors_under_the_canonical_heading(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -420,6 +568,32 @@ def test_cli_formats_argument_errors_under_the_canonical_heading(
     assert capsys.readouterr().err == (
         "Media stack verification failed:\n"
         "- the following arguments are required: wheel, --manifest, --report\n"
+    )
+
+
+def test_cli_prefixes_every_physical_diagnostic_line_with_a_bullet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from scripts.media_stack import verifier
+
+    def fail(*_args: object, **_kwargs: object) -> VerificationReport:
+        raise MediaStackVerificationError(("first diagnostic\nsecond diagnostic",))
+
+    monkeypatch.setattr(verifier, "_verify_input_paths", fail)
+
+    status = main(
+        [
+            str(tmp_path / "wheel.whl"),
+            "--manifest",
+            str(MANIFEST),
+            "--report",
+            str(tmp_path / "report.json"),
+        ]
+    )
+
+    assert status == 1
+    assert capsys.readouterr().err == (
+        "Media stack verification failed:\n- first diagnostic\n- second diagnostic\n"
     )
 
 
