@@ -52,7 +52,10 @@ ROOT = Path(__file__).resolve().parent.parent
 DIST_PATH = ROOT / "dist"
 
 _PINNED_DISTRIBUTIONS = {
-    "PySide6": "6.10.x",
+    "PySide6": "6.10.3",
+    "PySide6_Addons": "6.10.3",
+    "PySide6_Essentials": "6.10.3",
+    "shiboken6": "6.10.3",
     "Nuitka": "2.8.10",
     "onnxruntime": "1.29.0",
 }
@@ -609,11 +612,7 @@ def _installed_versions() -> dict[str, str | None]:
 
 
 def _version_matches(distribution: str, actual: str) -> bool:
-    if distribution == "Nuitka":
-        return actual == "2.8.10"
-    if distribution == "onnxruntime":
-        return actual == "1.29.0"
-    return actual.startswith("6.10.")
+    return actual == _PINNED_DISTRIBUTIONS[distribution]
 
 
 def _onnxruntime_capi_directory() -> Path:

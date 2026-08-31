@@ -8,7 +8,10 @@ from urllib.parse import urlsplit
 import pytest
 
 from scripts.media_stack.manifest import SourceSpec
-from scripts.qt_source import ensure_qt_source_companion
+from scripts.qt_source import (
+    ensure_qt_source_companion,
+    installed_qt_distribution_inventory,
+)
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 PACKAGES = {
@@ -178,3 +181,15 @@ def test_qt_companion_propagates_verified_source_failure(tmp_path: Path) -> None
         ensure_qt_source_companion(
             root, tmp_path / "cache", PACKAGES, source_ensurer=reject_source
         )
+
+
+def test_installed_qt_inventory_records_exact_wheels_and_package_files() -> None:
+    inventory = installed_qt_distribution_inventory()
+
+    assert set(inventory) == set(PACKAGES)
+    for name, item in inventory.items():
+        assert item["version"] == "6.10.3"
+        assert item["wheel_tags"]
+        assert item["files"]
+        assert any(str(path).endswith(".dist-info/WHEEL") for path in item["files"])
+        assert any(str(path).startswith(name.split("_")[0]) for path in item["files"])

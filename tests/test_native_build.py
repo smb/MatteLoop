@@ -31,8 +31,11 @@ from scripts.media_stack.platforms import BuildTarget
 def _installed_versions() -> dict[str, str]:
     return {
         "PySide6": "6.10.3",
+        "PySide6_Addons": "6.10.3",
+        "PySide6_Essentials": "6.10.3",
         "Nuitka": "2.8.10",
         "onnxruntime": "1.29.0",
+        "shiboken6": "6.10.3",
     }
 
 
@@ -163,8 +166,11 @@ def test_native_build_reports_missing_and_wrong_pinned_tools(tmp_path: Path) -> 
         deploy_path=tmp_path / "pyside6-deploy",
         installed_versions={
             "PySide6": None,
+            "PySide6_Addons": "6.10.3",
+            "PySide6_Essentials": "6.10.3",
             "Nuitka": "2.8.9",
             "onnxruntime": "1.29.0",
+            "shiboken6": "6.10.3",
         },
     )
 
@@ -174,6 +180,32 @@ def test_native_build_reports_missing_and_wrong_pinned_tools(tmp_path: Path) -> 
     )
     assert any("Missing build prerequisite: PySide6." in error for error in errors)
     assert any("Nuitka 2.8.9 is installed" in error for error in errors)
+
+
+def test_native_build_requires_every_qt_distribution_at_exact_6103(
+    tmp_path: Path,
+) -> None:
+    deploy = tmp_path / "pyside6-deploy"
+    deploy.write_bytes(b"tool")
+    versions = _installed_versions() | {
+        "PySide6": "6.10.4",
+        "PySide6_Addons": "6.11.0",
+        "PySide6_Essentials": "6.10.2",
+        "shiboken6": None,
+    }
+
+    errors = prerequisite_errors(
+        os_name="darwin",
+        machine="arm64",
+        python_version=(3, 13),
+        deploy_path=deploy,
+        installed_versions=versions,
+    )
+
+    assert any("PySide6 6.10.4 is installed" in error for error in errors)
+    assert any("PySide6_Addons 6.11.0 is installed" in error for error in errors)
+    assert any("PySide6_Essentials 6.10.2 is installed" in error for error in errors)
+    assert any("Missing build prerequisite: shiboken6" in error for error in errors)
 
 
 def test_native_build_does_not_require_development_pyav_distribution(

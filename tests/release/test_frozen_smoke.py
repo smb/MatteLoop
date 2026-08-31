@@ -533,6 +533,13 @@ def test_native_bundle_includes_project_license_notices() -> None:
     assert (
         "--include-data-files=THIRD_PARTY_NOTICES.md=THIRD_PARTY_NOTICES.md"
     ) in args
+    assert "--include-data-files=legal/GPL-3.0.txt=GPL-3.0.txt" in args
+    assert "--include-data-files=legal/LGPL-3.0.txt=LGPL-3.0.txt" in args
+    assert (
+        "--include-data-files=legal/QT-PYSIDE-LGPL-NOTICE.md="
+        "QT-PYSIDE-LGPL-NOTICE.md"
+    ) in args
+    assert "--include-data-files=legal/RELINK.md=RELINK.md" in args
 
 
 def test_pyside_deploy_accepts_spec_in_dry_run_mode(tmp_path: Path) -> None:

@@ -72,6 +72,10 @@ extra_args =
 	--include-data-files=resources/model-provenance.json=resources/model-provenance.json
 	--include-data-files=LICENSE=LICENSE
 	--include-data-files=THIRD_PARTY_NOTICES.md=THIRD_PARTY_NOTICES.md
+	--include-data-files=legal/GPL-3.0.txt=GPL-3.0.txt
+	--include-data-files=legal/LGPL-3.0.txt=LGPL-3.0.txt
+	--include-data-files=legal/QT-PYSIDE-LGPL-NOTICE.md=QT-PYSIDE-LGPL-NOTICE.md
+	--include-data-files=legal/RELINK.md=RELINK.md
 	--include-data-files=resources/fonts/IBMPlexSans-Regular.ttf=resources/fonts/IBMPlexSans-Regular.ttf
 	--include-data-files=resources/fonts/IBMPlexSans-SemiBold.ttf=resources/fonts/IBMPlexSans-SemiBold.ttf
 	--include-data-files=resources/fonts/IBMPlexMono-Regular.ttf=resources/fonts/IBMPlexMono-Regular.ttf
