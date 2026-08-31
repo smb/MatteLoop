@@ -10,6 +10,7 @@ from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 
+import psutil
 import pytest
 from PIL import Image
 
@@ -18,6 +19,7 @@ import rembggui.jobs.workspace as workspace_module
 from rembggui.core.errors import AppError, ErrorCode
 from rembggui.core.specs import (
     CollisionPolicy,
+    CropSpec,
     FramingSpec,
     OutputSpec,
     SamplingSpec,
@@ -34,11 +36,13 @@ from rembggui.jobs.models.cache_fs import BoundDirectoryCloseError, UnsafeCacheE
 from rembggui.jobs.render import (
     AtomicOutputPublisher,
     FilesystemWorkspacePort,
+    LocalSourcePort,
     PillowWebPEncoder,
     PreparedSegmentation,
     RenderService,
     ValidatedCandidate,
 )
+from tests.fixtures.media_factory import make_video
 from tests.jobs.render_support import (
     FakeClock,
     FakeDiskProbe,
@@ -1196,6 +1200,53 @@ def test_render_encodes_and_validates_a_real_lossless_webp(tmp_path) -> None:
     assert (info.width, info.height) == (128, 128)
     assert artifact.ownership_peak <= 3
     assert artifact.ownership_current == 0
+
+
+def test_render_keeps_decode_working_set_bounded_across_60_frames(tmp_path) -> None:
+    """A 60-frame 256x256 render must grow less than 4 MiB after frame 10."""
+    frames = [
+        Image.new("RGB", (256, 256), (index % 256, 40, 90))
+        for index in range(60)
+    ]
+    source_path = make_video(tmp_path / "synthetic-memory.mp4", frames, Fraction(30))
+    for frame in frames:
+        frame.close()
+    del frames
+    gc.collect()
+    render_request = replace(
+        request(tmp_path),
+        source=source_path,
+        sampling=SamplingSpec(Fraction(0), Fraction(2), 30),
+        crop=CropSpec(0, 0, 256, 256),
+    )
+    rss: dict[int, int] = {}
+    process = psutil.Process()
+
+    def progress(event: ProgressEvent) -> None:
+        if event.stage == "render-cut" and event.completed in {10, 60}:
+            rss[event.completed] = process.memory_info().rss
+
+    artifact = render_service(
+        source=LocalSourcePort(),
+        segmenter=FakeSegmenter(),
+        encoder=PillowWebPEncoder(),
+    ).render(
+        render_request,
+        JobContext(
+            "bounded-memory",
+            JobKind.RENDER,
+            tmp_path / "job-work",
+            progress,
+            CancellationState(),
+        ),
+    )
+
+    growth = rss[60] - rss[10]
+    assert growth < 4 * 1024 * 1024, (
+        f"decode working set grew by {growth / 1024 / 1024:.2f} MiB"
+    )
+    assert artifact.manifest.frame_count == 60
+    assert artifact.output_path.exists()
 
 
 def test_render_reports_counted_stages_and_global_frame_units(tmp_path) -> None:

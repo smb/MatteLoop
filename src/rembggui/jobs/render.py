@@ -1086,6 +1086,7 @@ class RenderService:
                 finally:
                     cut.close()
                     del cut
+                    gc.collect()
                 context.checkpoint("cut-stage")
                 context.progress(
                     "render-cut", index + 1, total=len(timestamps),
@@ -1425,7 +1426,6 @@ class RenderService:
             )
             context.progress("Validation", 0, detail="Validating encoded output")
             context.checkpoint("encode")
-            gc.collect()
             ownership_peak = tracker.peak
             ownership_current = tracker.current
             output_path = context.commit_if_not_cancelled(
