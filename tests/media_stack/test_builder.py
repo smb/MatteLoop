@@ -34,9 +34,11 @@ class RecordingRunner:
         self,
         *,
         fail_stage: str | None = None,
+        empty_compiler_evidence: bool = False,
         wheel_payload: bytes = b"verified repaired wheel",
     ) -> None:
         self.fail_stage = fail_stage
+        self.empty_compiler_evidence = empty_compiler_evidence
         self.wheel_payload = wheel_payload
         self.calls: list[tuple[tuple[str, ...], dict[str, Any]]] = []
 
@@ -66,16 +68,19 @@ class RecordingRunner:
         if stage == self.fail_stage:
             return subprocess.CompletedProcess(normalized, 9, "", "declared failure")
         self._materialize(stage, normalized)
-        outputs = {
-            "compiler": (
-                "Microsoft (R) C/C++ Optimizing Compiler Version 19.44\n"
-                if normalized[0].casefold() == "cl"
-                else "Apple clang version 17.0.0\n"
-            ),
-            "cmake": "cmake version 4.1.1\n",
-        }
-        stdout = outputs.get(stage, "")
-        return subprocess.CompletedProcess(normalized, 0, stdout, "")
+        stdout, stderr = self._outputs(stage, normalized)
+        return subprocess.CompletedProcess(normalized, 0, stdout, stderr)
+
+    def _outputs(self, stage: str, command: tuple[str, ...]) -> tuple[str, str]:
+        if stage == "compiler" and self.empty_compiler_evidence:
+            return "", ""
+        if stage == "compiler" and command[0].casefold() == "cl":
+            return "", "Microsoft (R) C/C++ Optimizing Compiler Version 19.44\n"
+        if stage == "compiler":
+            return "Apple clang version 17.0.0\n", ""
+        if stage == "cmake":
+            return "cmake version 4.1.1\n", ""
+        return "", ""
 
     @staticmethod
     def _stage(command: tuple[str, ...]) -> str:
@@ -395,8 +400,26 @@ def test_windows_compiler_evidence_probes_msvc_and_cmake(
     with tarfile.open(artifacts.compliance_archive) as archive:
         evidence = archive.extractfile("build/compiler-versions.txt").read()
     assert b"$ cl" in evidence
-    assert b"Microsoft (R) C/C++ Optimizing Compiler" in evidence
+    assert b"stderr:\nMicrosoft (R) C/C++ Optimizing Compiler" in evidence
     assert b"$ cmake --version" in evidence
+
+
+def test_empty_compiler_probe_is_a_structured_evidence_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CC", "clang-review")
+    runner = RecordingRunner(empty_compiler_evidence=True)
+
+    with pytest.raises(MediaStackBuildError) as raised:
+        ensure_media_stack(ROOT, tmp_path, runner=runner)
+
+    error = raised.value
+    assert error.stage == "compiler-evidence"
+    assert error.command == ("clang-review", "--version")
+    assert error.returncode == 1
+    assert error.staging_retained is True
+    assert error.staging_dir.is_dir()
+    assert not tuple(tmp_path.glob("*/finished/*.whl"))
 
 
 def test_force_rebuild_runs_compilation_again(tmp_path: Path) -> None:

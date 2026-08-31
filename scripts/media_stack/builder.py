@@ -452,16 +452,27 @@ def _effective_tool_versions(context: _BuildContext) -> dict[str, str]:
 
 def _compiler_evidence(context: _BuildContext) -> str:
     compiler = _compiler_command(context.target)
-    probes = (
-        (compiler, _run_command(context, "compiler", compiler)),
+    compiler_result = _run_command(context, "compiler", compiler)
+    if not (compiler_result.stdout.strip() or compiler_result.stderr.strip()):
+        raise MediaStackBuildError("compiler-evidence", compiler, 1, context.staging)
+    cmake = ("cmake", "--version")
+    cmake_result = _run_command(context, "cmake", cmake)
+    return "".join(
         (
-            ("cmake", "--version"),
-            _run_command(context, "cmake", ("cmake", "--version")),
-        ),
+            f"Python: {platform.python_version()}\n",
+            _render_probe_evidence(compiler, compiler_result),
+            _render_probe_evidence(cmake, cmake_result),
+        )
     )
-    evidence = [f"Python: {platform.python_version()}\n"]
-    for command, completed in probes:
-        evidence.append(f"$ {shlex.join(command)}\n{completed.stdout.strip()}\n")
+
+
+def _render_probe_evidence(
+    command: Sequence[str], completed: subprocess.CompletedProcess[str]
+) -> str:
+    evidence = [f"$ {shlex.join(command)}\n"]
+    for stream, output in (("stdout", completed.stdout), ("stderr", completed.stderr)):
+        if normalized := output.strip():
+            evidence.append(f"{stream}:\n{normalized}\n")
     return "".join(evidence)
 
 
