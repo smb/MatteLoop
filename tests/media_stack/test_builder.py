@@ -130,11 +130,20 @@ class RecordingRunner:
             output.mkdir(parents=True, exist_ok=True)
             (output / Path(command[-1]).name).write_bytes(self.wheel_payload)
         elif stage == "verify":
+            wheel = Path(command[2])
+            provenance = json.loads(
+                builder.provenance_path(wheel).read_text(encoding="utf-8")
+            )
             report = Path(command[command.index("--report") + 1])
             report.parent.mkdir(parents=True, exist_ok=True)
             payload = {
                 "evidence": {"dependencies": ["libavcodec.dylib", "libwebp.dylib"]},
-                "identity": "runner-verified",
+                "identity": provenance["identity"],
+                "manifest_sha256": provenance["manifest_sha256"],
+                "python_tag": provenance["python_tag"],
+                "target_id": provenance["target_id"],
+                "wheel_filename": provenance["wheel_filename"],
+                "wheel_sha256": provenance["wheel_sha256"],
             }
             report.write_text(
                 json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
@@ -320,6 +329,21 @@ def test_cache_hit_is_reverified_without_recompiling(tmp_path: Path) -> None:
     assert second == first
     assert second_runner.stage_names == ["verify"]
     assert not any(command[0] == "uv" for command, _kwargs in second_runner.calls)
+
+
+def test_cache_hit_rejects_compliance_bytes_outside_the_bound_artifact_set(
+    tmp_path: Path,
+) -> None:
+    artifacts = ensure_media_stack(ROOT, tmp_path, runner=RecordingRunner())
+    artifacts.compliance_archive.write_bytes(b"replaced after verified build")
+    runner = RecordingRunner()
+
+    with pytest.raises(MediaStackBuildError) as raised:
+        ensure_media_stack(ROOT, tmp_path, runner=runner)
+
+    assert raised.value.stage == "artifact-set"
+    assert "validate" in raised.value.command
+    assert "verify" not in runner.stage_names
 
 
 def test_tool_environment_installs_only_the_target_specific_manifest_pins(
@@ -522,6 +546,46 @@ def test_provenance_binds_manifest_target_abi_filename_and_digest(
     }
 
 
+def test_artifact_set_binds_every_finished_output_to_verified_identity(
+    tmp_path: Path,
+) -> None:
+    artifacts = ensure_media_stack(ROOT, tmp_path, runner=RecordingRunner())
+
+    raw = artifacts.artifact_set.read_text(encoding="utf-8")
+    payload = json.loads(raw)
+    provenance = json.loads(artifacts.provenance.read_text(encoding="utf-8"))
+    report = json.loads(artifacts.report.read_text(encoding="utf-8"))
+
+    assert raw == json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+    assert payload == {
+        "compliance_archive": {
+            "filename": artifacts.compliance_archive.name,
+            "sha256": hashlib.sha256(
+                artifacts.compliance_archive.read_bytes()
+            ).hexdigest(),
+        },
+        "identity": artifacts.identity,
+        "manifest_sha256": hashlib.sha256(MANIFEST.read_bytes()).hexdigest(),
+        "provenance": {
+            "filename": artifacts.provenance.name,
+            "identity": provenance["identity"],
+            "sha256": hashlib.sha256(artifacts.provenance.read_bytes()).hexdigest(),
+        },
+        "python_abi": "cp313",
+        "schema_version": 1,
+        "target_id": "macos-arm64",
+        "verification_report": {
+            "filename": artifacts.report.name,
+            "identity": report["identity"],
+            "sha256": hashlib.sha256(artifacts.report.read_bytes()).hexdigest(),
+        },
+        "wheel": {
+            "filename": artifacts.wheel.name,
+            "sha256": hashlib.sha256(artifacts.wheel.read_bytes()).hexdigest(),
+        },
+    }
+
+
 def test_artifact_paths_are_canonical_finished_cache_paths(tmp_path: Path) -> None:
     artifacts = ensure_media_stack(ROOT, tmp_path, runner=RecordingRunner())
     expected_parent = (tmp_path / artifacts.identity / "finished").resolve()
@@ -533,6 +597,7 @@ def test_artifact_paths_are_canonical_finished_cache_paths(tmp_path: Path) -> No
             artifacts.provenance,
             artifacts.compliance_archive,
             artifacts.report,
+            artifacts.artifact_set,
         )
     )
 
@@ -546,6 +611,7 @@ def test_cli_json_prints_sorted_absolute_artifact_paths(
         provenance=finished / "wheel.whl.provenance.json",
         compliance_archive=finished / "sources.tar.gz",
         report=finished / "report.json",
+        artifact_set=finished / "artifact-set.json",
         identity="identity",
     )
     monkeypatch.setattr(
@@ -558,6 +624,7 @@ def test_cli_json_prints_sorted_absolute_artifact_paths(
         == json.dumps(
             {
                 "compliance_archive": str(artifacts.compliance_archive),
+                "artifact_set": str(artifacts.artifact_set),
                 "identity": "identity",
                 "provenance": str(artifacts.provenance),
                 "report": str(artifacts.report),

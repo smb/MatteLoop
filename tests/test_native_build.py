@@ -1,6 +1,9 @@
 import contextlib
 import hashlib
+import json
+import os
 import shutil
+import stat
 import subprocess
 import sys
 import zipfile
@@ -65,12 +68,74 @@ def _wheel(path: Path, *, nested_av: bool = False, native: bool = True) -> Path:
 def _artifacts(root: Path, *, identity: str = "identity") -> MediaStackArtifacts:
     wheel = _wheel(root / "av-16.1.0.whl")
     provenance = wheel.with_name(f"{wheel.name}.provenance.json")
-    provenance.write_text("{}", encoding="utf-8")
+    manifest = _project_manifest(root)
+    manifest_sha256 = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    wheel_sha256 = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    provenance_payload = {
+        "identity": identity,
+        "manifest_sha256": manifest_sha256,
+        "python_tag": "cp313",
+        "target_id": "macos-arm64",
+        "wheel_filename": wheel.name,
+        "wheel_sha256": wheel_sha256,
+    }
+    provenance.write_text(_canonical_json(provenance_payload), encoding="utf-8")
     compliance = root / f"MatteLoop-media-sources-macos-arm64-{identity}.tar.gz"
     compliance.write_bytes(b"exact compliance archive")
     report = root / "verification-report.json"
-    report.write_text("{}", encoding="utf-8")
-    return MediaStackArtifacts(wheel, provenance, compliance, report, identity)
+    report.write_text(_canonical_json(provenance_payload), encoding="utf-8")
+    artifact_set = wheel.with_name(f"{wheel.name}.artifact-set.json")
+    artifact_set.write_text(
+        _canonical_json(
+            {
+                "compliance_archive": {
+                    "filename": compliance.name,
+                    "sha256": hashlib.sha256(compliance.read_bytes()).hexdigest(),
+                },
+                "identity": identity,
+                "manifest_sha256": manifest_sha256,
+                "provenance": {
+                    "filename": provenance.name,
+                    "identity": identity,
+                    "sha256": hashlib.sha256(provenance.read_bytes()).hexdigest(),
+                },
+                "python_abi": "cp313",
+                "schema_version": 1,
+                "target_id": "macos-arm64",
+                "verification_report": {
+                    "filename": report.name,
+                    "identity": identity,
+                    "sha256": hashlib.sha256(report.read_bytes()).hexdigest(),
+                },
+                "wheel": {"filename": wheel.name, "sha256": wheel_sha256},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return MediaStackArtifacts(
+        wheel, provenance, compliance, report, artifact_set, identity
+    )
+
+
+def _project_manifest(root: Path) -> Path:
+    local = root / "project" / "packaging" / "media-stack" / "manifest.toml"
+    if local.is_file():
+        return local
+    return (
+        Path(__file__).resolve().parents[1]
+        / "packaging"
+        / "media-stack"
+        / "manifest.toml"
+    )
+
+
+def _canonical_json(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
+
+
+def _verified_report(artifacts: MediaStackArtifacts) -> SimpleNamespace:
+    provenance = json.loads(artifacts.provenance.read_text(encoding="utf-8"))
+    return SimpleNamespace(**provenance)
 
 
 def test_native_build_rejects_deferred_linux_packaging(tmp_path: Path) -> None:
@@ -323,7 +388,7 @@ def test_explicit_media_wheel_is_verified_and_extracted_without_installing_it(
     def verify(wheel: Path, manifest: Path, target: BuildTarget) -> SimpleNamespace:
         assert wheel.with_name(f"{wheel.name}.provenance.json").is_file()
         verified.append((wheel, manifest, target))
-        return SimpleNamespace(identity="explicit")
+        return _verified_report(artifacts)
 
     def unexpected_builder(*_args: object, **_kwargs: object) -> MediaStackArtifacts:
         raise AssertionError("explicit wheel unexpectedly requested a rebuild")
@@ -348,6 +413,66 @@ def test_explicit_media_wheel_is_verified_and_extracted_without_installing_it(
     assert venv_marker.read_text(encoding="utf-8") == "development environment"
 
 
+def test_explicit_media_wheel_rejects_tampered_compliance_archive(
+    tmp_path: Path,
+) -> None:
+    root = _project_root(tmp_path)
+    artifacts = _artifacts(tmp_path, identity="explicit")
+    artifacts.compliance_archive.write_bytes(b"unbound replacement")
+
+    with pytest.raises(ValueError, match="artifact set"):
+        native_build.prepare_media_stack(
+            tmp_path / "extracted",
+            root=root,
+            media_wheel=artifacts.wheel,
+            target=MACOS,
+            verify=lambda *_args: _verified_report(artifacts),
+        )
+
+
+@pytest.mark.parametrize(
+    "field_path",
+    (
+        "identity",
+        "manifest_sha256",
+        "python_abi",
+        "target_id",
+        "wheel.filename",
+        "wheel.sha256",
+        "provenance.filename",
+        "provenance.identity",
+        "provenance.sha256",
+        "verification_report.filename",
+        "verification_report.identity",
+        "verification_report.sha256",
+        "compliance_archive.filename",
+        "compliance_archive.sha256",
+    ),
+)
+def test_explicit_media_wheel_rejects_every_tampered_artifact_set_field(
+    tmp_path: Path, field_path: str
+) -> None:
+    root = _project_root(tmp_path)
+    artifacts = _artifacts(tmp_path, identity="explicit")
+    binding = artifacts.artifact_set
+    payload = json.loads(binding.read_text(encoding="utf-8"))
+    parent = payload
+    parts = field_path.split(".")
+    for part in parts[:-1]:
+        parent = parent[part]
+    parent[parts[-1]] = "tampered"
+    binding.write_text(_canonical_json(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="artifact set"):
+        native_build.prepare_media_stack(
+            tmp_path / "extracted",
+            root=root,
+            media_wheel=artifacts.wheel,
+            target=MACOS,
+            verify=lambda *_args: _verified_report(artifacts),
+        )
+
+
 @pytest.mark.parametrize("nested_av", (False, True))
 def test_wheel_extraction_requires_exactly_one_top_level_av_package(
     tmp_path: Path, nested_av: bool
@@ -368,6 +493,71 @@ def test_wheel_extraction_requires_a_native_pyav_extension(tmp_path: Path) -> No
 
     with pytest.raises(ValueError, match="native .so or .pyd"):
         native_build.extract_wheel_package(wheel, tmp_path / "extracted")
+
+
+@pytest.mark.parametrize(
+    "unsafe_name",
+    (
+        "../outside.py",
+        "/absolute.py",
+        "C:\\outside.py",
+        "av\\..\\outside.py",
+        "av//empty.py",
+        "av/./dot.py",
+    ),
+)
+def test_wheel_extraction_rejects_unsafe_member_paths_before_writing(
+    tmp_path: Path, unsafe_name: str
+) -> None:
+    wheel = tmp_path / "candidate.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("av/__init__.py", "")
+        archive.writestr("av/_core.so", b"native")
+        archive.writestr(unsafe_name, b"unsafe")
+    destination = tmp_path / "extracted"
+
+    with pytest.raises(ValueError, match="unsafe wheel member path"):
+        native_build.extract_wheel_package(wheel, destination)
+
+    assert not destination.exists()
+    assert not (tmp_path / "outside.py").exists()
+
+
+@pytest.mark.parametrize("file_type", (stat.S_IFLNK, stat.S_IFIFO))
+def test_wheel_extraction_rejects_links_and_special_files_before_writing(
+    tmp_path: Path, file_type: int
+) -> None:
+    wheel = tmp_path / "candidate.whl"
+    unsafe = zipfile.ZipInfo("av/unsafe")
+    unsafe.create_system = 3
+    unsafe.external_attr = (file_type | 0o777) << 16
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("av/__init__.py", "")
+        archive.writestr("av/_core.so", b"native")
+        archive.writestr(unsafe, b"target")
+    destination = tmp_path / "extracted"
+
+    with pytest.raises(ValueError, match="unsafe wheel member type"):
+        native_build.extract_wheel_package(wheel, destination)
+
+    assert not destination.exists()
+
+
+def test_wheel_extraction_rejects_normalized_case_collisions_before_writing(
+    tmp_path: Path,
+) -> None:
+    wheel = tmp_path / "candidate.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("av/__init__.py", "")
+        archive.writestr("av/_core.so", b"native")
+        archive.writestr("av/module.py", b"first")
+        archive.writestr("AV\\MODULE.py", b"second")
+    destination = tmp_path / "extracted"
+
+    with pytest.raises(ValueError, match="duplicate wheel member path"):
+        native_build.extract_wheel_package(wheel, destination)
+
+    assert not destination.exists()
 
 
 def test_bundle_media_gate_aggregates_forbidden_and_gpl_entries(
@@ -445,6 +635,71 @@ def test_successful_native_build_uses_extracted_av_and_publishes_compliance(
     )
 
 
+def test_failed_smoke_does_not_publish_new_compliance_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = tmp_path / "dist" / "MatteLoop.app"
+    executable = artifact / "Contents" / "MacOS" / "matteloop"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"bundle")
+    compliance = tmp_path / "MatteLoop-media-sources-macos-arm64-identity.tar.gz"
+    compliance.write_bytes(b"candidate evidence")
+    prepared = SimpleNamespace(
+        av_directory=tmp_path / "extracted" / "av",
+        compliance_archive=compliance,
+        target=MACOS,
+        contract=CONTRACT,
+        identity="identity",
+    )
+    _stub_native_main(
+        monkeypatch, tmp_path, artifact, prepared, returncodes=(0, 7)
+    )
+
+    assert native_build.main([]) == 7
+    published = artifact.parent / compliance.name
+    assert not published.exists()
+    assert not published.with_name(f"{published.name}.sha256").exists()
+    assert not tuple(artifact.parent.glob(f".{published.name}.*"))
+
+
+def test_failed_second_compliance_publication_restores_prior_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = tmp_path / "dist" / "MatteLoop.app"
+    executable = artifact / "Contents" / "MacOS" / "matteloop"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"bundle")
+    compliance = tmp_path / "MatteLoop-media-sources-macos-arm64-identity.tar.gz"
+    compliance.write_bytes(b"new archive")
+    published = artifact.parent / compliance.name
+    checksum = published.with_name(f"{published.name}.sha256")
+    published.write_bytes(b"prior archive")
+    checksum.write_bytes(b"prior checksum")
+    prepared = SimpleNamespace(
+        av_directory=tmp_path / "extracted" / "av",
+        compliance_archive=compliance,
+        target=MACOS,
+        contract=CONTRACT,
+        identity="identity",
+    )
+    _stub_native_main(monkeypatch, tmp_path, artifact, prepared)
+    real_replace = os.replace
+
+    def fail_checksum_publication(source: object, destination: object) -> None:
+        source_path = Path(source)
+        if Path(destination) == checksum and source_path.name.endswith(".tmp"):
+            raise OSError("injected checksum publication failure")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", fail_checksum_publication)
+
+    assert native_build.main([]) == 1
+    assert published.read_bytes() == b"prior archive"
+    assert checksum.read_bytes() == b"prior checksum"
+    assert not tuple(artifact.parent.glob(f".{published.name}.*"))
+    assert not tuple(artifact.parent.glob(f".{checksum.name}.*"))
+
+
 def _stub_native_main(
     monkeypatch: pytest.MonkeyPatch,
     root: Path,
@@ -452,6 +707,7 @@ def _stub_native_main(
     prepared: SimpleNamespace,
     *,
     received_av: list[Path] | None = None,
+    returncodes: tuple[int, ...] = (0, 0),
 ) -> list[list[str]]:
     commands: list[list[str]] = []
     monkeypatch.setattr(native_build, "ROOT", root)
@@ -476,7 +732,7 @@ def _stub_native_main(
 
     def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         commands.append(command)
-        return subprocess.CompletedProcess(command, 0)
+        return subprocess.CompletedProcess(command, returncodes[len(commands) - 1])
 
     monkeypatch.setattr(native_build, "prepare_temporary_spec", prepare_spec)
     monkeypatch.setattr(native_build.subprocess, "run", run)

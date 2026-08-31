@@ -8,18 +8,25 @@ import configparser
 import contextlib
 import hashlib
 import importlib.metadata
+import os
 import platform as platform_module
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+import uuid
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
-from pathlib import Path
-from zipfile import BadZipFile, ZipFile
+from pathlib import Path, PureWindowsPath
+from zipfile import BadZipFile, ZipFile, ZipInfo
 
 if __package__:
+    from scripts.media_stack.artifact_set import (
+        artifact_set_path,
+        validate_artifact_set,
+    )
     from scripts.media_stack.builder import MediaStackArtifacts, ensure_media_stack
     from scripts.media_stack.manifest import VerificationContract, load_manifest
     from scripts.media_stack.platforms import BuildTarget, detect_target
@@ -30,6 +37,7 @@ if __package__:
         verify_media_wheel,
     )
 else:
+    from media_stack.artifact_set import artifact_set_path, validate_artifact_set
     from media_stack.builder import MediaStackArtifacts, ensure_media_stack
     from media_stack.manifest import VerificationContract, load_manifest
     from media_stack.platforms import BuildTarget, detect_target
@@ -71,6 +79,14 @@ class PreparedMediaStack:
     target: BuildTarget
     contract: VerificationContract
     identity: str
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedComplianceEvidence:
+    archive_temporary: Path
+    checksum_temporary: Path
+    archive: Path
+    checksum: Path
 
 
 def deploy_executable(
@@ -230,17 +246,14 @@ def prepare_temporary_spec(
 
 def extract_wheel_package(wheel: Path, destination: Path) -> Path:
     """Extract one native top-level PyAV package from a verified wheel."""
-    destination.mkdir(parents=True, exist_ok=True)
     try:
         with ZipFile(wheel) as archive:
-            archive.extractall(destination)
+            members = _preflight_wheel_members(archive.infolist())
+            _extract_wheel_members(archive, members, destination)
     except (BadZipFile, OSError) as error:
         raise ValueError(f"could not extract media wheel {wheel}: {error}") from error
-    package_roots = tuple(
-        path.parent for path in destination.rglob("av/__init__.py")
-    )
     expected = destination / "av"
-    if package_roots != (expected,):
+    if not (expected / "__init__.py").is_file():
         raise ValueError("media wheel must contain exactly one top-level av package")
     if not any(
         path.is_file() and path.suffix.casefold() in {".so", ".pyd"}
@@ -248,6 +261,57 @@ def extract_wheel_package(wheel: Path, destination: Path) -> Path:
     ):
         raise ValueError("media wheel av package must contain a native .so or .pyd")
     return expected
+
+
+def _preflight_wheel_members(
+    entries: list[ZipInfo],
+) -> tuple[tuple[ZipInfo, tuple[str, ...]], ...]:
+    members: list[tuple[ZipInfo, tuple[str, ...]]] = []
+    seen: set[str] = set()
+    packages: set[tuple[str, ...]] = set()
+    for entry in entries:
+        normalized = entry.filename.replace("\\", "/")
+        parts = tuple(normalized.split("/"))
+        if _unsafe_wheel_path(normalized, parts):
+            raise ValueError(f"unsafe wheel member path: {entry.filename}")
+        kind = stat.S_IFMT(entry.external_attr >> 16)
+        if kind not in {0, stat.S_IFREG, stat.S_IFDIR}:
+            raise ValueError(f"unsafe wheel member type: {entry.filename}")
+        key = "/".join(parts).casefold()
+        if key in seen:
+            raise ValueError(f"duplicate wheel member path: {entry.filename}")
+        seen.add(key)
+        members.append((entry, parts))
+        if len(parts) >= 2 and parts[-2:] == ("av", "__init__.py"):
+            packages.add(parts[:-1])
+    if packages != {("av",)}:
+        raise ValueError("media wheel must contain exactly one top-level av package")
+    return tuple(members)
+
+
+def _unsafe_wheel_path(name: str, parts: tuple[str, ...]) -> bool:
+    return (
+        not name
+        or name.startswith("/")
+        or bool(PureWindowsPath(name).drive)
+        or any(part in {"", ".", ".."} for part in parts)
+    )
+
+
+def _extract_wheel_members(
+    archive: ZipFile,
+    members: tuple[tuple[ZipInfo, tuple[str, ...]], ...],
+    destination: Path,
+) -> None:
+    destination.mkdir(parents=True)
+    for entry, parts in members:
+        target = destination.joinpath(*parts)
+        if entry.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with archive.open(entry) as source, target.open("xb") as output:
+            shutil.copyfileobj(source, output)
 
 
 def prepare_media_stack(
@@ -296,10 +360,10 @@ def bundle_media_errors(
     )
 
 
-def publish_compliance_archive(
+def prepare_compliance_evidence(
     archive: Path, destination: Path, target: BuildTarget, identity: str
-) -> tuple[Path, Path]:
-    """Copy exact target compliance evidence beside the native artifact."""
+) -> PreparedComplianceEvidence:
+    """Prepare an unpublished compliance pair beside the native artifact."""
     expected_name = f"MatteLoop-media-sources-{target.target_id}-{identity}.tar.gz"
     if archive.name != expected_name:
         raise ValueError(
@@ -308,13 +372,65 @@ def publish_compliance_archive(
         )
     destination.mkdir(parents=True, exist_ok=True)
     published = destination / expected_name
-    shutil.copy2(archive, published)
     checksum = published.with_name(f"{published.name}.sha256")
-    checksum.write_text(
-        f"{_sha256(published)}  {published.name}\n",
-        encoding="utf-8",
+    token = uuid.uuid4().hex
+    archive_temporary = destination / f".{published.name}.{token}.tmp"
+    checksum_temporary = destination / f".{checksum.name}.{token}.tmp"
+    try:
+        _copy_fsynced(archive, archive_temporary)
+        _write_fsynced(
+            checksum_temporary,
+            f"{_sha256(archive_temporary)}  {published.name}\n".encode(),
+        )
+    except OSError:
+        archive_temporary.unlink(missing_ok=True)
+        checksum_temporary.unlink(missing_ok=True)
+        raise
+    return PreparedComplianceEvidence(
+        archive_temporary, checksum_temporary, published, checksum
     )
-    return published, checksum
+
+
+def publish_compliance_evidence(evidence: PreparedComplianceEvidence) -> None:
+    """Replace a compliance pair, restoring prior bytes on partial failure."""
+    token = uuid.uuid4().hex
+    pairs = (
+        (evidence.archive_temporary, evidence.archive),
+        (evidence.checksum_temporary, evidence.checksum),
+    )
+    backups = tuple(
+        final.with_name(f".{final.name}.{token}.bak") for _temporary, final in pairs
+    )
+    moved: list[tuple[Path, Path]] = []
+    published: list[Path] = []
+    try:
+        for (_temporary, final), backup in zip(pairs, backups, strict=True):
+            if final.exists():
+                os.replace(final, backup)
+                moved.append((final, backup))
+        for temporary, final in pairs:
+            os.replace(temporary, final)
+            published.append(final)
+    except OSError:
+        for final in reversed(published):
+            final.unlink(missing_ok=True)
+        for final, backup in reversed(moved):
+            os.replace(backup, final)
+        _discard_compliance_evidence(evidence, backups)
+        raise
+    for backup in backups:
+        backup.unlink(missing_ok=True)
+
+
+def _discard_compliance_evidence(
+    evidence: PreparedComplianceEvidence, backups: tuple[Path, ...] = ()
+) -> None:
+    for path in (
+        evidence.archive_temporary,
+        evidence.checksum_temporary,
+        *backups,
+    ):
+        path.unlink(missing_ok=True)
 
 
 def expected_artifact(os_name: str, dist_path: Path = DIST_PATH) -> Path:
@@ -442,15 +558,21 @@ def _finish_native_build(
         for error in media_errors:
             print(f"  - {error}", file=sys.stderr)
         return 1
+    return _smoke_and_publish_evidence(artifact, prepared, size)
+
+
+def _smoke_and_publish_evidence(
+    artifact: Path, prepared: PreparedMediaStack, size: int
+) -> int:
     try:
-        publish_compliance_archive(
+        evidence = prepare_compliance_evidence(
             prepared.compliance_archive,
             artifact.parent,
             prepared.target,
             prepared.identity,
         )
     except (OSError, ValueError) as error:
-        print(f"Could not publish media compliance evidence: {error}", file=sys.stderr)
+        print(f"Could not prepare media compliance evidence: {error}", file=sys.stderr)
         return 1
     smoke = subprocess.run(
         [str(Path(sys.executable)), "packaging/smoke_child.py", "dist"],
@@ -458,12 +580,18 @@ def _finish_native_build(
         check=False,
     )
     if smoke.returncode != 0:
+        _discard_compliance_evidence(evidence)
         print(
             "Native build produced a bundle that failed the offline smoke test "
             f"(exit status {smoke.returncode}).",
             file=sys.stderr,
         )
         return smoke.returncode or 1
+    try:
+        publish_compliance_evidence(evidence)
+    except OSError as error:
+        print(f"Could not publish media compliance evidence: {error}", file=sys.stderr)
+        return 1
     print(f"Built {artifact.relative_to(ROOT)} ({size / 1024**2:.1f} MiB).")
     return 0
 
@@ -538,16 +666,28 @@ def _verified_explicit_artifacts(
     if not sidecar.is_file():
         raise ValueError(f"provenance sidecar is missing: {sidecar}")
     report = verify(wheel, manifest_path, target)
+    report_path = wheel.parent / "verification-report.json"
     compliance = wheel.parent / (
         f"MatteLoop-media-sources-{target.target_id}-{report.identity}.tar.gz"
     )
     if not compliance.is_file():
         raise ValueError(f"media compliance archive is missing: {compliance}")
+    binding = artifact_set_path(wheel)
+    validate_artifact_set(
+        binding,
+        wheel,
+        sidecar,
+        report_path,
+        compliance,
+        verified_report=_verification_fields(report),
+        target=target,
+    )
     return MediaStackArtifacts(
         wheel,
         sidecar,
         compliance,
-        wheel.parent / "verification-report.json",
+        report_path,
+        binding,
         report.identity,
     )
 
@@ -558,6 +698,34 @@ def _sha256(path: Path) -> str:
         while chunk := source.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _copy_fsynced(source: Path, destination: Path) -> None:
+    with source.open("rb") as input_file, destination.open("xb") as output:
+        shutil.copyfileobj(input_file, output)
+        output.flush()
+        os.fsync(output.fileno())
+
+
+def _write_fsynced(destination: Path, contents: bytes) -> None:
+    with destination.open("xb") as output:
+        output.write(contents)
+        output.flush()
+        os.fsync(output.fileno())
+
+
+def _verification_fields(report: VerificationReport) -> dict[str, object]:
+    return {
+        name: getattr(report, name)
+        for name in (
+            "identity",
+            "manifest_sha256",
+            "python_tag",
+            "target_id",
+            "wheel_filename",
+            "wheel_sha256",
+        )
+    }
 
 
 if __name__ == "__main__":

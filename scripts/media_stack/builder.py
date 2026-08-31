@@ -16,6 +16,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .artifact_set import (
+    artifact_set_path,
+    create_artifact_set,
+    validate_artifact_set,
+)
 from .compliance import create_compliance_archive
 from .manifest import (
     MediaStackManifest,
@@ -43,6 +48,7 @@ class MediaStackArtifacts:
     provenance: Path
     compliance_archive: Path
     report: Path
+    artifact_set: Path
     identity: str
 
 
@@ -251,6 +257,7 @@ def _cached_artifacts(context: _BuildContext) -> MediaStackArtifacts | None:
             )
         ).resolve(),
         report=(finished / "verification-report.json").resolve(),
+        artifact_set=artifact_set_path(wheel),
         identity=context.identity,
     )
     paths = (
@@ -258,14 +265,43 @@ def _cached_artifacts(context: _BuildContext) -> MediaStackArtifacts | None:
         artifacts.provenance,
         artifacts.compliance_archive,
         artifacts.report,
+        artifacts.artifact_set,
     )
     return artifacts if all(path.is_file() for path in paths) else None
 
 
 def _reverify_cached(context: _BuildContext, artifacts: MediaStackArtifacts) -> None:
+    try:
+        validate_artifact_set(
+            artifacts.artifact_set,
+            artifacts.wheel,
+            artifacts.provenance,
+            artifacts.report,
+            artifacts.compliance_archive,
+            verified_report=_load_json_object(artifacts.report),
+            target=context.target,
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        raise MediaStackBuildError(
+            "artifact-set",
+            ("validate", str(artifacts.artifact_set)),
+            1,
+            context.staging,
+        ) from error
     staged_report = context.staging / "verification-report.json"
     _verify(context, artifacts.wheel, staged_report)
+    staged_binding = create_artifact_set(
+        artifacts.wheel,
+        artifacts.provenance,
+        staged_report,
+        artifacts.compliance_archive,
+        identity=context.identity,
+        manifest_sha256=_sha256(context.manifest_path),
+        target=context.target,
+        destination=context.staging / artifacts.artifact_set.name,
+    )
     _promote_file(staged_report, artifacts.report)
+    _promote_file(staged_binding, artifacts.artifact_set)
 
 
 def _build_media_stack(context: _BuildContext) -> MediaStackArtifacts:
@@ -290,7 +326,16 @@ def _build_media_stack(context: _BuildContext) -> MediaStackArtifacts:
             sidecar,
             report,
         )
-        return _promote_build(context, wheel, sidecar, report, archive)
+        binding = create_artifact_set(
+            wheel,
+            sidecar,
+            report,
+            archive,
+            identity=context.identity,
+            manifest_sha256=_sha256(context.manifest_path),
+            target=context.target,
+        )
+        return _promote_build(context, wheel, sidecar, report, archive, binding)
     except MediaStackBuildError:
         raise
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as error:
@@ -551,11 +596,12 @@ def _promote_build(
     sidecar: Path,
     report: Path,
     archive: Path,
+    binding: Path,
 ) -> MediaStackArtifacts:
     finished = (context.identity_dir / "finished").resolve()
     candidate = context.identity_dir / f".finished-candidate-{uuid.uuid4().hex}"
     backup = context.identity_dir / f".finished-backup-{uuid.uuid4().hex}"
-    sources = (wheel, sidecar, report, archive)
+    sources = (wheel, sidecar, report, archive, binding)
     destinations = [finished / path.name for path in sources]
     try:
         candidate.mkdir()
@@ -576,6 +622,7 @@ def _promote_build(
         provenance=destinations[1],
         report=destinations[2],
         compliance_archive=destinations[3],
+        artifact_set=destinations[4],
         identity=context.identity,
     )
 
@@ -689,16 +736,30 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
     else:
         print(f"Media stack identity: {artifacts.identity}")
-        for name in ("wheel", "provenance", "compliance_archive", "report"):
+        for name in (
+            "wheel",
+            "provenance",
+            "compliance_archive",
+            "report",
+            "artifact_set",
+        ):
             print(f"{name}: {payload[name]}")
     return 0
 
 
 def _artifact_payload(artifacts: MediaStackArtifacts) -> dict[str, str]:
     return {
+        "artifact_set": str(artifacts.artifact_set.resolve()),
         "compliance_archive": str(artifacts.compliance_archive.resolve()),
         "identity": artifacts.identity,
         "provenance": str(artifacts.provenance.resolve()),
         "report": str(artifacts.report.resolve()),
         "wheel": str(artifacts.wheel.resolve()),
     }
+
+
+def _load_json_object(path: Path) -> dict[str, object]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path.name} must contain a JSON object")
+    return payload
