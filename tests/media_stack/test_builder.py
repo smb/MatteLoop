@@ -385,8 +385,13 @@ def test_macos_repair_inherits_environment_with_staged_libraries_first(
     repair_command, repair_kwargs = next(
         (command, kwargs)
         for command, kwargs in runner.calls
-        if "delocate-wheel" in command[0]
+        if any("delocate-wheel" in argument for argument in command[:2])
     )
+    tool_python = Path(repair_command[0])
+    delocate_script = Path(repair_command[1])
+    assert tool_python.name == "python"
+    assert delocate_script == tool_python.with_name("delocate-wheel")
+    assert repair_command[2] == "-w"
     raw_wheel = Path(repair_command[-1])
     staged_libraries = raw_wheel.parent.parent / "prefix" / "lib"
     environment = repair_kwargs["env"]

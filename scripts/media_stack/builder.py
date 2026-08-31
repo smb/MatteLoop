@@ -399,6 +399,7 @@ def _build_and_repair_wheel(
     )
     repair_environment = None
     if context.target.target_id == "macos-arm64":
+        repair = (str(context.tool_python), *repair)
         repair_environment = os.environ.copy()
         staged_libraries = str(prefix / "lib")
         existing_libraries = repair_environment.get("DYLD_LIBRARY_PATH")
