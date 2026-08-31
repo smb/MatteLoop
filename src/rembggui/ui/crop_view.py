@@ -22,3 +22,4 @@ def render_source_editor(
     canvas.apply_presentation(model.crop, active=model.crop_enabled, editable=editable)
     inspector.apply_crop(model.crop, model.crop_enabled, editable)
     inspector.apply_parameters(model.parameters, editable)
+    inspector.set_model_status(model.model_status)

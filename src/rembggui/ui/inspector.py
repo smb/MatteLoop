@@ -5,15 +5,16 @@ from __future__ import annotations
 from PySide6.QtCore import QSettings, QSignalBlocker, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QDoubleSpinBox,
     QFormLayout,
     QFrame,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QListView,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QToolButton,
     QVBoxLayout,
@@ -51,6 +52,11 @@ from rembggui.ui.aligned_rows import (
     AlignedRowDelegate,
     install_aligned_row,
     status_icon,
+)
+from rembggui.ui.compact_widgets import (
+    ElidingComboBox,
+    MiddleElidingLineEdit,
+    compact_field,
 )
 from rembggui.ui.crop_presentation import CropPresentation
 from rembggui.ui.parameter_presentation import (
@@ -148,7 +154,7 @@ class Inspector(QFrame):
         self._connect_parameter_controls()
 
     def _build_segmentation_parameter_controls(self) -> None:
-        self.model_picker = QComboBox()
+        self.model_picker = compact_field(ElidingComboBox())
         self.model_picker.setObjectName("model_picker")
         self.model_picker.setAccessibleName("Segmentation model")
         self.model_picker.setView(QListView())
@@ -181,11 +187,21 @@ class Inspector(QFrame):
         self.model_picker.setCurrentIndex(
             self.model_picker.findData(catalog.default_id)
         )
-        self.provider_picker = QComboBox()
+        self.model_status = QLabel()
+        self.model_status.setObjectName("model_status")
+        self.model_status.setAccessibleName("Model status")
+        self.model_status.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
+        self.model_status.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.set_model_status("ready")
+        self.provider_picker = compact_field(ElidingComboBox())
         self.provider_picker.setObjectName("provider_picker")
         self.provider_picker.setAccessibleName("Rechenbeschleunigung")
         self._set_provider_options(catalog.default_id)
-        self.edge_picker = QComboBox()
+        self.edge_picker = compact_field(ElidingComboBox())
         self.edge_picker.setObjectName("edge_picker")
         self.edge_picker.setAccessibleName("Edge treatment")
         self.edge_picker.addItem("Standard", EdgeMode.STANDARD)
@@ -193,7 +209,7 @@ class Inspector(QFrame):
         self.model_picker.currentIndexChanged.connect(self._update_model_accessibility)
 
     def _build_sampling_parameter_controls(self) -> None:
-        self.fps_spinbox = QSpinBox()
+        self.fps_spinbox = compact_field(QSpinBox())
         self.fps_spinbox.setObjectName("output_fps")
         self.fps_spinbox.setAccessibleName("Output FPS")
         self.fps_spinbox.setRange(1, 240)
@@ -215,7 +231,7 @@ class Inspector(QFrame):
             "alpha_threshold", 0.0, 100.0, 1
         )
         self.alpha_threshold_spinbox.setSuffix(" %")
-        self.padding_spinbox = QSpinBox()
+        self.padding_spinbox = compact_field(QSpinBox())
         self.padding_spinbox.setObjectName("padding")
         self.padding_spinbox.setAccessibleName("Padding pixels")
         self.padding_spinbox.setRange(0, 2_147_483_647)
@@ -225,16 +241,18 @@ class Inspector(QFrame):
         self.stretch_spinbox.setAccessibleName("Horizontal stretch")
 
     def _build_output_parameter_controls(self) -> None:
-        self.output_directory_edit = QLineEdit()
+        self.output_directory_edit = compact_field(MiddleElidingLineEdit())
         self.output_directory_edit.setObjectName("output_directory")
         self.output_directory_edit.setAccessibleName("Output directory")
+        self.output_directory_edit.setProperty("mono", True)
         self.output_directory_edit.setReadOnly(True)
         self.output_directory_button = QPushButton("Choose…")
         self.output_directory_button.setObjectName("choose_output_directory")
         self.output_directory_button.setAccessibleName("Choose output directory")
-        self.output_filename_edit = QLineEdit()
+        self.output_filename_edit = compact_field(QLineEdit())
         self.output_filename_edit.setObjectName("output_filename")
         self.output_filename_edit.setAccessibleName("Output filename")
+        self.output_filename_edit.setProperty("mono", True)
         self.output_filename_edit.setPlaceholderText("filename.webp")
         self.output_filename_edit.setToolTip(
             "Use one non-empty filename ending in .webp; "
@@ -446,9 +464,10 @@ class Inspector(QFrame):
         self.duration_spinbox.setValue(float(presentation.duration or 0))
 
     def _time_spinbox(self, name: str) -> QDoubleSpinBox:
-        field = QDoubleSpinBox()
+        field = compact_field(QDoubleSpinBox())
         field.setObjectName(f"{name}_time")
         field.setAccessibleName(name.capitalize())
+        field.setProperty("mono", True)
         field.setDecimals(3)
         field.setRange(0.0, 1.0)
         field.setSingleStep(0.001)
@@ -458,8 +477,9 @@ class Inspector(QFrame):
     def _decimal_spinbox(
         self, name: str, minimum: float, maximum: float, decimals: int
     ) -> QDoubleSpinBox:
-        field = QDoubleSpinBox()
+        field = compact_field(QDoubleSpinBox())
         field.setObjectName(name)
+        field.setProperty("mono", True)
         field.setDecimals(decimals)
         field.setRange(minimum, maximum)
         field.setSingleStep(1.0 if decimals == 0 else 0.1)
@@ -525,9 +545,10 @@ class Inspector(QFrame):
             field.setEnabled(available)
 
     def _crop_spinbox(self, name: str) -> QSpinBox:
-        field = QSpinBox()
+        field = compact_field(QSpinBox())
         field.setObjectName(f"crop_{name}")
         field.setAccessibleName(f"Crop {name}")
+        field.setProperty("mono", True)
         field.setMinimum(0 if name in {"x", "y"} else 1)
         field.setMaximum(1)
         return field
@@ -556,16 +577,14 @@ class Inspector(QFrame):
         layout = QVBoxLayout(section)
         layout.setContentsMargins(0, 0, 0, 0)
         button = QToolButton()
-        button.setText(title)
+        button.setText(title.replace("&", "&&"))
         button.setCheckable(True)
         button.setObjectName(f"{key}_disclosure")
         button.setAccessibleName(title)
         body = QWidget()
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(0, 0, 8, 8)
-        copy = QLabel("Available when a video is ready")
-        copy.setProperty("secondary", True)
-        body_layout.addWidget(copy)
+        body_layout.setSpacing(8)
         if key == "segmentation":
             body_layout.addWidget(self._segmentation_controls())
             body_layout.addWidget(self.manage_models)
@@ -594,58 +613,92 @@ class Inspector(QFrame):
 
     def _crop_controls(self) -> QWidget:
         controls = QWidget()
-        layout = QFormLayout(controls)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout = self._form_layout(controls)
         layout.addRow(self.crop_toggle, self.crop_reset_button)
-        layout.addRow("X", self.crop_x_spinbox)
-        layout.addRow("Y", self.crop_y_spinbox)
-        layout.addRow("Width", self.crop_width_spinbox)
-        layout.addRow("Height", self.crop_height_spinbox)
+        layout.addRow(self._form_label("X"), self.crop_x_spinbox)
+        layout.addRow(self._form_label("Y"), self.crop_y_spinbox)
+        layout.addRow(self._form_label("Width"), self.crop_width_spinbox)
+        layout.addRow(self._form_label("Height"), self.crop_height_spinbox)
         return controls
 
     def _segmentation_controls(self) -> QWidget:
         controls = QWidget()
-        layout = QFormLayout(controls)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addRow("Model", self.model_picker)
-        layout.addRow("Rechenbeschleunigung", self.provider_picker)
-        layout.addRow("Edge treatment", self.edge_picker)
+        layout = self._form_layout(controls)
+        model_row = QWidget()
+        model_row.setObjectName("model_picker_row")
+        model_layout = QHBoxLayout(model_row)
+        model_layout.setContentsMargins(0, 0, 0, 0)
+        model_layout.setSpacing(8)
+        model_layout.addWidget(self.model_picker, 1)
+        model_layout.addWidget(self.model_status)
+        layout.addRow(self._form_label("Model"), model_row)
+        layout.addRow(self._form_label("Rechenbeschleunigung"), self.provider_picker)
+        layout.addRow(self._form_label("Edge treatment"), self.edge_picker)
         return controls
 
     def _time_controls(self) -> QWidget:
         controls = QWidget()
-        layout = QFormLayout(controls)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addRow("Output FPS", self.fps_spinbox)
-        layout.addRow(self.fps_warning)
-        layout.addRow("Start", self.start_spinbox)
-        layout.addRow("End", self.end_spinbox)
-        layout.addRow("Duration", self.duration_spinbox)
+        layout = self._form_layout(controls)
+        layout.addRow(self._form_label("Output FPS"), self.fps_spinbox)
+        layout.addRow(self._form_label(""), self.fps_warning)
+        layout.addRow(self._form_label("Start"), self.start_spinbox)
+        layout.addRow(self._form_label("End"), self.end_spinbox)
+        layout.addRow(self._form_label("Duration"), self.duration_spinbox)
         return controls
 
     def _cleanup_controls(self) -> QWidget:
         controls = QWidget()
-        layout = QFormLayout(controls)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addRow(self.trim_checkbox)
-        layout.addRow("Alpha threshold", self.alpha_threshold_spinbox)
-        layout.addRow("Padding", self.padding_spinbox)
-        layout.addRow("Horizontal stretch", self.stretch_spinbox)
+        layout = self._form_layout(controls)
+        layout.addRow(self._form_label(""), self.trim_checkbox)
+        layout.addRow(self._form_label("Alpha threshold"), self.alpha_threshold_spinbox)
+        layout.addRow(self._form_label("Padding"), self.padding_spinbox)
+        layout.addRow(self._form_label("Horizontal stretch"), self.stretch_spinbox)
         return controls
 
     def _output_controls(self) -> QWidget:
         controls = QWidget()
-        layout = QFormLayout(controls)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout = self._form_layout(controls)
         directory = QWidget()
         directory_layout = QVBoxLayout(directory)
         directory_layout.setContentsMargins(0, 0, 0, 0)
+        directory_layout.setSpacing(8)
         directory_layout.addWidget(self.output_directory_edit)
         directory_layout.addWidget(self.output_directory_button)
-        layout.addRow("Directory", directory)
-        layout.addRow("Filename", self.output_filename_edit)
-        layout.addRow("Maximum size", self.max_size_spinbox)
+        layout.addRow(self._form_label("Directory"), directory)
+        layout.addRow(self._form_label("Filename"), self.output_filename_edit)
+        layout.addRow(self._form_label("Maximum size"), self.max_size_spinbox)
         return controls
+
+    def _form_layout(self, controls: QWidget) -> QFormLayout:
+        layout = QFormLayout(controls)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setLabelAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        layout.setHorizontalSpacing(12)
+        layout.setVerticalSpacing(8)
+        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        return layout
+
+    @staticmethod
+    def _form_label(text: str) -> QLabel:
+        label = QLabel(text)
+        label.setFixedWidth(136)
+        label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        return label
+
+    def set_model_status(self, status: str) -> None:
+        """Render the presenter-derived model availability beside the picker."""
+        marker, label = {
+            "ready": ("●", "Ready"),
+            "downloading": ("◌", "Downloading"),
+            "not_cached": ("○", "Not cached"),
+        }.get(status, ("○", "Not cached"))
+        self.model_status.setText(f"{marker} {label}")
+        self.model_status.setProperty("status", status)
+        self.model_status.setAccessibleDescription(f"Model status: {label}")
+        self.model_status.style().unpolish(self.model_status)
+        self.model_status.style().polish(self.model_status)
 
     def parameter_tab_widgets(self) -> tuple[QWidget, ...]:
         """Return standard parameter controls in consequence order."""

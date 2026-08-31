@@ -47,6 +47,15 @@ from rembggui.jobs.thumbnails import (
     filmstrip_timestamps,
     generate_thumbnail,
 )
+from rembggui.ui.theme import (
+    ACCENT_COLOR,
+    BACKGROUND_COLOR,
+    CANVAS_COLOR,
+    CONTROL_COLOR,
+    DISABLED_COLOR,
+    MONO_FONT,
+    TEXT_COLOR,
+)
 from rembggui.ui.timeline_presentation import TimelinePresentation
 
 _FILMSTRIP_HEIGHT = 78
@@ -221,7 +230,7 @@ class TimelineWidget(QFrame):
 
     def _build_telemetry(self) -> None:
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(20, 132, 20, 10)
+        layout.setContentsMargins(16, 132, 16, 12)
         layout.setSpacing(12)
         self.timecode_label = QLabel("0:00.000")
         self.timecode_label.setObjectName("timeline_timecode")
@@ -244,7 +253,7 @@ class TimelineWidget(QFrame):
             self.range_label,
             self.range_status_label,
         ):
-            label.setFont(QFont("IBM Plex Mono", 9))
+            label.setFont(QFont(MONO_FONT, 9))
             label.setProperty("mono", True)
             label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             layout.addWidget(label)
@@ -319,14 +328,14 @@ class TimelineWidget(QFrame):
         del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.fillRect(self.rect(), QColor("#171B1E"))
+        painter.fillRect(self.rect(), QColor(BACKGROUND_COLOR))
         geometry = self._geometry
         if geometry is None:
-            painter.setPen(QColor("#8A949B"))
+            painter.setPen(QColor(DISABLED_COLOR))
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Timeline")
             return
         timeline = _qt_rect(geometry.visual["timeline"])
-        painter.fillRect(timeline, QColor("#22282C"))
+        painter.fillRect(timeline, QColor(CONTROL_COLOR))
         self._paint_thumbnails(painter, geometry, timeline)
         self._paint_excluded_ranges(painter, geometry, timeline)
         self._paint_range_controls(painter, geometry)
@@ -362,14 +371,17 @@ class TimelineWidget(QFrame):
             )
             pixmap = self._pixmaps.get(timestamp)
             if pixmap is None:
-                painter.fillRect(tile, QColor("#30383D"))
+                painter.fillRect(tile, QColor(DISABLED_COLOR))
             else:
                 painter.drawPixmap(tile.toRect(), pixmap)
+            self._paint_thumbnail_frame_number(painter, tile, timestamp)
 
     def _paint_excluded_ranges(
         self, painter: QPainter, geometry: InteractionGeometry, timeline: QRectF
     ) -> None:
         selected = _qt_rect(geometry.visual["range"])
+        overlay = QColor(CANVAS_COLOR)
+        overlay.setAlpha(105)
         painter.fillRect(
             QRectF(
                 timeline.left(),
@@ -377,7 +389,7 @@ class TimelineWidget(QFrame):
                 selected.left() - timeline.left(),
                 timeline.height(),
             ),
-            QColor(0, 0, 0, 105),
+            overlay,
         )
         painter.fillRect(
             QRectF(
@@ -386,26 +398,28 @@ class TimelineWidget(QFrame):
                 timeline.right() - selected.right(),
                 timeline.height(),
             ),
-            QColor(0, 0, 0, 105),
+            overlay,
         )
 
     def _paint_range_controls(
         self, painter: QPainter, geometry: InteractionGeometry
     ) -> None:
         selected = _qt_rect(geometry.visual["range"])
-        painter.setPen(QPen(QColor("#8AE6A2"), 2))
+        painter.setPen(QPen(QColor(ACCENT_COLOR), 2))
         painter.drawRect(selected.adjusted(0, 1, 0, -1))
         self._paint_handle(painter, geometry.visual["start_handle"], "IN")
         self._paint_handle(painter, geometry.visual["end_handle"], "OUT")
-        painter.fillRect(_qt_rect(geometry.visual["playhead"]), QColor("#F5D76E"))
+        painter.fillRect(_qt_rect(geometry.visual["playhead"]), QColor(ACCENT_COLOR))
 
     def _paint_focus(
         self, painter: QPainter, geometry: InteractionGeometry
     ) -> None:
-        painter.setPen(QPen(QColor("#8AE6A2"), 2))
-        painter.drawRect(
-            _qt_rect(geometry.focus["timeline"]).adjusted(2, 2, -2, -2)
-        )
+        target = geometry.dragged or geometry.focused or "playhead"
+        focused = geometry.focus.get(target)
+        if focused is None:
+            return
+        painter.setPen(QPen(QColor(ACCENT_COLOR), 2))
+        painter.drawRect(_qt_rect(focused).adjusted(-3, -3, 3, 3))
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
@@ -637,19 +651,43 @@ class TimelineWidget(QFrame):
             self._thumbnail_worker = None
 
     def _paint_handle(self, painter: QPainter, rect: RectF, label: str) -> None:
-        painter.fillRect(_qt_rect(rect), QColor("#8AE6A2"))
-        painter.setPen(QColor("#122018"))
+        painter.fillRect(_qt_rect(rect), QColor(ACCENT_COLOR))
+        painter.setPen(QColor(CANVAS_COLOR))
         painter.drawText(_qt_rect(rect), Qt.AlignmentFlag.AlignCenter, label)
+
+    def _paint_thumbnail_frame_number(
+        self, painter: QPainter, tile: QRectF, timestamp: Fraction
+    ) -> None:
+        if self._presentation is None:
+            return
+        painter.setFont(QFont(MONO_FONT, 8))
+        painter.setPen(QColor(TEXT_COLOR))
+        frame = absolute_frame_number(
+            timestamp, self._presentation.state.source_fps
+        )
+        painter.drawText(
+            tile.adjusted(4, 4, -4, -4), Qt.AlignmentFlag.AlignLeft, str(frame)
+        )
 
     def _paint_ruler(self, painter: QPainter, geometry: InteractionGeometry) -> None:
         if self._presentation is None:
             return
-        painter.setPen(QPen(QColor("#68747B"), 1))
+        painter.save()
+        painter.setFont(QFont(MONO_FONT, 8))
+        painter.setPen(QPen(QColor(DISABLED_COLOR), 1))
         duration = self._presentation.state.duration
-        for index in range(5):
-            timestamp = duration * index / 4
+        for index in range(41):
+            timestamp = duration * index / 40
             x = geometry.source_to_widget(PointF(float(timestamp), 0)).x
-            painter.drawLine(int(x), 104, int(x), 110)
+            major = index % 10 == 0
+            painter.drawLine(int(x), 104, int(x), 112 if major else 108)
+            if major:
+                painter.drawText(
+                    QRectF(x - 42, 114, 84, 16),
+                    Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+                    format_timecode(timestamp),
+                )
+        painter.restore()
 
 def _qt_rect(rect: RectF) -> QRectF:
     return QRectF(rect.x, rect.y, rect.width, rect.height)

@@ -4,11 +4,16 @@ from __future__ import annotations
 
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
-# DESIGN.md: result transparency uses this checkerboard pair.
-CHECKERBOARD_LIGHT = "#343A3F"
-CHECKERBOARD_DARK = "#252A2E"
+from rembggui.ui.theme import CHECKERBOARD_DARK, CHECKERBOARD_LIGHT
 
 
 class PreviewCanvas(QLabel):
@@ -18,6 +23,7 @@ class PreviewCanvas(QLabel):
         super().__init__(parent)
         self._placeholder = title
         self._frame: QImage | None = None
+        self._cover_frame = False
         self.setObjectName(object_name)
         self.setAccessibleName(
             "Original video frame"
@@ -25,6 +31,7 @@ class PreviewCanvas(QLabel):
             else "Background-removed result"
         )
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setMinimumWidth(200)
         self.setMinimumHeight(180)
@@ -62,6 +69,11 @@ class PreviewCanvas(QLabel):
             self.set_frame(None)
             self.setText(placeholder)
 
+    def set_cover_frame(self, enabled: bool) -> None:
+        """Fill the assembled stage while preserving the frame's aspect ratio."""
+        self._cover_frame = enabled
+        self._update_pixmap()
+
     def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         super().resizeEvent(event)
         self._update_pixmap()
@@ -87,15 +99,22 @@ class PreviewCanvas(QLabel):
         if self._frame is None:
             return
         margins = self.layout().contentsMargins()  # type: ignore[union-attr]
-        size = QSize(
-            max(1, self.width() - margins.left() - margins.right()),
-            max(1, self.height() - margins.top() - margins.bottom()),
+        content = self.contentsRect().adjusted(
+            margins.left(), margins.top(), -margins.right(), -margins.bottom()
         )
+        size = QSize(max(1, content.width()), max(1, content.height()))
         pixmap = QPixmap.fromImage(self._frame).scaled(
             size,
-            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
             Qt.TransformationMode.SmoothTransformation,
         )
+        if self._cover_frame and pixmap.size() != size:
+            pixmap = pixmap.copy(
+                max(0, (pixmap.width() - size.width()) // 2),
+                max(0, (pixmap.height() - size.height()) // 2),
+                size.width(),
+                size.height(),
+            )
         self.setPixmap(pixmap)
 
 
@@ -107,9 +126,11 @@ class PreviewStage(QFrame):
         self.setObjectName("preview_stage")
         layout = QHBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(1)
+        layout.setSpacing(8)
         self.original_canvas = CropCanvas()
         self.result_canvas = PreviewCanvas("Result", "result_canvas")
+        self.original_canvas.set_cover_frame(True)
+        self.result_canvas.set_cover_frame(True)
         self.original_canvas.setText("Original")
         self.result_canvas.setProperty("status", "none")
         self.result_canvas.setProperty("checkerboard", False)

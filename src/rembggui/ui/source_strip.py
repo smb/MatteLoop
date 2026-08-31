@@ -94,6 +94,8 @@ class SourceDropSurface(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAcceptDrops(True)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(8)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.heading = QLabel("Drop a video here")
         self.heading.setAlignment(Qt.AlignmentFlag.AlignCenter)

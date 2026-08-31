@@ -87,3 +87,20 @@ def test_crop_canvas_announces_current_oriented_bounds_on_its_standard_widget(
 
     assert "x 10" in canvas.accessibleDescription()
     assert "100 × 50" in canvas.accessibleDescription()
+
+
+def test_cover_frame_and_crop_overlay_share_the_stage_transform(qtbot) -> None:
+    canvas = CropCanvas()
+    qtbot.addWidget(canvas)
+    canvas.resize(200, 180)
+    canvas.set_cover_frame(True)
+    canvas.set_frame(QImage(100, 50, QImage.Format.Format_RGBA8888))
+    canvas.apply_presentation(_presentation(), active=True, editable=True)
+    canvas.show()
+    qtbot.wait(10)
+
+    content = canvas._geometry.transform.content_rect
+    assert canvas.pixmap().size().width() == 200
+    assert canvas.pixmap().size().height() == 180
+    assert content.x == -80
+    assert content.width == 360

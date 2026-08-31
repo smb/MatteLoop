@@ -24,6 +24,7 @@ from rembggui.core.geometry import (
 )
 from rembggui.ui.crop_presentation import CropPresentation
 from rembggui.ui.preview_canvas import PreviewCanvas
+from rembggui.ui.theme import ACCENT_COLOR, CANVAS_COLOR, TEXT_COLOR
 
 _HANDLE_NAMES = (
     "north_west",
@@ -93,10 +94,12 @@ class CropCanvas(PreviewCanvas):
             return
         content = transform.content_rect
         crop = _qt_rect(geometry.visual["crop"])
+        overlay = QColor(CANVAS_COLOR)
+        overlay.setAlpha(105)
         painter = QPainter(self)
         painter.fillRect(
             QRectF(content.x, content.y, content.width, crop.top() - content.y),
-            QColor(0, 0, 0, 105),
+            overlay,
         )
         painter.fillRect(
             QRectF(
@@ -105,11 +108,11 @@ class CropCanvas(PreviewCanvas):
                 content.width,
                 content.bottom - crop.bottom(),
             ),
-            QColor(0, 0, 0, 105),
+            overlay,
         )
         painter.fillRect(
             QRectF(content.x, crop.top(), crop.left() - content.x, crop.height()),
-            QColor(0, 0, 0, 105),
+            overlay,
         )
         painter.fillRect(
             QRectF(
@@ -118,19 +121,19 @@ class CropCanvas(PreviewCanvas):
                 content.right - crop.right(),
                 crop.height(),
             ),
-            QColor(0, 0, 0, 105),
+            overlay,
         )
-        painter.setPen(QPen(QColor("#C8FF63"), 2))
+        painter.setPen(QPen(QColor(ACCENT_COLOR), 2))
         painter.drawRect(crop)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#C8FF63"))
+        painter.setBrush(QColor(ACCENT_COLOR))
         for name in _HANDLE_NAMES:
             painter.drawRect(_qt_rect(geometry.visual[name]))
         if self.hasFocus():
             focused = geometry.focus.get(self._focused_target)
             if focused is not None:
                 painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.setPen(QPen(QColor("#FFFFFF"), 1, Qt.PenStyle.DashLine))
+                painter.setPen(QPen(QColor(TEXT_COLOR), 1, Qt.PenStyle.DashLine))
                 painter.drawRect(_qt_rect(focused).adjusted(-3, -3, 3, 3))
         painter.end()
 
@@ -263,6 +266,7 @@ class CropCanvas(PreviewCanvas):
                     crop=raw_crop,
                     rotation=presentation.rotation,
                     pixel_aspect=presentation.pixel_aspect,
+                    zoom=self._display_zoom(presentation),
                     focused=focused if focused is not None else (
                         self._focused_target if self.hasFocus() else None
                     ),
@@ -273,6 +277,18 @@ class CropCanvas(PreviewCanvas):
             )
         except (TypeError, ValueError):
             self._geometry = None
+
+    def _display_zoom(self, presentation: CropPresentation) -> float:
+        """Match crop geometry to the cover-scaled frame displayed by the canvas."""
+        if not self._cover_frame:
+            return 1.0
+        display_width = max(1.0, float(presentation.width))
+        display_height = max(1.0, float(presentation.height))
+        viewport_width = max(1.0, float(self.width()))
+        viewport_height = max(1.0, float(self.height()))
+        fit = min(viewport_width / display_width, viewport_height / display_height)
+        cover = max(viewport_width / display_width, viewport_height / display_height)
+        return cover / fit
 
     def _announce_crop(self) -> None:
         presentation = self._presentation

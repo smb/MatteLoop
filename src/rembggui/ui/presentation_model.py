@@ -63,3 +63,14 @@ class PresentationModel:
     result_frame: object | None
     source_loading: bool
     inspector_enabled: bool
+
+    @property
+    def model_status(self) -> str:
+        """Describe the selected model using existing availability presentation."""
+        if self.preview_label != "Prepare & Preview":
+            return "ready"
+        return (
+            "downloading"
+            if self.source_mode == "ready" and self.editor_locked
+            else "not_cached"
+        )

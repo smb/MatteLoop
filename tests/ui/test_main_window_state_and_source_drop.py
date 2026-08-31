@@ -8,7 +8,7 @@ import pytest
 from PySide6.QtCore import QByteArray, QMimeData, QSettings, Qt, QUrl
 from PySide6.QtGui import QDropEvent, QFontMetrics
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
 from rembggui.core.errors import AppError, ErrorCode
 from rembggui.core.state import (
@@ -296,6 +296,33 @@ def test_result_exposes_truthful_status_and_checkerboard(
     assert value.result_canvas.property("status") == status
     assert bool(value.result_canvas.property("checkerboard")) is checkerboard
     assert value.result_canvas.text() == message
+
+
+def test_ready_source_does_not_show_inspector_readiness_placeholder(window) -> None:
+    value, _ = window
+    value.render_state(_ready())
+
+    assert not any(
+        label.text() == "Available when a video is ready"
+        for label in value.inspector.findChildren(QLabel)
+    )
+
+
+def test_model_status_describes_cached_uncached_and_preparing_states(window) -> None:
+    value, _ = window
+    unavailable = reduce(_ready(), ModelAvailabilityChanged(False))
+    empty_unavailable = reduce(AppState(), ModelAvailabilityChanged(False))
+
+    value.render_state(_ready())
+    assert value.inspector.model_status.text() == "● Ready"
+    value.render_state(unavailable)
+    assert value.inspector.model_status.text() == "○ Not cached"
+    value.render_state(empty_unavailable)
+    assert value.inspector.model_status.text() == "○ Not cached"
+    value.render_state(
+        reduce(unavailable, PreviewRequested("preview", "preview-request"))
+    )
+    assert value.inspector.model_status.text() == "◌ Downloading"
 
 
 def test_render_complete_banner_names_artifact_with_full_accessible_path(

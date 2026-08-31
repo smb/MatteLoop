@@ -108,7 +108,7 @@ def present(state: AppState) -> PresentationModel:
         preview_enabled=allowed.can_preview,
         preview_label=(
             "Prepare & Preview"
-            if ready and not state.model_available
+            if not state.model_available
             else "Preview Frame"
         ),
         render_enabled=allowed.can_render,

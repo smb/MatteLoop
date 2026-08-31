@@ -3,9 +3,11 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from PySide6.QtCore import QSettings
+from PySide6.QtWidgets import QApplication
 
 from rembggui.core.state import AppState, SourceLoaded, SourceLoadRequested, reduce
 from rembggui.ui.main_window import MainWindow
+from rembggui.ui.theme import install_theme
 
 
 class Store:
@@ -54,6 +56,45 @@ def test_minimum_layout_keeps_side_by_side_stage_timeline_and_shelf(qtbot) -> No
     )
     window.resize(1160, 720)
     assert window.inspector.width() == 400
+
+
+def test_inspector_content_minimum_width_fits_each_scroll_viewport(qtbot) -> None:
+    application = QApplication.instance()
+    assert application is not None
+    original_style_sheet = application.styleSheet()
+    original_font = application.font()
+    try:
+        install_theme(application)
+        settings = QSettings(
+            QSettings.IniFormat,
+            QSettings.UserScope,
+            "rembggui-test",
+            "inspector-width",
+        )
+        settings.clear()
+        window = MainWindow(Store(AppState()), Services(), settings)
+        qtbot.addWidget(window)
+        window.resize(1100, 720)
+        window.show()
+        qtbot.waitUntil(lambda: window.width() == 1100)
+        for _button, body in window.inspector.disclosures.values():
+            body.setVisible(True)
+        application.processEvents()
+
+        for width, expected_inspector, expected_viewport in (
+            (1100, 340, 322),
+            (1440, 400, 382),
+        ):
+            window.resize(width, 720)
+            content_minimum = window.inspector_content.minimumSizeHint().width()
+            assert window.inspector.width() == expected_inspector
+            assert window.inspector_scroll.viewport().width() == expected_viewport
+            assert window.inspector_content.width() == expected_viewport
+            assert content_minimum <= expected_viewport
+            assert not window.inspector_scroll.horizontalScrollBar().isVisible()
+    finally:
+        application.setStyleSheet(original_style_sheet)
+        application.setFont(original_font)
 
 
 def test_empty_has_only_restrained_source_surface(qtbot) -> None:

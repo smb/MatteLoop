@@ -61,6 +61,36 @@ def test_inspector_exposes_the_thirteen_enabled_models_with_default_selected(
     assert inspector.edge_picker.count() == 2
 
 
+def test_inspector_disclosure_titles_preserve_literal_ampersands(qtbot) -> None:
+    inspector = Inspector(_settings())
+    qtbot.addWidget(inspector)
+
+    assert inspector.disclosures["time_sampling"][0].text() == "Time && Sampling"
+    assert inspector.disclosures["time_sampling"][0].accessibleName() == (
+        "Time & Sampling"
+    )
+    assert inspector.disclosures["crop_cleanup"][0].text() == "Crop && Cleanup"
+    assert inspector.disclosures["crop_cleanup"][0].accessibleName() == (
+        "Crop & Cleanup"
+    )
+
+
+def test_output_directory_middle_elides_while_preserving_full_path_semantics(
+    qtbot,
+) -> None:
+    inspector = Inspector(_settings())
+    qtbot.addWidget(inspector)
+    path = "/Users/sb/" + "very-long-directory-name/" * 8 + "exports"
+
+    inspector.output_directory_edit.resize(140, 32)
+    inspector.output_directory_edit.setText(path)
+
+    assert inspector.output_directory_edit.text() != path
+    assert "…" in inspector.output_directory_edit.text()
+    assert inspector.output_directory_edit.toolTip() == path
+    assert inspector.output_directory_edit.accessibleDescription() == path
+
+
 def test_inspector_shows_manifest_download_size_and_cache_status_for_each_model(
     qtbot,
 ) -> None:
