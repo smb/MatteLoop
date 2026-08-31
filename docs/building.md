@@ -23,15 +23,93 @@ You need:
   dependencies.
 - macOS 13 or later on arm64, plus the Xcode Command Line Tools. Install the
   tools with `xcode-select --install` if `xcode-select -p` reports that they
-  are missing.
+  are missing. A first media-stack build also needs CMake, NASM, and
+  `pkg-config`; install them with `brew install cmake nasm pkg-config`.
 - Windows x64 with the Visual Studio 2022 Build Tools, including the Desktop
   development with C++ workload, MSVC v143, and a Windows SDK. The hosted
-  `windows-2022` runner already provides these tools.
+  `windows-2022` runner already provides these tools. A first media-stack build
+  also needs CMake and MSYS2 with `base-devel`, `make`, `diffutils`, `nasm`,
+  and `pkgconf`, with the MSVC amd64 environment active.
 
 The locked build environment includes PySide6 6.10.3 (the project constraint
 is `~=6.10.1`), Nuitka 2.8.10, PyAV 16.1.0, Pillow 12.3.0, NumPy 2.5.2,
 `rembg` 2.0.72, and CPU `onnxruntime` 1.29.0. Do not install a second Python
 environment for the build; run the commands below from the repository root.
+
+## Licensing gate
+
+The repository's original code, documentation, and visual assets use 0BSD.
+The native bundle includes `LICENSE` and `THIRD_PARTY_NOTICES.md`, but those
+two files are not by themselves sufficient to qualify a release artifact.
+
+The stock PyAV 16.1.0 wheel currently contains FFmpeg libraries linked to
+`libx264` and `libx265`. It is never a publishable input for a MatteLoop native
+artifact. `scripts/build.py` instead builds or reuses the custom verified media
+wheel described below and has no fallback to the installed stock wheel. See
+[THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md) for the component inventory
+and model boundary.
+
+This LGPL configuration does not answer codec-patent questions. H.264 and
+H.265 decoding can be subject to separate patent or royalty rules depending on
+where and how an artifact is distributed; those questions must be assessed
+separately from source availability and LGPL compliance.
+
+## Reproducible LGPL media stack
+
+The checked-in `packaging/media-stack/manifest.toml` pins every downloaded
+source by version, HTTPS URL, and SHA-256:
+
+| Source | Version | SHA-256 | URL |
+|---|---:|---|---|
+| FFmpeg | 8.0.1 | `05ee0b03119b45c0bdb4df654b96802e909e0a752f72e4fe3794f487229e5a41` | <https://ffmpeg.org/releases/ffmpeg-8.0.1.tar.xz> |
+| libwebp | 1.6.0 | `e4ab7009bf0629fd11982d4c2aa83964cf244cffba7347ecd39019a9e38c4564` | <https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-1.6.0.tar.gz> |
+| PyAV | 16.1.0 | `a094b4fd87a3721dacf02794d3d2c82b8d712c85b9534437e82a8a978c175ffd` | <https://files.pythonhosted.org/packages/78/cd/3a83ffbc3cc25b39721d174487fb0d51a76582f4a1703f98e46170ce83d4/av-16.1.0.tar.gz> |
+| Cython source distribution | 3.3.0 | `eed0d93fbca7087f143b42c34b05a825849bdf17f101572c2105acfa49aa88b8` | <https://files.pythonhosted.org/packages/a9/d8/4981ef716ad0e3ff0d3ef383aefc6b03c4a88dee33b272bf8e0d833001ca/cython-3.3.0.tar.gz> |
+
+The builder compiles shared libwebp, configures shared FFmpeg with GPL,
+non-free, and autodetected components disabled, builds PyAV against those
+libraries, repairs the wheel with `delocate` on macOS or `delvewheel` on
+Windows, and verifies the finished wheel before it can enter the cache. The
+build interpreter/provenance identity is CPython `cp313`; upstream PyAV 16.1.0
+uses the stable-ABI wheel tags `cp311-abi3`. The verifier requires that exact
+ABI pair plus `macosx_13_0_arm64` or `win_amd64`, then proves the candidate can
+be imported and exercised by the current CPython 3.13 interpreter.
+
+To build only the stack and print every output path as JSON:
+
+```sh
+uv run --frozen --no-sync python scripts/build_media_stack.py --json
+```
+
+The default cache is `.matteloop-build-cache/media-stack`. Its 24-character
+identity covers the exact manifest bytes, builder-recipe revision, operating
+system, normalized machine architecture, CPython ABI tag, and deployment
+target. Changing any input selects a new
+`<identity>/finished/` directory. A successful directory contains:
+
+- the repaired `av-*.whl` and adjacent `*.provenance.json`;
+- `verification-report.json`, containing runtime and native-dependency
+  evidence;
+- `MatteLoop-media-sources-<target>-<identity>.tar.gz`, containing the exact
+  FFmpeg, libwebp, PyAV, and digest-bound Cython source archives, build commands,
+  compiler and tool versions, licences, dependency inventory, verifier report,
+  checksums, and rebuild instructions; and
+- `*.artifact-set.json`, cryptographically binding the wheel, provenance,
+  report, compliance archive, target, ABI, manifest, and identity.
+
+A cache hit skips source compilation but validates the artifact-set binding and
+runs the complete wheel verifier again. To deliberately compile from scratch,
+run `scripts/build_media_stack.py --force` or pass
+`--rebuild-media-stack` to `scripts/build.py`. `scripts/build.py --media-wheel
+PATH` accepts an explicit candidate only when its adjacent provenance, report,
+compliance archive, and artifact-set binding exist and all verification passes.
+
+download, and native build. Do not disable TLS or substitute `/etc/ssl/cert.pem`:
+
+```sh
+SSL_CERT_FILE=/opt/homebrew/etc/ca-certificates/cert.pem \
+  uv run --frozen --no-sync python scripts/build_media_stack.py --force --json
+```
 
 ## macOS
 
@@ -40,26 +118,30 @@ Confirm the machine and install the locked environment:
 ```sh
 uname -m
 xcode-select -p
+clang --version
+cmake --version
+nasm -v
+pkg-config --version
 uv --version
-uv sync --frozen --all-groups
+SSL_CERT_FILE=/opt/homebrew/etc/ca-certificates/cert.pem \
+  uv sync --frozen --all-groups
 ```
 
 `uname -m` must print `arm64`. Then build:
 
 ```sh
-uv run --frozen --no-sync python scripts/build.py
+SSL_CERT_FILE=/opt/homebrew/etc/ca-certificates/cert.pem \
+  uv run --frozen --no-sync python scripts/build.py
 ```
 
 The unsigned app bundle is written to `dist/MatteLoop.app`. The helper checks
-the pinned build tools and every data file named by the spec, invokes
-`pyside6-deploy`, and fails if the command fails or the bundle is absent or
-empty. It also runs the existing offline native smoke test before succeeding.
-A clean build takes roughly 5–10 minutes and produces an uncompressed
-standalone bundle of roughly 600–700 MiB, depending on the exact dependency
-wheels and compiler cache state. The local macOS compile produced a 628 MiB
-bundle; these figures are planning estimates, not a promise about a particular
-machine. Its generated app reached the frozen smoke test but this sandbox
-denied the POSIX shared-memory step, so it is not claimed as fully verified.
+the pinned build tools and every data file named by the spec, automatically
+builds or reuses and re-verifies the custom media wheel, invokes
+`pyside6-deploy`, scans the final bundle for forbidden media components, and
+runs the packaged offline smoke test. Only after all gates pass does it place
+the matching compliance archive and `.sha256` file beside the application in
+`dist/`. The verifier report and artifact-set binding remain in the cache path
+printed by `scripts/build_media_stack.py --json`.
 
 ## Windows
 
@@ -69,6 +151,9 @@ then install the locked environment:
 ```powershell
 py -3.13 --version
 uv --version
+cmake --version
+nasm -v
+pkg-config --version
 uv sync --frozen --all-groups
 ```
 
@@ -79,11 +164,27 @@ uv run --frozen --no-sync python scripts/build.py
 ```
 
 The standalone bundle is written to `dist\MatteLoop.dist`, with the executable
-inside that directory. A Windows build is expected to take roughly 5–10
-minutes and to be in the same rough 600–700 MiB uncompressed size range, but
-those figures are estimates until a Windows host runs the build. The Windows
-build and the GitHub Actions workflow have not been executed in this local
-workspace.
+inside that directory. Windows x64 remains unqualified: no authorized local or
+manual Actions build has yet completed the wheel verifier, fixture checks,
+Nuitka bundle, forbidden-component scan, and packaged smoke gate. Do not infer
+Windows status from the committed workflow or macOS results.
+
+## Manual GitHub Actions build
+
+`.github/workflows/release.yml` is a manually dispatched, read-only,
+two-target build. It prepares the target toolchain, restores only the exact
+media-stack cache key, installs the frozen environment, and runs the same
+`scripts/build.py` gate. The key includes the runner OS, matrix target, and a
+hash of the media manifest, all `scripts/media_stack/**/*.py` files,
+`scripts/build_media_stack.py`, and `scripts/verify_media_stack.py`; it has no
+broad restore key.
+
+The workflow uploads `dist/` as a temporary unsigned Actions artifact. It does
+not create a release, publish, sign, notarize, or permanently host the
+corresponding sources. A later authorized publication must distribute each
+application together with its matching target-specific compliance archive and
+checksum on a durable source endpoint; an expiring Actions artifact is not
+that endpoint.
 
 ## Models and first launch
 
@@ -119,16 +220,42 @@ artifact.
 
 ## Verification status
 
-The local checks cover the spec’s dry-run parsing, the source resource list,
-the build helper’s prerequisite/output checks, and the temporary PyAV wheel
-handling. The release workflow is intentionally a manually dispatched draft
-and has not been run by this checkout. GitHub Actions execution, Windows
-compilation, artifact upload, and SmartScreen behavior are unexercised here.
-The local macOS compile completed and produced a 628 MiB bundle. Its executable
-reached the offline frozen smoke test, then failed because this sandbox denies
-POSIX shared-memory creation; no fully runnable macOS artifact is claimed as
-verified. The frozen shared-memory boundary, Windows compilation, GitHub
-Actions execution, artifact upload, and SmartScreen behavior remain
-unexercised. The full local test run had 1,269 passes and 39 failures caused by
-the same sandbox restrictions on POSIX shared memory or localhost sockets; an
-unrelated memory-threshold test passed when rerun alone.
+macOS arm64 qualified on 2026-09-01 on macOS 26.6.2 (build 25G83), using
+CPython 3.13.14, Apple clang 21.0.0, CMake 4.4.3, NASM 3.02,
+`pkg-config` 3.0.6, and local `uv` 0.12.7. The workflow remains pinned to the
+host, not estimates:
+
+| Gate | Measured result |
+|---|---|
+| Exact repository gate | ruff passed; mypy passed 95 source files; pytest passed 1,479 tests with 15 warnings in 54.95 seconds |
+| Forced media build | 342.81 seconds; identity `824842398768745fa5e6e346`; wheel `av-16.1.0-cp311-abi3-macosx_13_0_arm64.whl` |
+| Cache hit | 9.21 seconds; returned the same five output paths, skipped compilation, validated the artifact set, and reran the verifier |
+| Application build | 259.29 seconds; bundle scan and packaged offline smoke passed |
+
+The committed verifier loaded the cached wheel with CPython 3.13, decoded the
+committed H.264 and H.265 fixtures, and exercised production animated-WebP
+encode/validation. Its report records FFmpeg 8.0.1; `h264`, `hevc`, and
+`libwebp_anim`; `mov` and `webp`; LGPL-2.1-or-later library metadata; and no
+forbidden dependency. Direct Mach-O inspection found a macOS 13.0 minimum on
+all ten bundled dylibs. The committed final-bundle gate returned no findings.
+The packaged smoke passed video decode, two-frame alpha WebP, Qt WebP support,
+spawn-mode shared memory creation/unlink, and all 13 rembg session-class
+resolutions.
+
+Measured output sizes were:
+
+| Output | Location | Size |
+|---|---|---:|
+| Unsigned app | `dist/MatteLoop.app` | 320,755,322 bytes (305.9 MiB) |
+| Complete source archive | `dist/MatteLoop-media-sources-macos-arm64-824842398768745fa5e6e346.tar.gz` | 23,715,255 bytes |
+| Source checksum | the adjacent `.sha256` | 134 bytes |
+| Verified media wheel | the identity cache's `finished/` directory | 11,917,635 bytes |
+| Provenance | adjacent `*.provenance.json` | 316 bytes |
+| Verifier report | `finished/verification-report.json` | 14,284 bytes |
+| Artifact-set binding | adjacent `*.artifact-set.json` | 890 bytes |
+
+The archive checksum passed `shasum -a 256 -c`. This qualification covers the
+unsigned macOS artifact only. Windows x64, workflow execution, signing,
+notarization, upload, release creation, publication, permanent source hosting,
+Gatekeeper distribution behavior, and SmartScreen behavior remain unclaimed
+or unexercised.

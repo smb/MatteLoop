@@ -8,7 +8,8 @@ dynamic = ["version"]
 description = "A cross-platform desktop app for video background removal."
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
-license = { text = "MIT" }
+license = "0BSD"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "resources/fonts/OFL.txt"]
 authors = [{ name = "MatteLoop contributors" }]
 dependencies = [
   "PySide6~=6.10.1",

@@ -5,6 +5,13 @@ The original masters are design references. Corrected siblings ending in
 to the DESIGN.md accent `#B7F34A`. The graphite tile, neutral checker segment,
 transparency, and alpha edges are otherwise preserved.
 
+## License
+
+These visual assets are available under the repository's Zero-Clause BSD
+license, to the extent copyright or related rights exist. MatteLoop does not
+reserve separate project-controlled trademark restrictions for the name or
+logo; they may be reused for any purpose without fee or attribution.
+
 ## Publication status
 
 The product rename is complete. The committed derived assets in `derived/` are

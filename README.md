@@ -2,8 +2,9 @@
 
 MatteLoop is a desktop app for previewing local videos, removing their
 backgrounds, and exporting lossless transparent animated WebP files. V1
-targets macOS 13+ arm64 and produces an unsigned Windows x64 artifact; Linux
-artifacts remain deferred.
+targets macOS 13+ arm64 and Windows x64; Linux artifacts remain deferred. The
+current native qualification covers macOS arm64 only, and native artifacts are
+unsigned.
 
 ## Run from source
 
@@ -40,8 +41,26 @@ weights, compiled provider caches and thumbnails under
 `.rembggui-work/` remain discoverable; when both old and new locations exist,
 the new MatteLoop location is preferred.
 
-See [docs/building.md](docs/building.md) for native macOS and Windows builds,
-unsigned-artifact launch warnings, and packaging verification status.
+Native builds automatically compile or reuse a source-pinned, verified LGPL
+FFmpeg/libwebp/PyAV wheel; the stock PyAV wheel is not an eligible packaging
+fallback. See [docs/building.md](docs/building.md) for local and manual Actions
+commands, compliance outputs, unsigned-artifact launch warnings, and current
+platform qualification status.
+
+## License
+
+MatteLoop's original source code, documentation, and visual assets are licensed
+under the [Zero-Clause BSD license](LICENSE), to the extent copyright or
+related rights exist. You may use, copy, modify, and distribute them for any
+purpose, with or without fee or attribution.
+
+MatteLoop does not reserve separate project-controlled trademark restrictions
+for its name or logo; they may be reused with the same freedom.
+
+Third-party libraries, fonts, and model weights keep their own licenses. Model
+weights download on first use and are not part of the MatteLoop distribution.
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the component and
+native-release details.
 
 ### Synthetic fixture rotation
 
