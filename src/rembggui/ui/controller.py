@@ -7,10 +7,11 @@ from dataclasses import dataclass, replace
 from fractions import Fraction
 from itertools import count
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import uuid4
 
 from PIL import Image
+from platformdirs import user_cache_dir
 from PySide6.QtCore import QObject, QSettings, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QFileDialog, QWidget
@@ -43,12 +44,14 @@ from rembggui.core.timeline import (
     StartChanged,
     StepFrame,
 )
+from rembggui.jobs.models.catalog import ModelCatalog
 from rembggui.jobs.source import (
     SourceRevision,
     SourceValidationProof,
     decode_frame,
     probe_source,
 )
+from rembggui.ui.model_manager import ModelManagerController, ModelRemovalService
 from rembggui.ui.ports import (
     ChooseVideoRequested,
     ManageModelsRequested,
@@ -184,6 +187,7 @@ class SourceController(QObject):
             dialog_parent=dialog_parent,
             parent=self,
         )
+        self._model_manager = self._build_model_manager()
         self._preview_controller.provider_ready.connect(self._provider_ready)
         self._render_controller.provider_ready.connect(self._provider_ready)
         self._working_provider = store.state.parameters.execution_provider
@@ -207,6 +211,7 @@ class SourceController(QObject):
         self._dialog_parent = parent
         self._preview_controller.set_dialog_parent(parent)
         self._render_controller.set_dialog_parent(parent)
+        self._model_manager.set_dialog_parent(parent)
 
     @property
     def active_load_count(self) -> int:
@@ -233,6 +238,11 @@ class SourceController(QObject):
     def provider_options(self) -> tuple[ProviderOption, ...]:
         """Expose runtime provider availability for the passive inspector view."""
         return self._preview_controller.provider_options
+
+    @property
+    def model_manager(self) -> ModelManagerController:
+        """Expose the model-manager owner for lifecycle and UI tests."""
+        return self._model_manager
 
     def dispatch(self, command: WindowCommand) -> None:
         if self._closed:
@@ -268,8 +278,7 @@ class SourceController(QObject):
         elif isinstance(command, RebuildEditedCutsRequested):
             self._render_controller.dispatch(command)
         elif isinstance(command, ManageModelsRequested):
-            # TODO(next slice: models): add the model manager command service.
-            return
+            self._model_manager.open()
         elif isinstance(command, ManageWorkspacesRequested):
             self._render_controller.dispatch(command)
         elif isinstance(command, OpenOutputRequested):
@@ -289,6 +298,7 @@ class SourceController(QObject):
         self._cancel_frame_threads()
         for thread, _worker in tuple(self._frame_threads):
             thread.wait(_THREAD_SHUTDOWN_TIMEOUT_MS)
+        self._model_manager.close()
         self._render_controller.shutdown()
         self._preview_controller.shutdown()
         threads = tuple(self._threads.items())
@@ -296,6 +306,29 @@ class SourceController(QObject):
             thread.quit()
         for _request_id, (thread, _load_worker) in threads:
             thread.wait(_THREAD_SHUTDOWN_TIMEOUT_MS)
+
+    def _build_model_manager(self) -> ModelManagerController:
+        runtime = self._preview_controller.runtime
+        catalog = getattr(runtime, "catalog", None)
+        if not isinstance(catalog, ModelCatalog):
+            catalog = ModelCatalog.load_resource()
+        cache_root = getattr(runtime, "cache_root", None)
+        if not isinstance(cache_root, Path):
+            cache_root = Path(user_cache_dir("rembggui")) / "models"
+        candidate = getattr(runtime, "model_manager", None)
+        manager = (
+            candidate
+            if callable(getattr(candidate, "remove", None))
+            and hasattr(candidate, "active_id")
+            else None
+        )
+        return ModelManagerController(
+            self._store,
+            catalog=catalog,
+            cache_root=cache_root,
+            manager=cast(ModelRemovalService | None, manager),
+            dialog_parent=self._dialog_parent,
+        )
 
     def _choose_video(self, replace: bool) -> None:
         caption = "Replace video" if replace else "Choose video"

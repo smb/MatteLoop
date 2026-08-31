@@ -84,7 +84,8 @@ def install_theme(
         QLabel#model_status[status='not_cached'] {{ color: {SECONDARY_COLOR}; }}
         QToolButton {{ text-align: left; min-height: 40px; padding: 0 8px;
                        color: {TEXT_COLOR}; border: 0; font-weight: 600; }}
-        QToolButton:hover {{ color: {HOVER_COLOR}; }}
+        QToolButton:hover {{ color: {HOVER_COLOR};
+                              background: {CONTROL_COLOR}; }}
         QToolButton:checked {{ color: {TEXT_COLOR}; }}
         QScrollArea {{ border: 0; background: {INSPECTOR_COLOR}; }}
         """

@@ -118,6 +118,11 @@ class ProductionPreviewRuntime:
         return self.catalog.default_id
 
     @property
+    def model_manager(self) -> ModelSessionManager:
+        """Expose the session owner to the cache-management dialog."""
+        return self._manager
+
+    @property
     def model_options(self) -> tuple[tuple[str, bool], ...]:
         """Expose the V1 picker IDs with truthful local-cache availability."""
         return tuple(

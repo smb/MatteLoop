@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from PySide6.QtCore import QSettings, Qt
 
 from rembggui.core.execution_providers import (
@@ -72,6 +73,42 @@ def test_inspector_disclosure_titles_preserve_literal_ampersands(qtbot) -> None:
     assert inspector.disclosures["crop_cleanup"][0].text() == "Crop && Cleanup"
     assert inspector.disclosures["crop_cleanup"][0].accessibleName() == (
         "Crop & Cleanup"
+    )
+
+
+@pytest.mark.parametrize(
+    ("key", "title", "expanded"),
+    [
+        ("segmentation", "Segmentation", True),
+        ("time_sampling", "Time & Sampling", True),
+        ("crop_cleanup", "Crop & Cleanup", False),
+        ("output", "Output", True),
+        ("workspace", "Workspace", False),
+    ],
+)
+def test_inspector_disclosures_show_visual_and_spoken_state(
+    qtbot, key: str, title: str, expanded: bool
+) -> None:
+    inspector = Inspector(_settings())
+    qtbot.addWidget(inspector)
+    button, _body = inspector.disclosures[key]
+
+    assert button.isChecked() is expanded
+    assert button.arrowType() == (
+        Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow
+    )
+    assert button.accessibleDescription() == (
+        f"{title}: {'expanded' if expanded else 'collapsed'}"
+    )
+
+    button.click()
+
+    assert button.isChecked() is not expanded
+    assert button.arrowType() == (
+        Qt.ArrowType.RightArrow if expanded else Qt.ArrowType.DownArrow
+    )
+    assert button.accessibleDescription() == (
+        f"{title}: {'collapsed' if expanded else 'expanded'}"
     )
 
 

@@ -59,6 +59,7 @@ from rembggui.ui.compact_widgets import (
     compact_field,
 )
 from rembggui.ui.crop_presentation import CropPresentation
+from rembggui.ui.inspector_disclosure import configure_disclosure
 from rembggui.ui.parameter_presentation import (
     ParameterPresentation,
     decimal_from_widget_value,
@@ -577,10 +578,6 @@ class Inspector(QFrame):
         layout = QVBoxLayout(section)
         layout.setContentsMargins(0, 0, 0, 0)
         button = QToolButton()
-        button.setText(title.replace("&", "&&"))
-        button.setCheckable(True)
-        button.setObjectName(f"{key}_disclosure")
-        button.setAccessibleName(title)
         body = QWidget()
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(0, 0, 8, 8)
@@ -600,7 +597,7 @@ class Inspector(QFrame):
             body_layout.addWidget(self.rebuild_button)
             body_layout.addWidget(self.manage_workspaces)
         checked = self._read_bool(f"inspector/{key}", default)
-        button.setChecked(checked)
+        configure_disclosure(button, key, title, checked)
         body.setVisible(checked)
         button.toggled.connect(body.setVisible)
         button.toggled.connect(
