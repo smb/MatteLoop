@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
 import tempfile
 from fractions import Fraction
 from pathlib import Path
@@ -59,14 +58,22 @@ def _generate_twice(name: str, encoder: str, x265_params: str | None) -> bytes:
         return first_bytes
 
 
-def main() -> None:
-    for name, encoder, x265_params in _FIXTURES:
-        generated = _generate_twice(name, encoder, x265_params)
-        destination = _FIXTURE_DIRECTORY / name
+def _replace_fixture(destination: Path, generated: bytes) -> None:
+    temporary_destination: Path | None = None
+    try:
         with tempfile.NamedTemporaryFile(dir=_FIXTURE_DIRECTORY, delete=False) as file:
             temporary_destination = Path(file.name)
             file.write(generated)
-        shutil.move(temporary_destination, destination)
+        temporary_destination.replace(destination)
+    finally:
+        if temporary_destination is not None:
+            temporary_destination.unlink(missing_ok=True)
+
+
+def main() -> None:
+    for name, encoder, x265_params in _FIXTURES:
+        generated = _generate_twice(name, encoder, x265_params)
+        _replace_fixture(_FIXTURE_DIRECTORY / name, generated)
 
 
 if __name__ == "__main__":

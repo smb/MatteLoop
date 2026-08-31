@@ -4,8 +4,6 @@ These committed MP4 files are authored, test-only H.264 and H.265 decoder
 fixtures. Regenerate them from the repository root with:
 
 ```sh
-PYTHONPATH=/Users/sb/tools/rembgGUI/.worktrees/lgpl-media-stack/src \
-UV_CACHE_DIR=/private/tmp/matteloop-uv-cache \
 uv run --no-sync python tests/fixtures/codecs/generate.py
 ```
 

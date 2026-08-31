@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from matteloop.jobs.source import decode_frame, probe_source
+from tests.fixtures.codecs import generate
 
 _FIXTURE_DIRECTORY = Path(__file__).resolve().parents[1] / "fixtures" / "codecs"
 
@@ -62,3 +63,47 @@ def test_decoder_fixture_has_verified_codec_and_decodes_first_frame(
         assert decoded.actual_pts == Fraction(0)
     finally:
         decoded.image.close()
+
+
+def test_fixture_readme_uses_a_portable_regeneration_command() -> None:
+    """Fixture instructions work from any repository checkout."""
+    readme = (_FIXTURE_DIRECTORY / "README.md").read_text(encoding="utf-8")
+
+    assert "uv run --no-sync python tests/fixtures/codecs/generate.py" in readme
+    assert "/Users/" not in readme
+    assert "/private/tmp" not in readme
+
+
+def test_regenerating_fixtures_replaces_preexisting_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regeneration overwrites prior samples through the portable rename primitive."""
+    destinations = [tmp_path / fixture[0] for fixture in generate._FIXTURES]
+    for destination in destinations:
+        destination.write_bytes(b"previous fixture")
+    monkeypatch.setattr(generate, "_FIXTURE_DIRECTORY", tmp_path)
+
+    generate.main()
+
+    for destination in destinations:
+        assert destination.read_bytes() != b"previous fixture"
+
+
+def test_fixture_regeneration_removes_temporary_artifact_after_replace_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed rename does not leave a generated temporary fixture behind."""
+    destination = tmp_path / "h264-sdr.mp4"
+    destination.write_bytes(b"previous fixture")
+    monkeypatch.setattr(generate, "_FIXTURE_DIRECTORY", tmp_path)
+
+    def replacement_failure(_source: Path, _destination: Path) -> Path:
+        raise OSError("simulated replacement failure")
+
+    monkeypatch.setattr(Path, "replace", replacement_failure)
+
+    with pytest.raises(OSError, match="simulated replacement failure"):
+        generate.main()
+
+    assert list(tmp_path.iterdir()) == [destination]
+    assert destination.read_bytes() == b"previous fixture"
