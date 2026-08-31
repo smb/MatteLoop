@@ -196,7 +196,15 @@ def _ffmpeg_configure_arguments(
         f"--extra-ldflags=-L{prefix / 'lib'}",
     ]
     if target.target_id == "macos-arm64":
-        arguments.extend(("--arch=arm64", "--target-os=darwin"))
+        minimum_version = f"-mmacosx-version-min={target.deployment_target}"
+        arguments.extend(
+            (
+                f"--extra-cflags={minimum_version}",
+                f"--extra-ldflags={minimum_version}",
+                "--arch=arm64",
+                "--target-os=darwin",
+            )
+        )
     if target.target_id == "windows-x64":
         arguments.append("--toolchain=msvc")
     return tuple(arguments)

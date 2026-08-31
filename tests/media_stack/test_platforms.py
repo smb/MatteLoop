@@ -105,6 +105,16 @@ def test_macos_ffmpeg_configures_shared_lgpl_libraries_against_the_prefix() -> N
     assert not forbidden.intersection(configure_text.split())
 
 
+def test_macos_ffmpeg_persists_deployment_target_in_compile_and_link_flags() -> None:
+    commands = ffmpeg_commands(
+        MACOS, Path("ffmpeg"), Path("build/ffmpeg"), Path("prefix")
+    )
+    configure_text = commands[0][-1]
+
+    assert "--extra-cflags=-mmacosx-version-min=13.0" in configure_text
+    assert "--extra-ldflags=-mmacosx-version-min=13.0" in configure_text
+
+
 def test_windows_ffmpeg_uses_msys2_and_the_msvc_toolchain() -> None:
     commands = ffmpeg_commands(
         WINDOWS, Path("ffmpeg"), Path("build/ffmpeg"), Path("prefix")
@@ -117,6 +127,15 @@ def test_windows_ffmpeg_uses_msys2_and_the_msvc_toolchain() -> None:
     assert "PKG_CONFIG_PATH=prefix/lib/pkgconfig" in configure[2]
     assert commands[1][:2] == ("msys2", "-c")
     assert commands[2][:2] == ("msys2", "-c")
+
+
+def test_windows_ffmpeg_does_not_add_macos_deployment_flags() -> None:
+    commands = ffmpeg_commands(
+        WINDOWS, Path("ffmpeg"), Path("build/ffmpeg"), Path("prefix")
+    )
+    configure_text = commands[0][2]
+
+    assert "-mmacosx-version-min" not in configure_text
 
 
 def test_pyav_build_commands_use_the_platform_specific_build_interface() -> None:
