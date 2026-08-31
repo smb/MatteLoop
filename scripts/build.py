@@ -6,9 +6,7 @@ from __future__ import annotations
 import argparse
 import configparser
 import contextlib
-import hashlib
 import importlib.metadata
-import os
 import platform as platform_module
 import shlex
 import shutil
@@ -16,13 +14,18 @@ import stat
 import subprocess
 import sys
 import tempfile
-import uuid
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from zipfile import BadZipFile, ZipFile, ZipInfo
 
 if __package__:
+    from scripts.compliance_evidence import (
+        PreparedComplianceEvidence,
+        discard_compliance_evidence,
+        prepare_compliance_evidence,
+        publish_compliance_evidence,
+    )
     from scripts.media_stack.artifact_set import (
         artifact_set_path,
         validate_artifact_set,
@@ -36,7 +39,19 @@ if __package__:
         provenance_path,
         verify_media_wheel,
     )
+    from scripts.qt_source import (
+        QtSourceCompanion,
+        ensure_qt_source_companion,
+        installed_qt_distribution_inventory,
+        validate_qt_source_companion,
+    )
 else:
+    from compliance_evidence import (
+        PreparedComplianceEvidence,
+        discard_compliance_evidence,
+        prepare_compliance_evidence,
+        publish_compliance_evidence,
+    )
     from media_stack.artifact_set import artifact_set_path, validate_artifact_set
     from media_stack.builder import MediaStackArtifacts, ensure_media_stack
     from media_stack.manifest import VerificationContract, load_manifest
@@ -46,6 +61,12 @@ else:
         forbidden_bundle_entries,
         provenance_path,
         verify_media_wheel,
+    )
+    from qt_source import (
+        QtSourceCompanion,
+        ensure_qt_source_companion,
+        installed_qt_distribution_inventory,
+        validate_qt_source_companion,
     )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -70,6 +91,7 @@ _CORRECTED_BRANDING_ASSETS = (
 )
 _MEDIA_MANIFEST = Path("packaging/media-stack/manifest.toml")
 _MEDIA_CACHE = Path(".matteloop-build-cache/media-stack")
+_QT_SOURCE_CACHE = Path(".matteloop-build-cache/qt-sources")
 
 MediaStackEnsurer = Callable[..., MediaStackArtifacts]
 MediaWheelVerifier = Callable[..., VerificationReport]
@@ -82,14 +104,6 @@ class PreparedMediaStack:
     target: BuildTarget
     contract: VerificationContract
     identity: str
-
-
-@dataclass(frozen=True, slots=True)
-class PreparedComplianceEvidence:
-    archive_temporary: Path
-    checksum_temporary: Path
-    archive: Path
-    checksum: Path
 
 
 def deploy_executable(
@@ -365,79 +379,6 @@ def bundle_media_errors(
     )
 
 
-def prepare_compliance_evidence(
-    archive: Path, destination: Path, target: BuildTarget, identity: str
-) -> PreparedComplianceEvidence:
-    """Prepare an unpublished compliance pair beside the native artifact."""
-    expected_name = f"MatteLoop-media-sources-{target.target_id}-{identity}.tar.gz"
-    if archive.name != expected_name:
-        raise ValueError(
-            "media compliance archive must be named "
-            f"{expected_name}, got {archive.name}"
-        )
-    destination.mkdir(parents=True, exist_ok=True)
-    published = destination / expected_name
-    checksum = published.with_name(f"{published.name}.sha256")
-    token = uuid.uuid4().hex
-    archive_temporary = destination / f".{published.name}.{token}.tmp"
-    checksum_temporary = destination / f".{checksum.name}.{token}.tmp"
-    try:
-        _copy_fsynced(archive, archive_temporary)
-        _write_fsynced(
-            checksum_temporary,
-            f"{_sha256(archive_temporary)}  {published.name}\n".encode(),
-        )
-    except OSError:
-        archive_temporary.unlink(missing_ok=True)
-        checksum_temporary.unlink(missing_ok=True)
-        raise
-    return PreparedComplianceEvidence(
-        archive_temporary, checksum_temporary, published, checksum
-    )
-
-
-def publish_compliance_evidence(evidence: PreparedComplianceEvidence) -> None:
-    """Replace a compliance pair, restoring prior bytes on partial failure."""
-    token = uuid.uuid4().hex
-    pairs = (
-        (evidence.archive_temporary, evidence.archive),
-        (evidence.checksum_temporary, evidence.checksum),
-    )
-    backups = tuple(
-        final.with_name(f".{final.name}.{token}.bak") for _temporary, final in pairs
-    )
-    moved: list[tuple[Path, Path]] = []
-    published: list[Path] = []
-    try:
-        for (_temporary, final), backup in zip(pairs, backups, strict=True):
-            if final.exists():
-                os.replace(final, backup)
-                moved.append((final, backup))
-        for temporary, final in pairs:
-            os.replace(temporary, final)
-            published.append(final)
-    except OSError:
-        for final in reversed(published):
-            final.unlink(missing_ok=True)
-        for final, backup in reversed(moved):
-            os.replace(backup, final)
-        _discard_compliance_evidence(evidence, backups)
-        raise
-    for backup in backups:
-        backup.unlink(missing_ok=True)
-
-
-def _discard_compliance_evidence(
-    evidence: PreparedComplianceEvidence, backups: tuple[Path, ...] = ()
-) -> None:
-    for path in (
-        evidence.archive_temporary,
-        evidence.checksum_temporary,
-        *backups,
-    ):
-        path.unlink(missing_ok=True)
-
-
 def expected_artifact(os_name: str, dist_path: Path = DIST_PATH) -> Path:
     """Return the standalone bundle directory expected from pyside6-deploy."""
     if os_name == "darwin":
@@ -509,6 +450,13 @@ def _run_native_build(media_wheel: Path | None, rebuild_media_stack: bool) -> in
                 prefix=".matteloop-build-", dir=ROOT
             ) as raw:
                 build_directory = Path(raw)
+                qt_companion = ensure_qt_source_companion(
+                    ROOT,
+                    ROOT / _QT_SOURCE_CACHE,
+                    installed_qt_distribution_inventory(),
+                )
+                if not validate_qt_source_companion(qt_companion):
+                    raise ValueError("Qt source companion failed validation")
                 prepared = prepare_media_stack(
                     build_directory / "media-wheel",
                     root=ROOT,
@@ -531,13 +479,14 @@ def _run_native_build(media_wheel: Path | None, rebuild_media_stack: bool) -> in
             file=sys.stderr,
         )
         return 1
-    return _finish_native_build(completed, artifact, prepared)
+    return _finish_native_build(completed, artifact, prepared, qt_companion)
 
 
 def _finish_native_build(
     completed: subprocess.CompletedProcess[bytes],
     artifact: Path,
     prepared: PreparedMediaStack,
+    qt_companion: QtSourceCompanion,
 ) -> int:
     if completed.returncode != 0:
         print(
@@ -563,21 +512,37 @@ def _finish_native_build(
         for error in media_errors:
             print(f"  - {error}", file=sys.stderr)
         return 1
-    return _smoke_and_publish_evidence(artifact, prepared, size)
+    return _smoke_and_publish_evidence(artifact, prepared, qt_companion, size)
 
 
 def _smoke_and_publish_evidence(
-    artifact: Path, prepared: PreparedMediaStack, size: int
+    artifact: Path,
+    prepared: PreparedMediaStack,
+    qt_companion: QtSourceCompanion,
+    size: int,
 ) -> int:
+    evidence: list[PreparedComplianceEvidence] = []
     try:
-        evidence = prepare_compliance_evidence(
-            prepared.compliance_archive,
-            artifact.parent,
-            prepared.target,
-            prepared.identity,
+        media_name = (
+            f"MatteLoop-media-sources-{prepared.target.target_id}-"
+            f"{prepared.identity}.tar.gz"
+        )
+        evidence.append(
+            prepare_compliance_evidence(
+                prepared.compliance_archive, artifact.parent, media_name
+            )
+        )
+        evidence.append(
+            prepare_compliance_evidence(
+                qt_companion.archive,
+                artifact.parent,
+                qt_companion.archive.name,
+            )
         )
     except (OSError, ValueError) as error:
-        print(f"Could not prepare media compliance evidence: {error}", file=sys.stderr)
+        for pair in evidence:
+            discard_compliance_evidence(pair)
+        print(f"Could not prepare compliance evidence: {error}", file=sys.stderr)
         return 1
     smoke = subprocess.run(
         [str(Path(sys.executable)), "packaging/smoke_child.py", "dist"],
@@ -585,7 +550,8 @@ def _smoke_and_publish_evidence(
         check=False,
     )
     if smoke.returncode != 0:
-        _discard_compliance_evidence(evidence)
+        for pair in evidence:
+            discard_compliance_evidence(pair)
         print(
             "Native build produced a bundle that failed the offline smoke test "
             f"(exit status {smoke.returncode}).",
@@ -593,12 +559,36 @@ def _smoke_and_publish_evidence(
         )
         return smoke.returncode or 1
     try:
-        publish_compliance_evidence(evidence)
+        for pair in evidence:
+            publish_compliance_evidence(pair)
     except OSError as error:
-        print(f"Could not publish media compliance evidence: {error}", file=sys.stderr)
+        for pair in evidence:
+            discard_compliance_evidence(pair)
+        print(f"Could not publish compliance evidence: {error}", file=sys.stderr)
+        return 1
+    if not _distribution_artifacts_present(artifact, evidence):
         return 1
     print(f"Built {artifact.relative_to(ROOT)} ({size / 1024**2:.1f} MiB).")
     return 0
+
+
+def _distribution_artifacts_present(
+    artifact: Path, evidence: list[PreparedComplianceEvidence]
+) -> bool:
+    required = (
+        artifact,
+        *(path for pair in evidence for path in (pair.archive, pair.checksum)),
+    )
+    missing = tuple(path for path in required if not path.exists())
+    if not missing:
+        return True
+    for pair in evidence:
+        discard_compliance_evidence(pair)
+    print(
+        f"Native build is missing distribution evidence: {missing}",
+        file=sys.stderr,
+    )
+    return False
 
 
 def _installed_versions() -> dict[str, str | None]:
@@ -691,28 +681,6 @@ def _verified_explicit_artifacts(
         binding,
         report.identity,
     )
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _copy_fsynced(source: Path, destination: Path) -> None:
-    with source.open("rb") as input_file, destination.open("xb") as output:
-        shutil.copyfileobj(input_file, output)
-        output.flush()
-        os.fsync(output.fileno())
-
-
-def _write_fsynced(destination: Path, contents: bytes) -> None:
-    with destination.open("xb") as output:
-        output.write(contents)
-        output.flush()
-        os.fsync(output.fileno())
 
 
 def _verification_fields(report: VerificationReport) -> dict[str, object]:

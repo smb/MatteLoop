@@ -11,6 +11,7 @@ from scripts.media_stack.manifest import SourceSpec
 from scripts.qt_source import (
     ensure_qt_source_companion,
     installed_qt_distribution_inventory,
+    validate_qt_source_companion,
 )
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -159,6 +160,14 @@ def test_qt_companion_reuses_only_a_checksum_verified_cache(tmp_path: Path) -> N
     assert len(calls) == 6
     assert rebuilt.archive.read_bytes() != b"corrupt"
     assert rebuilt.checksum.read_text().endswith(f"  {rebuilt.archive.name}\n")
+
+
+def test_qt_companion_validation_rejects_noncanonical_checksum(tmp_path: Path) -> None:
+    companion = _build(tmp_path, [])
+    assert validate_qt_source_companion(companion)
+
+    companion.checksum.write_text("corrupt\n", encoding="utf-8")
+    assert not validate_qt_source_companion(companion)
 
 
 def test_qt_companion_fails_when_required_project_evidence_is_missing(

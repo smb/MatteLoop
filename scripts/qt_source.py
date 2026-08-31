@@ -19,8 +19,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from scripts.media_stack.manifest import SourceSpec
-from scripts.media_stack.sources import ensure_source
+if __package__:
+    from scripts.media_stack.manifest import SourceSpec
+    from scripts.media_stack.sources import ensure_source
+else:
+    from media_stack.manifest import SourceSpec
+    from media_stack.sources import ensure_source
 
 _MANIFEST_FIELDS = frozenset(
     ("schema_version", "qt_version", "distributions", "sources")
@@ -151,7 +155,15 @@ def ensure_qt_source_companion(
         for source in manifest.sources
     }
     _write_companion(result, evidence, sources)
+    if not validate_qt_source_companion(result):
+        raise RuntimeError("created Qt source companion failed checksum validation")
     return result
+
+
+def validate_qt_source_companion(companion: QtSourceCompanion) -> bool:
+    """Return whether a companion has its identity-bound name and checksum."""
+    expected = f"MatteLoop-qt-sources-6.10.3-{companion.identity}.tar.gz"
+    return companion.archive.name == expected and _valid_companion(companion)
 
 
 def _normalize_inventory(

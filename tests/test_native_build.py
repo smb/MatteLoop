@@ -26,6 +26,7 @@ from scripts.build import (
 from scripts.media_stack.builder import MediaStackArtifacts
 from scripts.media_stack.manifest import VerificationContract
 from scripts.media_stack.platforms import BuildTarget
+from scripts.qt_source import QtSourceCompanion
 
 
 def _installed_versions() -> dict[str, str]:
@@ -134,6 +135,18 @@ def _project_manifest(root: Path) -> Path:
 
 def _canonical_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
+
+
+def _qt_companion(root: Path) -> QtSourceCompanion:
+    identity = "qt-identity"
+    archive = root / f"MatteLoop-qt-sources-6.10.3-{identity}.tar.gz"
+    archive.write_bytes(b"exact Qt source companion")
+    checksum = archive.with_name(f"{archive.name}.sha256")
+    checksum.write_text(
+        f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n",
+        encoding="utf-8",
+    )
+    return QtSourceCompanion(archive, checksum, identity)
 
 
 def _verified_report(artifacts: MediaStackArtifacts) -> SimpleNamespace:
@@ -680,6 +693,7 @@ def test_successful_native_build_uses_extracted_av_and_publishes_compliance(
     compliance = tmp_path / "MatteLoop-media-sources-macos-arm64-identity.tar.gz"
     compliance.write_bytes(b"exact compliance archive")
     extracted_av = tmp_path / "extracted" / "av"
+    qt_companion = _qt_companion(tmp_path)
     prepared = SimpleNamespace(
         av_directory=extracted_av,
         compliance_archive=compliance,
@@ -689,7 +703,12 @@ def test_successful_native_build_uses_extracted_av_and_publishes_compliance(
     )
     received_av: list[Path] = []
     commands = _stub_native_main(
-        monkeypatch, tmp_path, artifact, prepared, received_av=received_av
+        monkeypatch,
+        tmp_path,
+        artifact,
+        prepared,
+        received_av=received_av,
+        qt_companion=qt_companion,
     )
 
     assert native_build.main([]) == 0
@@ -701,6 +720,72 @@ def test_successful_native_build_uses_extracted_av_and_publishes_compliance(
     assert checksum.read_text(encoding="utf-8") == (
         f"{hashlib.sha256(compliance.read_bytes()).hexdigest()}  {published.name}\n"
     )
+    published_qt = artifact.parent / qt_companion.archive.name
+    published_qt_checksum = published_qt.with_name(f"{published_qt.name}.sha256")
+    assert published_qt.read_bytes() == qt_companion.archive.read_bytes()
+    assert published_qt_checksum.read_text(encoding="utf-8") == (
+        f"{hashlib.sha256(qt_companion.archive.read_bytes()).hexdigest()}  "
+        f"{published_qt.name}\n"
+    )
+
+
+def test_native_build_stops_before_deploy_when_qt_companion_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = tmp_path / "dist" / "MatteLoop.app"
+    executable = artifact / "Contents" / "MacOS" / "matteloop"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"bundle")
+    compliance = tmp_path / "MatteLoop-media-sources-macos-arm64-identity.tar.gz"
+    compliance.write_bytes(b"media sources")
+    prepared = SimpleNamespace(
+        av_directory=tmp_path / "av",
+        compliance_archive=compliance,
+        target=MACOS,
+        contract=CONTRACT,
+        identity="identity",
+    )
+    commands = _stub_native_main(monkeypatch, tmp_path, artifact, prepared)
+
+    def reject(*_args: object, **_kwargs: object) -> QtSourceCompanion:
+        raise ValueError("Qt source companion checksum mismatch")
+
+    monkeypatch.setattr(
+        native_build, "ensure_qt_source_companion", reject, raising=False
+    )
+
+    assert native_build.main([]) == 1
+    assert commands == []
+
+
+def test_native_build_rejects_invalid_qt_companion_before_deploy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = tmp_path / "dist" / "MatteLoop.app"
+    executable = artifact / "Contents" / "MacOS" / "matteloop"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"bundle")
+    compliance = tmp_path / "MatteLoop-media-sources-macos-arm64-identity.tar.gz"
+    compliance.write_bytes(b"media sources")
+    prepared = SimpleNamespace(
+        av_directory=tmp_path / "av",
+        compliance_archive=compliance,
+        target=MACOS,
+        contract=CONTRACT,
+        identity="identity",
+    )
+    qt_companion = _qt_companion(tmp_path)
+    qt_companion.checksum.write_text("corrupt checksum\n", encoding="utf-8")
+    commands = _stub_native_main(
+        monkeypatch,
+        tmp_path,
+        artifact,
+        prepared,
+        qt_companion=qt_companion,
+    )
+
+    assert native_build.main([]) == 1
+    assert commands == []
 
 
 def test_failed_smoke_does_not_publish_new_compliance_evidence(
@@ -712,6 +797,7 @@ def test_failed_smoke_does_not_publish_new_compliance_evidence(
     executable.write_bytes(b"bundle")
     compliance = tmp_path / "MatteLoop-media-sources-macos-arm64-identity.tar.gz"
     compliance.write_bytes(b"candidate evidence")
+    qt_companion = _qt_companion(tmp_path)
     prepared = SimpleNamespace(
         av_directory=tmp_path / "extracted" / "av",
         compliance_archive=compliance,
@@ -720,7 +806,12 @@ def test_failed_smoke_does_not_publish_new_compliance_evidence(
         identity="identity",
     )
     _stub_native_main(
-        monkeypatch, tmp_path, artifact, prepared, returncodes=(0, 7)
+        monkeypatch,
+        tmp_path,
+        artifact,
+        prepared,
+        returncodes=(0, 7),
+        qt_companion=qt_companion,
     )
 
     assert native_build.main([]) == 7
@@ -728,6 +819,44 @@ def test_failed_smoke_does_not_publish_new_compliance_evidence(
     assert not published.exists()
     assert not published.with_name(f"{published.name}.sha256").exists()
     assert not tuple(artifact.parent.glob(f".{published.name}.*"))
+    published_qt = artifact.parent / qt_companion.archive.name
+    assert not published_qt.exists()
+    assert not published_qt.with_name(f"{published_qt.name}.sha256").exists()
+
+
+def test_native_build_success_requires_both_source_checksum_pairs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = tmp_path / "dist" / "MatteLoop.app"
+    executable = artifact / "Contents" / "MacOS" / "matteloop"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"bundle")
+    compliance = tmp_path / "MatteLoop-media-sources-macos-arm64-identity.tar.gz"
+    compliance.write_bytes(b"media sources")
+    qt_companion = _qt_companion(tmp_path)
+    prepared = SimpleNamespace(
+        av_directory=tmp_path / "av",
+        compliance_archive=compliance,
+        target=MACOS,
+        contract=CONTRACT,
+        identity="identity",
+    )
+    _stub_native_main(
+        monkeypatch,
+        tmp_path,
+        artifact,
+        prepared,
+        qt_companion=qt_companion,
+    )
+    real_publish = native_build.publish_compliance_evidence
+
+    def omit_qt_pair(evidence: object) -> None:
+        if "qt-sources" not in str(evidence.archive):
+            real_publish(evidence)
+
+    monkeypatch.setattr(native_build, "publish_compliance_evidence", omit_qt_pair)
+
+    assert native_build.main([]) == 1
 
 
 def test_failed_second_compliance_publication_restores_prior_pair(
@@ -776,6 +905,7 @@ def _stub_native_main(
     *,
     received_av: list[Path] | None = None,
     returncodes: tuple[int, ...] = (0, 0),
+    qt_companion: QtSourceCompanion | None = None,
 ) -> list[list[str]]:
     commands: list[list[str]] = []
     monkeypatch.setattr(native_build, "ROOT", root)
@@ -786,6 +916,15 @@ def _stub_native_main(
     monkeypatch.setattr(native_build, "expected_artifact", lambda _os: artifact)
     monkeypatch.setattr(native_build, "remove_previous_artifact", lambda _os: None)
     monkeypatch.setattr(native_build, "prepare_media_stack", lambda *_a, **_k: prepared)
+    selected_qt_companion = qt_companion or _qt_companion(root)
+    monkeypatch.setattr(
+        native_build,
+        "ensure_qt_source_companion",
+        lambda *_a, **_k: selected_qt_companion,
+    )
+    monkeypatch.setattr(
+        native_build, "installed_qt_distribution_inventory", lambda: {}
+    )
     monkeypatch.setattr(
         native_build,
         "temporary_onnxruntime_dylib_alias",
