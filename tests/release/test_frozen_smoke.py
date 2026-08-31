@@ -632,11 +632,14 @@ def test_release_workflow_has_only_manual_unsigned_native_builds() -> None:
         ),
     }
     assert "restore-keys" not in cache["with"]
-    assert steps.index(msys2) < steps.index(cache) < next(
+    cache_index = steps.index(cache)
+    build_index = next(
         index
         for index, step in enumerate(steps)
         if step["name"] == "Build native standalone bundle"
     )
+    assert steps.index(msvc) < steps.index(msys2) < cache_index < build_index
+    assert steps.index(macos_toolchain) < cache_index < build_index
 
     commands = "\n".join(str(step.get("run", "")) for step in steps)
     assert "uv sync --frozen --all-groups" in commands
