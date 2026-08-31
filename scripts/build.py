@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import configparser
 import contextlib
+import hashlib
 import importlib.metadata
 import platform as platform_module
 import shlex
@@ -13,14 +14,36 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass
 from pathlib import Path
+from zipfile import BadZipFile, ZipFile
+
+if __package__:
+    from scripts.media_stack.builder import MediaStackArtifacts, ensure_media_stack
+    from scripts.media_stack.manifest import VerificationContract, load_manifest
+    from scripts.media_stack.platforms import BuildTarget, detect_target
+    from scripts.media_stack.verifier import (
+        VerificationReport,
+        forbidden_bundle_entries,
+        provenance_path,
+        verify_media_wheel,
+    )
+else:
+    from media_stack.builder import MediaStackArtifacts, ensure_media_stack
+    from media_stack.manifest import VerificationContract, load_manifest
+    from media_stack.platforms import BuildTarget, detect_target
+    from media_stack.verifier import (
+        VerificationReport,
+        forbidden_bundle_entries,
+        provenance_path,
+        verify_media_wheel,
+    )
 
 ROOT = Path(__file__).resolve().parent.parent
 DIST_PATH = ROOT / "dist"
 
 _PINNED_DISTRIBUTIONS = {
-    "av": "16.1.0",
     "PySide6": "6.10.x",
     "Nuitka": "2.8.10",
     "onnxruntime": "1.29.0",
@@ -34,6 +57,20 @@ _CORRECTED_BRANDING_ASSETS = (
     "assets/branding/matteloop/matteloop-app-icon-1024-alpha-green.png",
     "assets/branding/matteloop/matteloop-ui-mark-1024-alpha-green.png",
 )
+_MEDIA_MANIFEST = Path("packaging/media-stack/manifest.toml")
+_MEDIA_CACHE = Path(".matteloop-build-cache/media-stack")
+
+MediaStackEnsurer = Callable[..., MediaStackArtifacts]
+MediaWheelVerifier = Callable[..., VerificationReport]
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedMediaStack:
+    av_directory: Path
+    compliance_archive: Path
+    target: BuildTarget
+    contract: VerificationContract
+    identity: str
 
 
 def deploy_executable(
@@ -191,6 +228,95 @@ def prepare_temporary_spec(
     destination_spec.write_text(content, encoding="utf-8")
 
 
+def extract_wheel_package(wheel: Path, destination: Path) -> Path:
+    """Extract one native top-level PyAV package from a verified wheel."""
+    destination.mkdir(parents=True, exist_ok=True)
+    try:
+        with ZipFile(wheel) as archive:
+            archive.extractall(destination)
+    except (BadZipFile, OSError) as error:
+        raise ValueError(f"could not extract media wheel {wheel}: {error}") from error
+    package_roots = tuple(
+        path.parent for path in destination.rglob("av/__init__.py")
+    )
+    expected = destination / "av"
+    if package_roots != (expected,):
+        raise ValueError("media wheel must contain exactly one top-level av package")
+    if not any(
+        path.is_file() and path.suffix.casefold() in {".so", ".pyd"}
+        for path in expected.rglob("*")
+    ):
+        raise ValueError("media wheel av package must contain a native .so or .pyd")
+    return expected
+
+
+def prepare_media_stack(
+    destination: Path,
+    *,
+    root: Path = ROOT,
+    media_wheel: Path | None = None,
+    rebuild: bool = False,
+    target: BuildTarget | None = None,
+    ensure: MediaStackEnsurer = ensure_media_stack,
+    verify: MediaWheelVerifier = verify_media_wheel,
+) -> PreparedMediaStack:
+    """Select only verified media artifacts and extract their PyAV package."""
+    manifest_path = root / _MEDIA_MANIFEST
+    manifest = load_manifest(manifest_path)
+    resolved_target = target or detect_target(
+        python_tag=manifest.python_abi,
+        deployment_target=manifest.macos_deployment_target,
+    )
+    if media_wheel is None:
+        artifacts = ensure(root, root / _MEDIA_CACHE, force=rebuild)
+    else:
+        artifacts = _verified_explicit_artifacts(
+            media_wheel, manifest_path, resolved_target, verify
+        )
+    av_directory = extract_wheel_package(artifacts.wheel, destination)
+    return PreparedMediaStack(
+        av_directory,
+        artifacts.compliance_archive,
+        resolved_target,
+        manifest.verification,
+        artifacts.identity,
+    )
+
+
+def bundle_media_errors(
+    artifact: Path, target: BuildTarget, contract: VerificationContract
+) -> tuple[str, ...]:
+    """Return every forbidden media-library finding in a native bundle."""
+    return tuple(
+        f"{target.target_id} bundle contains forbidden media entry: "
+        f"{entry.relative_to(artifact)}"
+        for entry in forbidden_bundle_entries(
+            artifact, contract.forbidden_library_fragments
+        )
+    )
+
+
+def publish_compliance_archive(
+    archive: Path, destination: Path, target: BuildTarget, identity: str
+) -> tuple[Path, Path]:
+    """Copy exact target compliance evidence beside the native artifact."""
+    expected_name = f"MatteLoop-media-sources-{target.target_id}-{identity}.tar.gz"
+    if archive.name != expected_name:
+        raise ValueError(
+            "media compliance archive must be named "
+            f"{expected_name}, got {archive.name}"
+        )
+    destination.mkdir(parents=True, exist_ok=True)
+    published = destination / expected_name
+    shutil.copy2(archive, published)
+    checksum = published.with_name(f"{published.name}.sha256")
+    checksum.write_text(
+        f"{_sha256(published)}  {published.name}\n",
+        encoding="utf-8",
+    )
+    return published, checksum
+
+
 def expected_artifact(os_name: str, dist_path: Path = DIST_PATH) -> Path:
     """Return the standalone bundle directory expected from pyside6-deploy."""
     if os_name == "darwin":
@@ -236,7 +362,10 @@ def temporary_onnxruntime_dylib_alias(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.parse_args(argv)
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--rebuild-media-stack", action="store_true")
+    selection.add_argument("--media-wheel", type=Path)
+    arguments = parser.parse_args(argv)
 
     errors = [*prerequisite_errors(), *packaging_input_errors()]
     if errors:
@@ -245,6 +374,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  - {error}", file=sys.stderr)
         return 1
 
+    return _run_native_build(arguments.media_wheel, arguments.rebuild_media_stack)
+
+
+def _run_native_build(media_wheel: Path | None, rebuild_media_stack: bool) -> int:
     deploy_path = deploy_executable()
     artifact = expected_artifact(sys.platform)
     print("Building unsigned native bundle with pyside6-deploy…", flush=True)
@@ -254,22 +387,37 @@ def main(argv: list[str] | None = None) -> int:
             with tempfile.TemporaryDirectory(
                 prefix=".matteloop-build-", dir=ROOT
             ) as raw:
-                temporary_spec = Path(raw) / "pysidedeploy.spec"
+                build_directory = Path(raw)
+                prepared = prepare_media_stack(
+                    build_directory / "media-wheel",
+                    root=ROOT,
+                    media_wheel=media_wheel,
+                    rebuild=rebuild_media_stack,
+                )
+                temporary_spec = build_directory / "pysidedeploy.spec"
                 prepare_temporary_spec(
                     ROOT / "packaging" / "pysidedeploy.spec",
                     temporary_spec,
-                    _distribution_directory("av"),
+                    prepared.av_directory,
                     os_name=sys.platform,
                 )
                 completed = subprocess.run(
                     build_command(deploy_path, temporary_spec), cwd=ROOT, check=False
                 )
-    except (OSError, RuntimeError) as error:
+    except (OSError, RuntimeError, ValueError) as error:
         print(
             f"Native build preparation or launch failed: {error}",
             file=sys.stderr,
         )
         return 1
+    return _finish_native_build(completed, artifact, prepared)
+
+
+def _finish_native_build(
+    completed: subprocess.CompletedProcess[bytes],
+    artifact: Path,
+    prepared: PreparedMediaStack,
+) -> int:
     if completed.returncode != 0:
         print(
             f"Native build failed with exit status {completed.returncode}.",
@@ -287,6 +435,22 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if size <= 0:
         print(f"Native build produced an empty bundle at {artifact}.", file=sys.stderr)
+        return 1
+    media_errors = bundle_media_errors(artifact, prepared.target, prepared.contract)
+    if media_errors:
+        print("Native bundle media verification failed:", file=sys.stderr)
+        for error in media_errors:
+            print(f"  - {error}", file=sys.stderr)
+        return 1
+    try:
+        publish_compliance_archive(
+            prepared.compliance_archive,
+            artifact.parent,
+            prepared.target,
+            prepared.identity,
+        )
+    except (OSError, ValueError) as error:
+        print(f"Could not publish media compliance evidence: {error}", file=sys.stderr)
         return 1
     smoke = subprocess.run(
         [str(Path(sys.executable)), "packaging/smoke_child.py", "dist"],
@@ -319,24 +483,12 @@ def _version_matches(distribution: str, actual: str) -> bool:
         return actual == "2.8.10"
     if distribution == "onnxruntime":
         return actual == "1.29.0"
-    if distribution == "av":
-        return actual == "16.1.0"
     return actual.startswith("6.10.")
 
 
 def _onnxruntime_capi_directory() -> Path:
     distribution = importlib.metadata.distribution("onnxruntime")
     return Path(distribution.locate_file("onnxruntime/capi"))
-
-
-def _distribution_directory(name: str) -> Path:
-    distribution = importlib.metadata.distribution(name)
-    directory = Path(distribution.locate_file(name))
-    if not directory.is_dir():
-        raise RuntimeError(
-            f"installed {name} package directory is missing: {directory}"
-        )
-    return directory
 
 
 def _create_onnxruntime_dylib_alias(directory: Path) -> Path | None:
@@ -374,6 +526,38 @@ def _spec_data_sources(spec_path: Path) -> tuple[str, ...]:
             raise ValueError(f"invalid data-file argument: {argument}")
         sources.append(source)
     return tuple(sources)
+
+
+def _verified_explicit_artifacts(
+    wheel: Path,
+    manifest_path: Path,
+    target: BuildTarget,
+    verify: MediaWheelVerifier,
+) -> MediaStackArtifacts:
+    sidecar = provenance_path(wheel)
+    if not sidecar.is_file():
+        raise ValueError(f"provenance sidecar is missing: {sidecar}")
+    report = verify(wheel, manifest_path, target)
+    compliance = wheel.parent / (
+        f"MatteLoop-media-sources-{target.target_id}-{report.identity}.tar.gz"
+    )
+    if not compliance.is_file():
+        raise ValueError(f"media compliance archive is missing: {compliance}")
+    return MediaStackArtifacts(
+        wheel,
+        sidecar,
+        compliance,
+        wheel.parent / "verification-report.json",
+        report.identity,
+    )
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 if __name__ == "__main__":

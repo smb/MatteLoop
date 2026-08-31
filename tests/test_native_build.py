@@ -1,5 +1,15 @@
+import contextlib
+import hashlib
+import shutil
+import subprocess
+import sys
+import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
+
+import scripts.build as native_build
 from scripts.build import (
     artifact_size_bytes,
     branding_input_errors,
@@ -10,15 +20,57 @@ from scripts.build import (
     remove_previous_artifact,
     temporary_onnxruntime_dylib_alias,
 )
+from scripts.media_stack.builder import MediaStackArtifacts
+from scripts.media_stack.manifest import VerificationContract
+from scripts.media_stack.platforms import BuildTarget
 
 
 def _installed_versions() -> dict[str, str]:
     return {
-        "av": "16.1.0",
         "PySide6": "6.10.3",
         "Nuitka": "2.8.10",
         "onnxruntime": "1.29.0",
     }
+
+
+MACOS = BuildTarget("darwin", "arm64", "macos-arm64", "cp313", "13.0")
+CONTRACT = VerificationContract((), (), (), ("x264", "x265", "openh264"))
+
+
+def _project_root(tmp_path: Path) -> Path:
+    root = tmp_path / "project"
+    destination = root / "packaging" / "media-stack" / "manifest.toml"
+    destination.parent.mkdir(parents=True)
+    shutil.copy2(
+        Path(__file__).resolve().parents[1]
+        / "packaging"
+        / "media-stack"
+        / "manifest.toml",
+        destination,
+    )
+    return root
+
+
+def _wheel(path: Path, *, nested_av: bool = False, native: bool = True) -> Path:
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("av/__init__.py", "")
+        if native:
+            archive.writestr("av/_core.cpython-313-darwin.so", b"native")
+        if nested_av:
+            archive.writestr("other/av/__init__.py", "")
+            archive.writestr("other/av/_core.pyd", b"native")
+    return path
+
+
+def _artifacts(root: Path, *, identity: str = "identity") -> MediaStackArtifacts:
+    wheel = _wheel(root / "av-16.1.0.whl")
+    provenance = wheel.with_name(f"{wheel.name}.provenance.json")
+    provenance.write_text("{}", encoding="utf-8")
+    compliance = root / f"MatteLoop-media-sources-macos-arm64-{identity}.tar.gz"
+    compliance.write_bytes(b"exact compliance archive")
+    report = root / "verification-report.json"
+    report.write_text("{}", encoding="utf-8")
+    return MediaStackArtifacts(wheel, provenance, compliance, report, identity)
 
 
 def test_native_build_rejects_deferred_linux_packaging(tmp_path: Path) -> None:
@@ -57,6 +109,37 @@ def test_native_build_reports_missing_and_wrong_pinned_tools(tmp_path: Path) -> 
     )
     assert any("Missing build prerequisite: PySide6." in error for error in errors)
     assert any("Nuitka 2.8.9 is installed" in error for error in errors)
+
+
+def test_native_build_does_not_require_development_pyav_distribution(
+    tmp_path: Path,
+) -> None:
+    deploy = tmp_path / "pyside6-deploy"
+    deploy.write_bytes(b"tool")
+
+    assert prerequisite_errors(
+        os_name="darwin",
+        machine="arm64",
+        python_version=(3, 13),
+        deploy_path=deploy,
+        installed_versions=_installed_versions(),
+    ) == ()
+
+
+def test_native_build_cli_exposes_verified_media_selection_flags() -> None:
+    root = Path(__file__).resolve().parents[1]
+
+    completed = subprocess.run(
+        [sys.executable, "scripts/build.py", "--help"],
+        cwd=root,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "--rebuild-media-stack" in completed.stdout
+    assert "--media-wheel" in completed.stdout
 
 
 def test_native_build_identifies_platform_bundle_directories(tmp_path: Path) -> None:
@@ -175,3 +258,226 @@ def test_native_build_selects_the_windows_icon_in_temporary_spec(
 
 def test_native_build_verifies_committed_matteloop_branding_assets() -> None:
     assert branding_input_errors() == ()
+
+
+def test_default_media_preparation_uses_verified_builder_output(
+    tmp_path: Path,
+) -> None:
+    root = _project_root(tmp_path)
+    artifacts = _artifacts(tmp_path)
+    calls: list[tuple[Path, Path, bool]] = []
+
+    def ensure(
+        candidate_root: Path, cache: Path, *, force: bool
+    ) -> MediaStackArtifacts:
+        calls.append((candidate_root, cache, force))
+        return artifacts
+
+    prepared = native_build.prepare_media_stack(
+        tmp_path / "extracted",
+        root=root,
+        target=MACOS,
+        ensure=ensure,
+    )
+
+    assert calls == [
+        (root, root / ".matteloop-build-cache" / "media-stack", False)
+    ]
+    assert prepared.av_directory == tmp_path / "extracted" / "av"
+    assert prepared.compliance_archive == artifacts.compliance_archive
+    assert prepared.target == MACOS
+
+
+def test_rebuild_media_preparation_only_forces_the_verified_builder(
+    tmp_path: Path,
+) -> None:
+    root = _project_root(tmp_path)
+    artifacts = _artifacts(tmp_path)
+    forced: list[bool] = []
+
+    def ensure(_root: Path, _cache: Path, *, force: bool) -> MediaStackArtifacts:
+        forced.append(force)
+        return artifacts
+
+    native_build.prepare_media_stack(
+        tmp_path / "extracted",
+        root=root,
+        target=MACOS,
+        rebuild=True,
+        ensure=ensure,
+    )
+
+    assert forced == [True]
+
+
+def test_explicit_media_wheel_is_verified_and_extracted_without_installing_it(
+    tmp_path: Path,
+) -> None:
+    root = _project_root(tmp_path)
+    artifacts = _artifacts(tmp_path, identity="explicit")
+    venv_marker = root / ".venv" / "untouched"
+    venv_marker.parent.mkdir()
+    venv_marker.write_text("development environment", encoding="utf-8")
+    verified: list[tuple[Path, Path, BuildTarget]] = []
+
+    def verify(wheel: Path, manifest: Path, target: BuildTarget) -> SimpleNamespace:
+        assert wheel.with_name(f"{wheel.name}.provenance.json").is_file()
+        verified.append((wheel, manifest, target))
+        return SimpleNamespace(identity="explicit")
+
+    def unexpected_builder(*_args: object, **_kwargs: object) -> MediaStackArtifacts:
+        raise AssertionError("explicit wheel unexpectedly requested a rebuild")
+
+    prepared = native_build.prepare_media_stack(
+        tmp_path / "extracted",
+        root=root,
+        media_wheel=artifacts.wheel,
+        target=MACOS,
+        ensure=unexpected_builder,
+        verify=verify,
+    )
+
+    assert verified == [
+        (
+            artifacts.wheel,
+            root / "packaging" / "media-stack" / "manifest.toml",
+            MACOS,
+        )
+    ]
+    assert prepared.av_directory.is_dir()
+    assert venv_marker.read_text(encoding="utf-8") == "development environment"
+
+
+@pytest.mark.parametrize("nested_av", (False, True))
+def test_wheel_extraction_requires_exactly_one_top_level_av_package(
+    tmp_path: Path, nested_av: bool
+) -> None:
+    wheel = tmp_path / "candidate.whl"
+    if nested_av:
+        _wheel(wheel, nested_av=True)
+    else:
+        with zipfile.ZipFile(wheel, "w") as archive:
+            archive.writestr("package/__init__.py", "")
+
+    with pytest.raises(ValueError, match="exactly one top-level av package"):
+        native_build.extract_wheel_package(wheel, tmp_path / "extracted")
+
+
+def test_wheel_extraction_requires_a_native_pyav_extension(tmp_path: Path) -> None:
+    wheel = _wheel(tmp_path / "candidate.whl", native=False)
+
+    with pytest.raises(ValueError, match="native .so or .pyd"):
+        native_build.extract_wheel_package(wheel, tmp_path / "extracted")
+
+
+def test_bundle_media_gate_aggregates_forbidden_and_gpl_entries(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "MatteLoop.app"
+    first = artifact / "Contents" / "Frameworks" / "libx264.dylib"
+    second = artifact / "Contents" / "MacOS" / "nonfree-codec.dylib"
+    first.parent.mkdir(parents=True)
+    second.parent.mkdir(parents=True)
+    first.write_bytes(b"forbidden")
+    second.write_bytes(b"forbidden")
+
+    errors = native_build.bundle_media_errors(artifact, MACOS, CONTRACT)
+
+    assert len(errors) == 2
+    assert any("libx264.dylib" in error for error in errors)
+    assert any("nonfree-codec.dylib" in error for error in errors)
+
+
+def test_finished_bundle_media_failure_skips_smoke_and_reports_every_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    artifact = tmp_path / "dist" / "MatteLoop.app"
+    for name in ("libx264.dylib", "nonfree-codec.dylib"):
+        path = artifact / "Contents" / "Frameworks" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"forbidden")
+    prepared = SimpleNamespace(
+        av_directory=tmp_path / "extracted" / "av",
+        compliance_archive=tmp_path / "sources.tar.gz",
+        target=MACOS,
+        contract=CONTRACT,
+        identity="identity",
+    )
+    commands = _stub_native_main(monkeypatch, tmp_path, artifact, prepared)
+
+    assert native_build.main([]) == 1
+    assert len(commands) == 1
+    stderr = capsys.readouterr().err
+    assert "libx264.dylib" in stderr
+    assert "nonfree-codec.dylib" in stderr
+
+
+def test_successful_native_build_uses_extracted_av_and_publishes_compliance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = tmp_path / "dist" / "MatteLoop.app"
+    executable = artifact / "Contents" / "MacOS" / "matteloop"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"bundle")
+    compliance = tmp_path / "MatteLoop-media-sources-macos-arm64-identity.tar.gz"
+    compliance.write_bytes(b"exact compliance archive")
+    extracted_av = tmp_path / "extracted" / "av"
+    prepared = SimpleNamespace(
+        av_directory=extracted_av,
+        compliance_archive=compliance,
+        target=MACOS,
+        contract=CONTRACT,
+        identity="identity",
+    )
+    received_av: list[Path] = []
+    commands = _stub_native_main(
+        monkeypatch, tmp_path, artifact, prepared, received_av=received_av
+    )
+
+    assert native_build.main([]) == 0
+    published = tmp_path / "dist" / compliance.name
+    checksum = published.with_name(f"{published.name}.sha256")
+    assert received_av == [extracted_av]
+    assert len(commands) == 2
+    assert published.read_bytes() == compliance.read_bytes()
+    assert checksum.read_text(encoding="utf-8") == (
+        f"{hashlib.sha256(compliance.read_bytes()).hexdigest()}  {published.name}\n"
+    )
+
+
+def _stub_native_main(
+    monkeypatch: pytest.MonkeyPatch,
+    root: Path,
+    artifact: Path,
+    prepared: SimpleNamespace,
+    *,
+    received_av: list[Path] | None = None,
+) -> list[list[str]]:
+    commands: list[list[str]] = []
+    monkeypatch.setattr(native_build, "ROOT", root)
+    monkeypatch.setattr(native_build, "DIST_PATH", root / "dist")
+    monkeypatch.setattr(native_build, "prerequisite_errors", lambda: ())
+    monkeypatch.setattr(native_build, "packaging_input_errors", lambda: ())
+    monkeypatch.setattr(native_build, "deploy_executable", lambda: root / "deploy")
+    monkeypatch.setattr(native_build, "expected_artifact", lambda _os: artifact)
+    monkeypatch.setattr(native_build, "remove_previous_artifact", lambda _os: None)
+    monkeypatch.setattr(native_build, "prepare_media_stack", lambda *_a, **_k: prepared)
+    monkeypatch.setattr(
+        native_build,
+        "temporary_onnxruntime_dylib_alias",
+        lambda: contextlib.nullcontext(),
+    )
+
+    def prepare_spec(
+        _source: Path, _destination: Path, av: Path, **_kw: object
+    ) -> None:
+        if received_av is not None:
+            received_av.append(av)
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(native_build, "prepare_temporary_spec", prepare_spec)
+    monkeypatch.setattr(native_build.subprocess, "run", run)
+    return commands

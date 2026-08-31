@@ -591,6 +591,7 @@ def test_release_workflow_has_only_manual_unsigned_native_builds() -> None:
     assert "uv sync --frozen --all-groups" in commands
     assert "--no-cache" not in commands
     assert "python scripts/build.py" in commands
+    assert "scripts/build_media_stack.py" not in commands
     assert "xvfb-run" not in commands
     build = next(
         step for step in steps if step["name"] == "Build native standalone bundle"
