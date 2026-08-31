@@ -5,10 +5,14 @@ from __future__ import annotations
 import os
 import stat
 import sys
+from dataclasses import dataclass
+from math import ceil, isfinite
 from pathlib import Path, PureWindowsPath
 
 _RESOURCE_DIRECTORY = "resources"
 _MAX_RESOURCE_BYTES = 256 * 1024
+_STATUS_ICON_SIZES = (24, 32, 48, 64)
+_STATUS_ICON_NAMES = frozenset({"error", "stale", "preview"})
 _WINDOWS_DEVICE_STEMS = frozenset(
     {
         "aux",
@@ -19,6 +23,55 @@ _WINDOWS_DEVICE_STEMS = frozenset(
         *(f"lpt{index}" for index in range(1, 10)),
     }
 )
+
+
+@dataclass(frozen=True, slots=True)
+class StatusIconAsset:
+    """One validated status icon file and its physical pixel size."""
+
+    path: Path
+    pixel_size: int
+
+
+def status_icon_asset(
+    name: str,
+    requested_size: int,
+    *,
+    device_pixel_ratio: float = 1.0,
+    runtime_root: Path | None = None,
+) -> StatusIconAsset:
+    """Resolve a packaged status icon at or above its requested pixel size.
+
+    The logical minimum is 24 pixels.  On a high-DPI display the requested
+    size is converted to physical pixels before choosing the closest bundled
+    asset, so a 2x display selects the 48-pixel source for a 24-pixel icon.
+    """
+    if name not in _STATUS_ICON_NAMES:
+        raise ValueError("unknown status icon")
+    if type(requested_size) is not int or requested_size <= 0:
+        raise ValueError("requested icon size must be a positive integer")
+    if not isfinite(device_pixel_ratio) or device_pixel_ratio <= 0:
+        raise ValueError("device pixel ratio must be positive and finite")
+
+    logical_size = max(24, requested_size)
+    physical_size = ceil(logical_size * max(1.0, device_pixel_ratio))
+    pixel_size = next(
+        (size for size in _STATUS_ICON_SIZES if size >= physical_size),
+        _STATUS_ICON_SIZES[-1],
+    )
+    directories = _resource_directories(runtime_root)
+    existing: list[Path] = []
+    for directory in directories:
+        icon_directory = directory / "icons"
+        candidate = icon_directory / f"{name}-{pixel_size}.png"
+        if _is_direct_regular_resource(icon_directory, candidate):
+            existing.append(candidate)
+    if not existing:
+        raise FileNotFoundError(f"status icon not found: {name}-{pixel_size}.png")
+    if len(existing) > 1:
+        locations = ", ".join(str(candidate) for candidate in existing)
+        raise RuntimeError(f"ambiguous status icon {name!r}: {locations}")
+    return StatusIconAsset(existing[0], pixel_size)
 
 
 def resource_path(name: str, *, runtime_root: Path | None = None) -> Path:

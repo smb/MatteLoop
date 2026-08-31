@@ -31,6 +31,7 @@ class PresentationModel:
     primary_action: str | None
     focus_target: FocusTarget
     source_error_message: str | None
+    source_error_icon: str | None
     source_error_detail: str | None
     stale_category: str | None
     source_surface_visible: bool
@@ -42,6 +43,7 @@ class PresentationModel:
     result_accessible_name: str
     result_accessible_description: str
     result_status_marker: str | None
+    result_status_icon: str | None
     recovery_visible: bool
     recovery_label: str
     artifact_path: str | None

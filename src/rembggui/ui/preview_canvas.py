@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, Qt
+from pathlib import Path
+
+from PySide6.QtCore import QRect, QSize, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
@@ -13,12 +15,111 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from rembggui.resources import status_icon_asset
 from rembggui.ui.theme import CHECKERBOARD_DARK, CHECKERBOARD_LIGHT
+
+
+class StatusLabel(QLabel):
+    """Keep status wording as text while painting an optional adjacent icon."""
+
+    def __init__(
+        self,
+        text: str = "",
+        parent: QWidget | None = None,
+        *,
+        runtime_root: Path | None = None,
+    ) -> None:
+        super().__init__(text, parent)
+        self._runtime_root = runtime_root
+        self._requested_icon_name: str | None = None
+        self._requested_icon_size = 24
+        self._status_icon_pixmap: QPixmap | None = None
+        self._status_icon_name: str | None = None
+        self._status_icon_logical_size = 0
+        self.setMinimumHeight(24)
+        margins = self.contentsMargins()
+        self._text_margins = (
+            margins.left(), margins.top(), margins.right(), margins.bottom()
+        )
+
+    def set_status_icon(self, name: str | None, requested_size: int = 24) -> None:
+        """Load a GUI-owned icon, retaining text when the packaged file is absent."""
+        self._requested_icon_name = name
+        self._requested_icon_size = requested_size
+        self._load_status_icon()
+
+    @property
+    def status_icon_name(self) -> str | None:
+        return self._status_icon_name
+
+    @property
+    def status_icon_pixmap(self) -> QPixmap | None:
+        return self._status_icon_pixmap
+
+    @property
+    def status_icon_logical_size(self) -> int:
+        return self._status_icon_logical_size
+
+    def showEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        self._load_status_icon()
+        super().showEvent(event)
+
+    def paintEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        if self._status_icon_pixmap is not None:
+            left, top, _right, bottom = self._text_margins
+            size = self._status_icon_logical_size
+            available_height = max(0, self.height() - top - bottom)
+            y = top + max(0, (available_height - size) // 2)
+            painter = QPainter(self)
+            painter.drawPixmap(QRect(left, y, size, size), self._status_icon_pixmap)
+            painter.end()
+        super().paintEvent(event)
+
+    def _load_status_icon(self) -> None:
+        self._clear_status_icon()
+        name = self._requested_icon_name
+        if name is None:
+            return
+        try:
+            asset = status_icon_asset(
+                name,
+                self._requested_icon_size,
+                device_pixel_ratio=self.devicePixelRatioF(),
+                runtime_root=self._runtime_root,
+            )
+            pixmap = QPixmap(str(asset.path))
+        except (FileNotFoundError, OSError, RuntimeError):
+            return
+        if pixmap.isNull():
+            return
+        logical_size = max(24, self._requested_icon_size)
+        pixmap.setDevicePixelRatio(asset.pixel_size / logical_size)
+        self._status_icon_pixmap = pixmap
+        self._status_icon_name = name
+        self._status_icon_logical_size = logical_size
+        self.setMinimumHeight(logical_size)
+        left, top, right, bottom = self._text_margins
+        self.setContentsMargins(left + logical_size + 8, top, right, bottom)
+        self.updateGeometry()
+        self.update()
+
+    def _clear_status_icon(self) -> None:
+        self._status_icon_pixmap = None
+        self._status_icon_name = None
+        self._status_icon_logical_size = 0
+        self.setMinimumHeight(24)
+        left, top, right, bottom = self._text_margins
+        self.setContentsMargins(left, top, right, bottom)
 
 
 class PreviewCanvas(QLabel):
     def __init__(
-        self, title: str, object_name: str, parent: QWidget | None = None
+        self,
+        title: str,
+        object_name: str,
+        parent: QWidget | None = None,
+        *,
+        runtime_root: Path | None = None,
     ) -> None:
         super().__init__(parent)
         self._placeholder = title
@@ -37,7 +138,7 @@ class PreviewCanvas(QLabel):
         self.setMinimumHeight(180)
         self.setWordWrap(True)
         self.setText(self._placeholder)
-        self.status_label = QLabel(self)
+        self.status_label = StatusLabel(parent=self, runtime_root=runtime_root)
         self.status_label.setObjectName(f"{object_name}_status")
         self.status_label.setProperty("secondary", True)
         self.status_label.hide()
@@ -46,8 +147,11 @@ class PreviewCanvas(QLabel):
         overlay.addWidget(self.status_label)
         overlay.addStretch(1)
 
-    def set_status_marker(self, marker: str | None) -> None:
+    def set_status_marker(
+        self, marker: str | None, icon_name: str | None = None
+    ) -> None:
         self.status_label.setText(marker or "")
+        self.status_label.set_status_icon(icon_name)
         self.status_label.setVisible(bool(marker))
 
     def set_frame(self, image: QImage | None) -> None:
@@ -123,7 +227,9 @@ class PreviewCanvas(QLabel):
 
 
 class PreviewStage(QFrame):
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, parent: QWidget | None = None, *, runtime_root: Path | None = None
+    ) -> None:
         super().__init__(parent)
         from rembggui.ui.crop_canvas import CropCanvas
 
@@ -132,7 +238,9 @@ class PreviewStage(QFrame):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(8)
         self.original_canvas = CropCanvas()
-        self.result_canvas = PreviewCanvas("Result", "result_canvas")
+        self.result_canvas = PreviewCanvas(
+            "Result", "result_canvas", runtime_root=runtime_root
+        )
         self.original_canvas.set_cover_frame(False)
         self.result_canvas.set_cover_frame(True)
         self.original_canvas.setText("Original")

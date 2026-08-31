@@ -7,7 +7,11 @@ from pathlib import Path
 import pytest
 
 import rembggui.resources as resources_module
-from rembggui.resources import read_resource_bytes, resource_path
+from rembggui.resources import (
+    read_resource_bytes,
+    resource_path,
+    status_icon_asset,
+)
 
 
 @pytest.mark.parametrize(
@@ -128,6 +132,23 @@ def test_resource_path_fails_closed_when_source_resource_is_missing(
 
     with pytest.raises(FileNotFoundError, match="resource not found"):
         resource_path("manifest.json")
+
+
+@pytest.mark.parametrize(
+    ("requested_size", "device_pixel_ratio", "expected_pixels"),
+    [(16, 1.0, 24), (24, 1.0, 24), (24, 2.0, 48), (30, 1.0, 32)],
+)
+def test_status_icon_asset_chooses_minimum_or_high_dpi_source(
+    requested_size: int, device_pixel_ratio: float, expected_pixels: int
+) -> None:
+    asset = status_icon_asset(
+        "preview",
+        requested_size,
+        device_pixel_ratio=device_pixel_ratio,
+    )
+
+    assert asset.pixel_size == expected_pixels
+    assert asset.path.name == f"preview-{expected_pixels}.png"
 
 
 def test_resource_path_resolves_frozen_standalone_resource(

@@ -81,8 +81,17 @@ def present(state: AppState) -> PresentationModel:
     } or (state.preview is PreviewState.RUNNING and state.preview_result is not None)
     source_error_detail = str(state.source_error) if state.source_error else None
     source_error_message = None
+    source_error_icon: str | None = None
     if state.source is SourceState.ERROR:
         source_error_message = source_error_copy(state.source_error)
+        source_error_icon = "error"
+    result_status_icon = (
+        "preview"
+        if state.preview is PreviewState.CURRENT
+        else "stale"
+        if state.preview is PreviewState.STALE
+        else None
+    )
     artifact = state.artifact_result
     artifact_path = str(artifact.output_path) if artifact else None
     if active or not ready:
@@ -119,6 +128,7 @@ def present(state: AppState) -> PresentationModel:
         primary_action=primary,
         focus_target=allowed.focus_target,
         source_error_message=source_error_message,
+        source_error_icon=source_error_icon,
         source_error_detail=source_error_detail,
         stale_category=state.stale_category,
         source_surface_visible=state.source in {SourceState.EMPTY, SourceState.ERROR},
@@ -134,6 +144,7 @@ def present(state: AppState) -> PresentationModel:
         result_accessible_name="Background-removed result",
         result_accessible_description=result_accessible_description,
         result_status_marker=result_status_marker,
+        result_status_icon=result_status_icon,
         recovery_visible=state.edited_cuts_error is not None,
         recovery_label=(
             "Retry Rebuild"

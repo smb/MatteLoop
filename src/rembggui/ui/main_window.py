@@ -37,7 +37,7 @@ from rembggui.ui.ports import (
 )
 from rembggui.ui.presentation_model import PresentationModel
 from rembggui.ui.presenter import present
-from rembggui.ui.preview_canvas import PreviewStage
+from rembggui.ui.preview_canvas import PreviewStage, StatusLabel
 from rembggui.ui.source_strip import SourceDropSurface, SourceStrip
 from rembggui.ui.timeline import TimelineWidget
 
@@ -101,7 +101,7 @@ class MainWindow(QMainWindow):
         self.result_canvas = self.preview_stage.result_canvas
         self.timeline_widget = TimelineWidget()
         self.timeline_placeholder = self.timeline_widget
-        self.source_error_heading = QLabel("Couldn’t read this video")
+        self.source_error_heading = StatusLabel("Couldn’t read this video")
         self.source_error_heading.setObjectName("source_error_heading")
         self.source_error_heading.setAccessibleName("Video load error")
         self.source_error_heading.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -251,20 +251,25 @@ class MainWindow(QMainWindow):
         model = present(state)
         self._render(model)
 
+    def _render_source_error(self, model: PresentationModel) -> None:
+        """Show the source failure with its icon, message and disclosed detail."""
+        self.source_error_heading.setVisible(model.source_error_visible)
+        self.source_error_copy.setVisible(model.source_error_visible)
+        self.source_error_heading.setText("Couldn’t read this video")
+        self.source_error_heading.set_status_icon(model.source_error_icon)
+        self.source_error_heading.setToolTip(model.source_error_detail or "")
+        self.source_error_heading.setAccessibleDescription(
+            model.source_error_detail or ""
+        )
+        self.source_error_copy.setText(model.source_error_message or "")
+
     def _render(self, model: PresentationModel) -> None:
         self.source_drop_surface.setVisible(model.source_surface_visible)
         self.source_strip.setVisible(model.source_strip_visible)
         self.preview_stage.setVisible(model.show_stage)
         self.timeline_widget.setVisible(model.show_timeline)
         self.timeline_widget.apply_presentation(model.timeline, not model.editor_locked)
-        self.source_error_heading.setVisible(model.source_error_visible)
-        self.source_error_copy.setVisible(model.source_error_visible)
-        self.source_error_heading.setText("Couldn’t read this video")
-        self.source_error_heading.setToolTip(model.source_error_detail or "")
-        self.source_error_heading.setAccessibleDescription(
-            model.source_error_detail or ""
-        )
-        self.source_error_copy.setText(model.source_error_message or "")
+        self._render_source_error(model)
         self.source_drop_surface.heading.setText(model.source_surface_heading)
         self.source_strip.set_presented_metadata(model)
         render_source_editor(self.original_canvas, self.inspector, model)
@@ -273,7 +278,9 @@ class MainWindow(QMainWindow):
         self.result_canvas.setAccessibleDescription(model.result_accessible_description)
         self.result_canvas.setProperty("status", model.result_status)
         self.result_canvas.setProperty("checkerboard", model.result_checkerboard)
-        self.result_canvas.set_status_marker(model.result_status_marker)
+        self.result_canvas.set_status_marker(
+            model.result_status_marker, model.result_status_icon
+        )
         self.result_canvas.style().unpolish(self.result_canvas)
         self.result_canvas.style().polish(self.result_canvas)
         self.choose_video_button.setEnabled(model.choose_enabled)

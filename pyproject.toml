@@ -45,6 +45,18 @@ packages = ["src/rembggui"]
 "resources/fonts/IBMPlexSans-SemiBold.ttf" = "rembggui/resources/fonts/IBMPlexSans-SemiBold.ttf"
 "resources/fonts/IBMPlexMono-Regular.ttf" = "rembggui/resources/fonts/IBMPlexMono-Regular.ttf"
 "resources/fonts/OFL.txt" = "rembggui/resources/fonts/OFL.txt"
+"resources/icons/error-24.png" = "rembggui/resources/icons/error-24.png"
+"resources/icons/error-32.png" = "rembggui/resources/icons/error-32.png"
+"resources/icons/error-48.png" = "rembggui/resources/icons/error-48.png"
+"resources/icons/error-64.png" = "rembggui/resources/icons/error-64.png"
+"resources/icons/preview-24.png" = "rembggui/resources/icons/preview-24.png"
+"resources/icons/preview-32.png" = "rembggui/resources/icons/preview-32.png"
+"resources/icons/preview-48.png" = "rembggui/resources/icons/preview-48.png"
+"resources/icons/preview-64.png" = "rembggui/resources/icons/preview-64.png"
+"resources/icons/stale-24.png" = "rembggui/resources/icons/stale-24.png"
+"resources/icons/stale-32.png" = "rembggui/resources/icons/stale-32.png"
+"resources/icons/stale-48.png" = "rembggui/resources/icons/stale-48.png"
+"resources/icons/stale-64.png" = "rembggui/resources/icons/stale-64.png"
 
 [tool.hatch.version]
 path = "src/rembggui/__init__.py"
