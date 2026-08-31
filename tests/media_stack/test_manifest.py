@@ -59,6 +59,19 @@ def test_manifest_pins_the_lgpl_media_sources() -> None:
         delocate="0.13.0",
         delvewheel="1.13.0",
     )
+    assert manifest.tool_sources == (
+        SourceSpec(
+            name="cython",
+            version="3.3.0",
+            url=(
+                "https://files.pythonhosted.org/packages/a9/d8/"
+                "4981ef716ad0e3ff0d3ef383aefc6b03c4a88dee33b272bf8e0d833001ca/"
+                "cython-3.3.0.tar.gz"
+            ),
+            sha256=("eed0d93fbca7087f143b42c34b05a825849bdf17f101572c2105acfa49aa88b8"),
+            archive_root="cython-3.3.0",
+        ),
+    )
     assert manifest.verification == VerificationContract(
         required_codecs=("h264", "hevc", "libwebp_anim"),
         required_formats=("mov", "webp"),
@@ -71,6 +84,30 @@ def test_manifest_pins_the_lgpl_media_sources() -> None:
         ),
         forbidden_library_fragments=("x264", "x265", "openh264"),
     )
+
+
+def test_manifest_rejects_a_malformed_tool_source_digest(tmp_path: Path) -> None:
+    path = _write_manifest(
+        tmp_path,
+        (
+            "eed0d93fbca7087f143b42c34b05a825849bdf17f101572c2105acfa49aa88b8",
+            "eed0d93fbca7087f143b42c34b05a825849bdf17f101572c2105acfa49aa88bz",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="sha256"):
+        load_manifest(path)
+
+
+def test_manifest_rejects_a_tool_source_version_different_from_the_tool(
+    tmp_path: Path,
+) -> None:
+    path = _write_manifest(tmp_path, ('cython = "3.3.0"', 'cython = "3.2.0"'))
+
+    with pytest.raises(ValueError, match="must match"):
+        load_manifest(path)
+
+
 def test_manifest_rejects_a_malformed_source_digest(tmp_path: Path) -> None:
     path = _write_manifest(
         tmp_path,

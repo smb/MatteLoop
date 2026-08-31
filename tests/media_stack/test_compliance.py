@@ -23,6 +23,12 @@ def _archive_inputs(tmp_path: Path) -> dict[str, object]:
             ("pyav", "av-16.1.0.tar.gz", b"exact pyav source"),
         )
     }
+    tool_sources = {
+        "cython": _write(
+            tmp_path / "downloads" / "cython-3.3.0.tar.gz",
+            b"exact cython source",
+        )
+    }
     licences = {
         component: (_write(tmp_path / "licences" / component / name, text),)
         for component, name, text in (
@@ -44,6 +50,7 @@ def _archive_inputs(tmp_path: Path) -> dict[str, object]:
         "target": MACOS,
         "identity": "abc123",
         "source_archives": sources,
+        "tool_source_archives": tool_sources,
         "manifest_path": _write(tmp_path / "manifest.toml", b"schema_version = 1\n"),
         "provenance_path": _write(
             tmp_path / "av.whl.provenance.json", b'{"identity":"abc123"}\n'

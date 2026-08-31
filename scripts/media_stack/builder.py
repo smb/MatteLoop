@@ -6,18 +6,23 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from email.parser import Parser
 from pathlib import Path
 from typing import Any
 
 from .compliance import create_compliance_archive
-from .manifest import MediaStackManifest, load_manifest, media_stack_identity
+from .manifest import (
+    MediaStackManifest,
+    SourceSpec,
+    load_manifest,
+    media_stack_identity,
+)
 from .platforms import (
     BuildTarget,
     detect_target,
@@ -50,15 +55,25 @@ class MediaStackBuildError(RuntimeError):
         command: Sequence[str],
         returncode: int,
         staging_dir: Path,
+        *,
+        staging_retained: bool | None = None,
     ) -> None:
         self.stage = stage
         self.command = tuple(command)
         self.returncode = returncode
         self.staging_dir = staging_dir
+        self.staging_retained = (
+            staging_dir.is_dir() if staging_retained is None else staging_retained
+        )
         rendered = " ".join(self.command)
+        staging_status = (
+            f"staging retained at {staging_dir}"
+            if self.staging_retained
+            else f"staging was not created at {staging_dir}"
+        )
         super().__init__(
             f"stage {stage!r} failed with exit code {returncode}: {rendered}; "
-            f"staging retained at {staging_dir}"
+            f"{staging_status}"
         )
 
 
@@ -86,9 +101,10 @@ def ensure_media_stack(
     """Return a freshly verified cached wheel and matching compliance material."""
     root = root.resolve()
     cache_dir = cache_dir.resolve()
+    staging = _create_staging(cache_dir)
     manifest_path = root / "packaging" / "media-stack" / "manifest.toml"
-    manifest = _load_build_manifest(manifest_path, cache_dir)
-    target = _detect_build_target(manifest, cache_dir)
+    manifest = _load_build_manifest(manifest_path, staging)
+    target = _detect_build_target(manifest, staging)
     identity = media_stack_identity(
         manifest_path,
         os_name=target.os_name,
@@ -97,8 +113,6 @@ def ensure_media_stack(
         deployment_target=target.deployment_target,
     )
     identity_dir = cache_dir / identity
-    staging = identity_dir / f"staging-{uuid.uuid4().hex}"
-    staging.mkdir(parents=True)
     context = _context(
         root, manifest_path, manifest, target, identity, identity_dir, staging, runner
     )
@@ -111,6 +125,20 @@ def ensure_media_stack(
     artifacts = _build_media_stack(context)
     shutil.rmtree(staging)
     return artifacts
+
+
+def _create_staging(cache_dir: Path) -> Path:
+    staging = cache_dir / f".staging-{uuid.uuid4().hex}"
+    try:
+        staging.mkdir(parents=True)
+    except OSError as error:
+        raise MediaStackBuildError(
+            "staging",
+            ("mkdir", str(staging)),
+            error.errno or 1,
+            staging,
+        ) from error
+    return staging
 
 
 def _context(
@@ -242,7 +270,10 @@ def _reverify_cached(context: _BuildContext, artifacts: MediaStackArtifacts) -> 
 
 def _build_media_stack(context: _BuildContext) -> MediaStackArtifacts:
     try:
-        archives, sources = _stage_sources(context)
+        archives, sources = _stage_sources(context, context.manifest.sources)
+        tool_archives, tool_sources = _stage_sources(
+            context, context.manifest.tool_sources
+        )
         prefix = context.staging / "prefix"
         prefix.mkdir()
         _build_libraries(context, sources, prefix)
@@ -250,7 +281,15 @@ def _build_media_stack(context: _BuildContext) -> MediaStackArtifacts:
         sidecar = _write_provenance(context, wheel)
         report = context.staging / "verification-report.json"
         _verify(context, wheel, report)
-        archive = _create_archive(context, archives, sources, sidecar, report)
+        archive = _create_archive(
+            context,
+            archives,
+            sources,
+            tool_archives,
+            tool_sources,
+            sidecar,
+            report,
+        )
         return _promote_build(context, wheel, sidecar, report, archive)
     except MediaStackBuildError:
         raise
@@ -262,11 +301,12 @@ def _build_media_stack(context: _BuildContext) -> MediaStackArtifacts:
 
 def _stage_sources(
     context: _BuildContext,
+    specifications: Sequence[SourceSpec],
 ) -> tuple[dict[str, Path], dict[str, Path]]:
     archives: dict[str, Path] = {}
     extracted: dict[str, Path] = {}
     try:
-        for source in context.manifest.sources:
+        for source in specifications:
             archive = ensure_source(source, context.identity_dir / "sources")
             destination = context.staging / "sources" / source.name
             root = extract_source(archive, destination, source.archive_root)
@@ -359,6 +399,8 @@ def _create_archive(
     context: _BuildContext,
     archives: Mapping[str, Path],
     sources: Mapping[str, Path],
+    tool_archives: Mapping[str, Path],
+    tool_sources: Mapping[str, Path],
     sidecar: Path,
     report: Path,
 ) -> Path:
@@ -367,13 +409,14 @@ def _create_archive(
         target=context.target,
         identity=context.identity,
         source_archives=archives,
+        tool_source_archives=tool_archives,
         manifest_path=context.manifest_path,
         provenance_path=sidecar,
         report_path=report,
         commands=_archive_commands(context),
         tool_versions=_effective_tool_versions(context),
         compiler_evidence=_compiler_evidence(context),
-        licence_files=_licence_files(context, sources),
+        licence_files=_licence_files(context, sources, tool_sources),
     )
 
 
@@ -408,16 +451,33 @@ def _effective_tool_versions(context: _BuildContext) -> dict[str, str]:
 
 
 def _compiler_evidence(context: _BuildContext) -> str:
-    completed = _run_command(context, "toolchain", ("cmake", "--version"))
-    return (
-        f"Python: {platform.python_version()}\n"
-        f"Python compiler: {platform.python_compiler()}\n"
-        f"{completed.stdout.strip()}\n"
+    compiler = _compiler_command(context.target)
+    probes = (
+        (compiler, _run_command(context, "compiler", compiler)),
+        (
+            ("cmake", "--version"),
+            _run_command(context, "cmake", ("cmake", "--version")),
+        ),
     )
+    evidence = [f"Python: {platform.python_version()}\n"]
+    for command, completed in probes:
+        evidence.append(f"$ {shlex.join(command)}\n{completed.stdout.strip()}\n")
+    return "".join(evidence)
+
+
+def _compiler_command(target: BuildTarget) -> tuple[str, ...]:
+    if target.target_id == "windows-x64":
+        return ("cl",)
+    configured = shlex.split(os.environ.get("CC", "cc"))
+    if not configured:
+        configured = ["cc"]
+    return (*configured, "--version")
 
 
 def _licence_files(
-    context: _BuildContext, sources: Mapping[str, Path]
+    context: _BuildContext,
+    sources: Mapping[str, Path],
+    tool_sources: Mapping[str, Path],
 ) -> dict[str, tuple[Path, ...]]:
     licences = {
         "ffmpeg": _required_files(
@@ -425,8 +485,13 @@ def _licence_files(
         ),
         "libwebp": _required_files(sources["libwebp"], ("COPYING",)),
         "pyav": _first_required_files(sources["pyav"], ("LICENSE.txt", "LICENSE")),
+        "cython": _required_files(
+            tool_sources["cython"], ("COPYING.txt", "LICENSE.txt")
+        ),
     }
     for package in _effective_tool_versions(context):
+        if package == "cython":
+            continue
         licences[package] = _tool_licences(context.tool_python, package)
     return licences
 
@@ -466,21 +531,7 @@ def _tool_licences(tool_python: Path, package: str) -> tuple[Path, ...]:
         )
         if candidates:
             return candidates
-        metadata_file = metadata / "METADATA"
-        if _metadata_declares_licence(metadata_file):
-            return (metadata_file,)
     raise ValueError(f"installed tool {package} has no licence file")
-
-
-def _metadata_declares_licence(path: Path) -> bool:
-    if not path.is_file():
-        return False
-    metadata = Parser().parsestr(path.read_text(encoding="utf-8"))
-    return bool(
-        metadata.get("License")
-        or metadata.get("License-Expression")
-        or metadata.get_all("License-File")
-    )
 
 
 def _promote_build(
@@ -491,10 +542,24 @@ def _promote_build(
     archive: Path,
 ) -> MediaStackArtifacts:
     finished = (context.identity_dir / "finished").resolve()
-    finished.mkdir(exist_ok=True)
-    destinations = [finished / path.name for path in (wheel, sidecar, report, archive)]
-    for source, destination in zip((wheel, sidecar, report, archive), destinations):
-        _promote_file(source, destination)
+    candidate = context.identity_dir / f".finished-candidate-{uuid.uuid4().hex}"
+    backup = context.identity_dir / f".finished-backup-{uuid.uuid4().hex}"
+    sources = (wheel, sidecar, report, archive)
+    destinations = [finished / path.name for path in sources]
+    try:
+        candidate.mkdir()
+        for source in sources:
+            os.replace(source, candidate / source.name)
+        _switch_finished_directory(context, candidate, finished, backup)
+    except MediaStackBuildError:
+        raise
+    except OSError as error:
+        raise MediaStackBuildError(
+            "promote",
+            ("replace", str(candidate), str(finished)),
+            error.errno or 1,
+            context.staging,
+        ) from error
     return MediaStackArtifacts(
         wheel=destinations[0],
         provenance=destinations[1],
@@ -502,6 +567,32 @@ def _promote_build(
         compliance_archive=destinations[3],
         identity=context.identity,
     )
+
+
+def _switch_finished_directory(
+    context: _BuildContext, candidate: Path, finished: Path, backup: Path
+) -> None:
+    had_finished = finished.is_dir()
+    if had_finished:
+        os.replace(finished, backup)
+    try:
+        os.replace(candidate, finished)
+    except OSError as error:
+        if had_finished:
+            os.replace(backup, finished)
+        failed_candidate = context.staging / "failed-finished-candidate"
+        try:
+            os.replace(candidate, failed_candidate)
+        except OSError:
+            pass
+        raise MediaStackBuildError(
+            "promote",
+            ("replace", str(candidate), str(finished)),
+            error.errno or 1,
+            context.staging,
+        ) from error
+    if had_finished:
+        shutil.rmtree(backup)
 
 
 def _promote_file(source: Path, destination: Path) -> None:

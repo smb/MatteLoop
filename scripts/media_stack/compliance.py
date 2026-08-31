@@ -15,6 +15,7 @@ from typing import Any
 from .platforms import BuildTarget
 
 _SOURCE_NAMES = frozenset(("ffmpeg", "libwebp", "pyav"))
+_TOOL_SOURCE_NAMES = frozenset(("cython",))
 _COMMON_LICENCES = frozenset(
     ("ffmpeg", "libwebp", "pyav", "build", "setuptools", "cython", "wheel")
 )
@@ -26,6 +27,7 @@ def create_compliance_archive(
     target: BuildTarget,
     identity: str,
     source_archives: Mapping[str, Path],
+    tool_source_archives: Mapping[str, Path],
     manifest_path: Path,
     provenance_path: Path,
     report_path: Path,
@@ -35,11 +37,12 @@ def create_compliance_archive(
     licence_files: Mapping[str, Sequence[Path]],
 ) -> Path:
     """Create and atomically publish one target-specific compliance archive."""
-    _validate_inputs(target, source_archives, licence_files)
+    _validate_inputs(target, source_archives, tool_source_archives, licence_files)
     members = _archive_members(
         target=target,
         identity=identity,
         source_archives=source_archives,
+        tool_source_archives=tool_source_archives,
         manifest_path=manifest_path,
         provenance_path=provenance_path,
         report_path=report_path,
@@ -60,10 +63,13 @@ def create_compliance_archive(
 def _validate_inputs(
     target: BuildTarget,
     sources: Mapping[str, Path],
+    tool_sources: Mapping[str, Path],
     licences: Mapping[str, Sequence[Path]],
 ) -> None:
     if set(sources) != _SOURCE_NAMES:
         raise ValueError("compliance sources must be exactly FFmpeg, libwebp, and PyAV")
+    if set(tool_sources) != _TOOL_SOURCE_NAMES:
+        raise ValueError("compliance tool sources must contain exactly Cython")
     repair_tool = "delocate" if target.target_id == "macos-arm64" else "delvewheel"
     missing = sorted((_COMMON_LICENCES | {repair_tool}) - set(licences))
     if missing:
@@ -74,9 +80,16 @@ def _validate_inputs(
 
 def _archive_members(**values: Any) -> dict[str, bytes]:
     sources: Mapping[str, Path] = values["source_archives"]
+    tool_sources: Mapping[str, Path] = values["tool_source_archives"]
     licences: Mapping[str, Sequence[Path]] = values["licence_files"]
     report_path: Path = values["report_path"]
     members = {f"sources/{path.name}": path.read_bytes() for path in sources.values()}
+    members.update(
+        {
+            f"tool-sources/{path.name}": path.read_bytes()
+            for path in tool_sources.values()
+        }
+    )
     members.update(
         {
             "manifest.toml": values["manifest_path"].read_bytes(),
@@ -88,7 +101,7 @@ def _archive_members(**values: Any) -> dict[str, bytes]:
             "build/tool-versions.json": _json_bytes(values["tool_versions"]),
             "build/target.json": _target_bytes(values["target"]),
             "build/compiler-versions.txt": values["compiler_evidence"].encode(),
-            "source-checksums.json": _source_checksums(sources),
+            "source-checksums.json": _source_checksums({**sources, **tool_sources}),
             "REBUILD.md": _rebuild_instructions(values["target"], values["identity"]),
         }
     )

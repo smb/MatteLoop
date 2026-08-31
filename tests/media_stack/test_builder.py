@@ -30,8 +30,14 @@ WINDOWS_WHEEL_NAME = "av-16.1.0-cp313-cp313-win_amd64.whl"
 
 
 class RecordingRunner:
-    def __init__(self, *, fail_stage: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        fail_stage: str | None = None,
+        wheel_payload: bytes = b"verified repaired wheel",
+    ) -> None:
         self.fail_stage = fail_stage
+        self.wheel_payload = wheel_payload
         self.calls: list[tuple[tuple[str, ...], dict[str, Any]]] = []
 
     @property
@@ -60,7 +66,15 @@ class RecordingRunner:
         if stage == self.fail_stage:
             return subprocess.CompletedProcess(normalized, 9, "", "declared failure")
         self._materialize(stage, normalized)
-        stdout = "Apple clang version 17.0.0\n" if stage == "toolchain" else ""
+        outputs = {
+            "compiler": (
+                "Microsoft (R) C/C++ Optimizing Compiler Version 19.44\n"
+                if normalized[0].casefold() == "cl"
+                else "Apple clang version 17.0.0\n"
+            ),
+            "cmake": "cmake version 4.1.1\n",
+        }
+        stdout = outputs.get(stage, "")
         return subprocess.CompletedProcess(normalized, 0, stdout, "")
 
     @staticmethod
@@ -69,7 +83,9 @@ class RecordingRunner:
         if command[:2] in (("uv", "venv"), ("uv", "pip")):
             return "tools"
         if command == ("cmake", "--version"):
-            return "toolchain"
+            return "cmake"
+        if command[0] in {"cc", "clang-review", "cl"}:
+            return "compiler"
         if command[0] == "cmake":
             return "libwebp"
         if (
@@ -107,7 +123,7 @@ class RecordingRunner:
             option = "-w" if "-w" in command else "--wheel-dir"
             output = Path(command[command.index(option) + 1])
             output.mkdir(parents=True, exist_ok=True)
-            (output / Path(command[-1]).name).write_bytes(b"verified repaired wheel")
+            (output / Path(command[-1]).name).write_bytes(self.wheel_payload)
         elif stage == "verify":
             report = Path(command[command.index("--report") + 1])
             report.parent.mkdir(parents=True, exist_ok=True)
@@ -168,6 +184,18 @@ def native_target_and_sources(monkeypatch: pytest.MonkeyPatch) -> None:
             ),
             "libwebp": (("COPYING", b"libwebp licence"),),
             "pyav": (("LICENSE.txt", b"PyAV licence"),),
+            "cython": (
+                (
+                    "COPYING.txt",
+                    b"The original Pyrex code as of 2006-04 is licensed under the "
+                    b"following license.\n\nCython, which derives from Pyrex, is "
+                    b"licensed under the Apache 2.0 Software License.\n",
+                ),
+                (
+                    "LICENSE.txt",
+                    b"Apache License\nVersion 2.0, January 2004\n",
+                ),
+            ),
         }[source.name]
         with tarfile.open(archive, "w:gz") as source_archive:
             root = tarfile.TarInfo(source.archive_root)
@@ -192,6 +220,89 @@ def test_cache_miss_runs_native_build_verification_and_compliance_in_order(
     assert runner.stage_names == ["libwebp", "ffmpeg", "pyav", "repair", "verify"]
     assert artifacts.compliance_archive.is_file()
     assert artifacts.report.is_file()
+
+
+def test_invalid_manifest_retains_a_named_invocation_staging_directory(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repository"
+    manifest = root / "packaging" / "media-stack" / "manifest.toml"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("schema_version = 999\n", encoding="utf-8")
+
+    with pytest.raises(MediaStackBuildError) as raised:
+        ensure_media_stack(root, tmp_path / "cache", runner=RecordingRunner())
+
+    error = raised.value
+    assert error.stage == "manifest"
+    assert error.staging_retained is True
+    assert error.staging_dir.is_dir()
+    assert error.staging_dir.name.startswith(".staging-")
+    assert f"staging retained at {error.staging_dir}" in str(error)
+
+
+def test_invalid_target_retains_a_named_invocation_staging_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def reject_target(**_kwargs: object) -> BuildTarget:
+        raise ValueError("unsupported host")
+
+    monkeypatch.setattr(builder, "detect_target", reject_target)
+
+    with pytest.raises(MediaStackBuildError) as raised:
+        ensure_media_stack(ROOT, tmp_path / "cache", runner=RecordingRunner())
+
+    error = raised.value
+    assert error.stage == "target"
+    assert error.staging_retained is True
+    assert error.staging_dir.is_dir()
+    assert error.staging_dir.name.startswith(".staging-")
+    assert f"staging retained at {error.staging_dir}" in str(error)
+
+
+def test_staging_creation_failure_has_structured_truthful_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_mkdir = Path.mkdir
+
+    def fail_staging_mkdir(path: Path, *args: object, **kwargs: object) -> None:
+        if path.name.startswith(".staging-"):
+            raise PermissionError(13, "injected staging mkdir failure", str(path))
+        real_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", fail_staging_mkdir)
+
+    with pytest.raises(MediaStackBuildError) as raised:
+        ensure_media_stack(ROOT, tmp_path / "cache", runner=RecordingRunner())
+
+    error = raised.value
+    assert error.stage == "staging"
+    assert error.command == ("mkdir", str(error.staging_dir))
+    assert error.returncode == 13
+    assert error.staging_retained is False
+    assert not error.staging_dir.exists()
+    assert f"staging was not created at {error.staging_dir}" in str(error)
+    assert "staging retained" not in str(error)
+
+
+def test_compliance_uses_digest_bound_cython_source_and_substantive_licences(
+    tmp_path: Path,
+) -> None:
+    artifacts = ensure_media_stack(ROOT, tmp_path, runner=RecordingRunner())
+
+    with tarfile.open(artifacts.compliance_archive) as archive:
+        names = archive.getnames()
+        assert "tool-sources/cython-3.3.0.tar.gz" in names
+        assert (
+            archive.extractfile("licences/cython/COPYING.txt")
+            .read()
+            .startswith(b"The original Pyrex code as of 2006-04")
+        )
+        assert (
+            b"Apache License\nVersion 2.0"
+            in archive.extractfile("licences/cython/LICENSE.txt").read()
+        )
+        assert "licences/cython/METADATA" not in names
 
 
 def test_cache_hit_is_reverified_without_recompiling(tmp_path: Path) -> None:
@@ -253,6 +364,41 @@ def test_windows_build_uses_delvewheel_and_archives_its_licence(
         assert "licences/delvewheel/LICENSE" in archive.getnames()
 
 
+def test_macos_compiler_evidence_probes_configured_cc_and_cmake(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CC", "clang-review")
+    runner = RecordingRunner()
+
+    artifacts = ensure_media_stack(ROOT, tmp_path, runner=runner)
+
+    assert any(command == ("clang-review", "--version") for command, _ in runner.calls)
+    assert any(command == ("cmake", "--version") for command, _ in runner.calls)
+    with tarfile.open(artifacts.compliance_archive) as archive:
+        evidence = archive.extractfile("build/compiler-versions.txt").read()
+    assert b"$ clang-review --version" in evidence
+    assert b"Apple clang version 17.0.0" in evidence
+    assert b"$ cmake --version" in evidence
+    assert b"cmake version 4.1.1" in evidence
+
+
+def test_windows_compiler_evidence_probes_msvc_and_cmake(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(builder, "detect_target", lambda **_kwargs: WINDOWS)
+    runner = RecordingRunner()
+
+    artifacts = ensure_media_stack(ROOT, tmp_path, runner=runner)
+
+    assert any(command == ("cl",) for command, _ in runner.calls)
+    assert any(command == ("cmake", "--version") for command, _ in runner.calls)
+    with tarfile.open(artifacts.compliance_archive) as archive:
+        evidence = archive.extractfile("build/compiler-versions.txt").read()
+    assert b"$ cl" in evidence
+    assert b"Microsoft (R) C/C++ Optimizing Compiler" in evidence
+    assert b"$ cmake --version" in evidence
+
+
 def test_force_rebuild_runs_compilation_again(tmp_path: Path) -> None:
     first = ensure_media_stack(ROOT, tmp_path, runner=RecordingRunner())
     archive_before = first.compliance_archive.read_bytes()
@@ -292,6 +438,49 @@ def test_failed_force_rebuild_preserves_prior_verified_artifacts(
         )
 
     assert {path: path.read_bytes() for path in before} == before
+
+
+def test_failed_finished_directory_switch_restores_the_prior_complete_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = ensure_media_stack(
+        ROOT, tmp_path, runner=RecordingRunner(wheel_payload=b"first wheel")
+    )
+    finished = first.wheel.parent
+    before = {path.name: path.read_bytes() for path in finished.iterdir()}
+    real_replace = builder.os.replace
+
+    def fail_mid_switch(source: object, destination: object) -> None:
+        source_path = Path(source)
+        destination_path = Path(destination)
+        sequential_midpoint = (
+            destination_path.parent == finished
+            and destination_path.name == "verification-report.json"
+        )
+        directory_switch = (
+            source_path.name.startswith(".finished-candidate-")
+            and destination_path == finished
+        )
+        if sequential_midpoint or directory_switch:
+            raise OSError(5, "injected finished switch failure")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(builder.os, "replace", fail_mid_switch)
+
+    with pytest.raises(MediaStackBuildError) as raised:
+        ensure_media_stack(
+            ROOT,
+            tmp_path,
+            force=True,
+            runner=RecordingRunner(wheel_payload=b"second wheel"),
+        )
+
+    assert raised.value.stage == "promote"
+    assert {path.name: path.read_bytes() for path in finished.iterdir()} == before
+    assert not tuple(finished.parent.glob(".finished-backup-*"))
+    assert not tuple(finished.parent.glob(".finished-candidate-*"))
+    failed_candidate = raised.value.staging_dir / "failed-finished-candidate"
+    assert {path.name for path in failed_candidate.iterdir()} == set(before)
 
 
 def test_provenance_binds_manifest_target_abi_filename_and_digest(

@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 
 _SUPPORTED_TARGETS = ("macos-arm64", "windows-x64")
 _SOURCE_NAMES = frozenset(("ffmpeg", "libwebp", "pyav"))
+_TOOL_SOURCE_NAMES = frozenset(("cython",))
 _TOOL_NAMES = frozenset(
     ("build", "setuptools", "cython", "wheel", "delocate", "delvewheel")
 )
@@ -65,6 +66,7 @@ class MediaStackManifest:
     python_abi: str
     macos_deployment_target: str
     sources: tuple[SourceSpec, ...]
+    tool_sources: tuple[SourceSpec, ...]
     tools: ToolVersions
     verification: VerificationContract
 
@@ -81,6 +83,7 @@ def load_manifest(path: Path) -> MediaStackManifest:
             "python_abi",
             "macos_deployment_target",
             "sources",
+            "tool_sources",
             "tools",
             "verification",
         },
@@ -98,8 +101,13 @@ def load_manifest(path: Path) -> MediaStackManifest:
     deployment_target = _require_pinned_version(
         raw["macos_deployment_target"], "macos_deployment_target"
     )
-    sources = _load_sources(raw["sources"])
+    sources = _load_sources(raw["sources"], _SOURCE_NAMES, "sources")
+    tool_sources = _load_sources(
+        raw["tool_sources"], _TOOL_SOURCE_NAMES, "tool_sources"
+    )
     tools = _load_tools(raw["tools"])
+    if tool_sources[0].version != tools.cython:
+        raise ValueError("tool_sources.cython version must match tools.cython")
     verification = _load_verification(raw["verification"])
     return MediaStackManifest(
         schema_version=schema_version,
@@ -107,6 +115,7 @@ def load_manifest(path: Path) -> MediaStackManifest:
         python_abi=python_abi,
         macos_deployment_target=deployment_target,
         sources=sources,
+        tool_sources=tool_sources,
         tools=tools,
         verification=verification,
     )
@@ -122,46 +131,52 @@ def media_stack_identity(
     builder_revision: int = 1,
 ) -> str:
     """Return the short cache identity for one manifest and build contract."""
-    payload = manifest_path.read_bytes() + b"\0" + json.dumps(
-        {
-            "builder_revision": builder_revision,
-            "deployment_target": deployment_target,
-            "machine": machine.lower(),
-            "os_name": os_name,
-            "python_tag": python_tag,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    payload = (
+        manifest_path.read_bytes()
+        + b"\0"
+        + json.dumps(
+            {
+                "builder_revision": builder_revision,
+                "deployment_target": deployment_target,
+                "machine": machine.lower(),
+                "os_name": os_name,
+                "python_tag": python_tag,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
     return hashlib.sha256(payload).hexdigest()[:24]
 
 
-def _load_sources(value: Any) -> tuple[SourceSpec, ...]:
+def _load_sources(
+    value: Any, expected_names: frozenset[str], context: str
+) -> tuple[SourceSpec, ...]:
     if not isinstance(value, list):
-        raise ValueError("sources must be an array of tables")
+        raise ValueError(f"{context} must be an array of tables")
     sources: list[SourceSpec] = []
     for index, raw_source in enumerate(value):
-        source = _require_mapping(raw_source, f"sources[{index}]")
-        _require_keys(source, _SOURCE_FIELDS, f"sources[{index}]")
-        name = _require_string(source["name"], f"sources[{index}].name")
-        version = _require_pinned_version(
-            source["version"], f"sources[{index}].version"
-        )
-        url = _require_url(source["url"], version, f"sources[{index}].url")
-        sha256 = _require_string(source["sha256"], f"sources[{index}].sha256")
+        item = f"{context}[{index}]"
+        source = _require_mapping(raw_source, item)
+        _require_keys(source, _SOURCE_FIELDS, item)
+        name = _require_string(source["name"], f"{item}.name")
+        version = _require_pinned_version(source["version"], f"{item}.version")
+        url = _require_url(source["url"], version, f"{item}.url")
+        sha256 = _require_string(source["sha256"], f"{item}.sha256")
         if not _SHA256.fullmatch(sha256):
             raise ValueError(
                 f"{name} sha256 must be 64 lowercase hexadecimal characters"
             )
-        archive_root = _require_string(
-            source["archive_root"], f"sources[{index}].archive_root"
-        )
+        archive_root = _require_string(source["archive_root"], f"{item}.archive_root")
         if _FLOATING_TOKEN.search(archive_root):
             raise ValueError(f"{name} archive_root must be pinned")
         sources.append(SourceSpec(name, version, url, sha256, archive_root))
     names = tuple(source.name for source in sources)
-    if len(names) != len(set(names)) or set(names) != _SOURCE_NAMES:
-        raise ValueError(f"source names must be exactly one each of {_SOURCE_NAMES!r}")
+    if len(names) != len(set(names)) or set(names) != expected_names:
+        source_kind = "source" if context == "sources" else "tool source"
+        raise ValueError(
+            f"{source_kind} names must be exactly one each of {expected_names!r}"
+        )
     return tuple(sources)
 
 
@@ -233,8 +248,7 @@ def _require_strings(value: Any, context: str) -> tuple[str, ...]:
     if not isinstance(value, list):
         raise ValueError(f"{context} must be an array of strings")
     return tuple(
-        _require_string(item, f"{context}[{index}]")
-        for index, item in enumerate(value)
+        _require_string(item, f"{context}[{index}]") for index, item in enumerate(value)
     )
 
 
