@@ -202,8 +202,9 @@ def test_newer_source_result_wins_when_an_older_worker_finishes_late(qtbot) -> N
     assert getattr(store.state.source_value, "path", None) == new_path
 
 
-def test_choose_video_uses_native_supported_video_filter(
-    monkeypatch: pytest.MonkeyPatch, qtbot
+@pytest.mark.parametrize("replace", [False, True])
+def test_open_video_uses_one_caption_for_empty_and_loaded_source(
+    monkeypatch: pytest.MonkeyPatch, qtbot, replace: bool
 ) -> None:
     path = Path("/tmp/chosen.mov")
     adapter = FakeSourceAdapter(
@@ -220,11 +221,11 @@ def test_choose_video_uses_native_supported_video_filter(
     monkeypatch.setattr(QFileDialog, "getOpenFileName", choose_file)
     store = ReducerStore()
     controller = SourceController(store, source_adapter=adapter)
-    controller.dispatch(ChooseVideoRequested(replace=True))
+    controller.dispatch(ChooseVideoRequested(replace=replace))
 
     qtbot.waitUntil(lambda: store.state.source is SourceState.READY, timeout=5000)
     qtbot.waitUntil(lambda: controller.active_load_count == 0, timeout=5000)
     assert captured == {
-        "caption": "Replace video",
+        "caption": "Open video",
         "filter": "Video files (*.mp4 *.mov *.webm *.mkv)",
     }

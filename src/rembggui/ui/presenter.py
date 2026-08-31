@@ -29,7 +29,7 @@ def present(state: AppState) -> PresentationModel:
     if state.source is SourceState.LOADING:
         message = "Reading video…"
     elif state.source is SourceState.ERROR:
-        message = "This video could not be read. Choose another video."
+        message = "This video could not be read. Open another video."
     elif state.preview is PreviewState.ERROR:
         marker = "Preview failed"
         message = "Preview failed — retry Preview Frame"
@@ -83,7 +83,8 @@ def present(state: AppState) -> PresentationModel:
     source_error_message = None
     if state.source is SourceState.ERROR:
         source_error_message = source_error_copy(state.source_error)
-    artifact_path = str(state.artifact_result.value) if state.artifact_result else None
+    artifact = state.artifact_result
+    artifact_path = str(artifact.output_path) if artifact else None
     if active or not ready:
         primary: str | None = None
     elif state.preview is PreviewState.CURRENT and allowed.can_render:
@@ -124,7 +125,7 @@ def present(state: AppState) -> PresentationModel:
         source_strip_visible=state.source in {SourceState.LOADING, SourceState.READY},
         source_error_visible=state.source is SourceState.ERROR,
         source_surface_heading=(
-            "Choose another video"
+            "Open another video"
             if state.source is SourceState.ERROR
             else "Drop a video here"
         ),

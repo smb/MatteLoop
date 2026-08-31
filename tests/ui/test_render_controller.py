@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
-from threading import get_ident
+from threading import Event, get_ident
 
 from PIL import Image
 from PySide6.QtCore import Qt
@@ -149,6 +149,45 @@ class FakeRenderRuntime(PreviewRuntime):
         return
 
 
+class DetailedRenderRuntime(FakeRenderRuntime):
+    active_provider = "CoreMLExecutionProvider"
+
+    def render(self, request, context) -> RenderArtifact:
+        self.render_requests.append(request)
+        return type(
+            "Artifact",
+            (),
+            {
+                "output_path": request.output.path,
+                "frame_count": 7,
+                "width": 640,
+                "height": 360,
+                "file_size": 2 * 1024**2,
+                "duration_ms": 2500,
+                "rebuilt": False,
+            },
+        )()
+
+
+class BlockingRenderRuntime(FakeRenderRuntime):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = Event()
+        self.release = Event()
+
+    def render(self, request, context) -> RenderArtifact:
+        self.started.set()
+        while not self.release.wait(0.01):
+            context.checkpoint("render")
+        return super().render(request, context)
+
+
+class FailingRenderRuntime(FakeRenderRuntime):
+    def render(self, request, context) -> RenderArtifact:
+        del request, context
+        raise RuntimeError("encoder failed")
+
+
 class ServiceRenderRuntime(FakeRenderRuntime):
     def render(self, request, context) -> RenderArtifact:
         self.render_requests.append(request)
@@ -230,10 +269,117 @@ def test_render_command_writes_default_request_off_gui_thread(tmp_path, qtbot) -
     assert request.framing.stretch_x == 1
     assert request.output.path == tmp_path / "holiday clip.webp"
     assert store.state.artifact_result is not None
-    assert store.state.artifact_result.value == request.output.path
+    assert store.state.artifact_result.output_path == request.output.path
     assert [
         event.stage for event in store.events if isinstance(event, JobStageChanged)
     ] == ["Decode", "Segmentation", "Post-process", "Encode", "Validate"]
+    controller.shutdown()
+
+
+def test_successful_render_keeps_dialog_open_with_the_artifact_summary(
+    tmp_path, qtbot
+) -> None:
+    source = tmp_path / "holiday clip.mp4"
+    source.write_bytes(b"fixture")
+    runtime = DetailedRenderRuntime()
+    store = RecordingStore(_current_state(source))
+    controller = SourceController(store, preview_runtime=runtime)
+
+    controller.dispatch(RenderVideoRequested())
+
+    qtbot.waitUntil(
+        lambda: (
+            controller.render_controller.dialog is not None
+            and controller.render_controller.dialog.completion_visible
+        ),
+        timeout=5000,
+    )
+    dialog = controller.render_controller.dialog
+    result = store.state.artifact_result
+    assert dialog is not None
+    assert result is not None
+    assert dialog.isVisible()
+    assert [
+        button.text()
+        for button in (
+            dialog.open_output_button,
+            dialog.open_folder_button,
+            dialog.close_button,
+        )
+    ] == ["Open output", "Open folder", "Close"]
+    assert dialog.completion_actions.isVisible()
+    assert dialog.stage_label.text() == "Complete"
+    assert dialog.output_label.text() == "Output: holiday clip.webp"
+    assert dialog.output_label.toolTip() == str(source.with_suffix(".webp"))
+    assert dialog.output_label.accessibleDescription() == str(
+        source.with_suffix(".webp")
+    )
+    assert dialog.completion_dimensions.text() == "640 × 360"
+    assert dialog.completion_frames.text() == "7 frames"
+    assert dialog.completion_duration.text() == "0:02.500"
+    assert dialog.completion_size.text() == "2.0 MiB"
+    assert dialog.completion_fps.text() == "15 fps"
+    assert dialog.completion_cuts.text() == "Fresh segmentation"
+    assert dialog.model_provider_label.text() == "BiRefNet Portrait · Core ML"
+    assert dialog.completion_job_time.text() != "—"
+    assert result.frame_count == 7
+    assert result.width == 640
+    assert result.height == 360
+    assert result.file_size == 2 * 1024**2
+    assert result.duration_ms == 2500
+    assert result.output_fps == 15
+    assert result.model_id == "birefnet-portrait"
+    assert result.execution_provider == "CoreMLExecutionProvider"
+    assert result.cuts_reused is False
+    assert result.job_duration_ms is not None
+    assert dialog.close_button.hasFocus()
+    qtbot.mouseClick(dialog.close_button, Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: not dialog.isVisible(), timeout=1000)
+    controller.shutdown()
+
+
+def test_cancelled_render_closes_without_showing_completion_summary(
+    tmp_path, qtbot
+) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"fixture")
+    runtime = BlockingRenderRuntime()
+    store = RecordingStore(_current_state(source))
+    controller = SourceController(store, preview_runtime=runtime)
+
+    controller.dispatch(RenderVideoRequested())
+    qtbot.waitUntil(runtime.started.is_set, timeout=5000)
+    dialog = controller.render_controller.dialog
+    assert dialog is not None
+    qtbot.mouseClick(dialog.cancel_button, Qt.MouseButton.LeftButton)
+
+    qtbot.waitUntil(
+        lambda: store.state.job.phase.value == "idle" and not dialog.isVisible(),
+        timeout=5000,
+    )
+    assert not dialog.completion_visible
+    controller.shutdown()
+
+
+def test_failed_render_closes_without_showing_completion_summary(
+    tmp_path, qtbot
+) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"fixture")
+    runtime = FailingRenderRuntime()
+    store = RecordingStore(_current_state(source))
+    controller = SourceController(store, preview_runtime=runtime)
+
+    controller.dispatch(RenderVideoRequested())
+    dialog = controller.render_controller.dialog
+    assert dialog is not None
+    qtbot.waitUntil(
+        lambda: store.state.job.phase.value == "idle" and not dialog.isVisible(),
+        timeout=5000,
+    )
+
+    assert not dialog.completion_visible
+    assert store.state.artifact_result is None
     controller.shutdown()
 
 

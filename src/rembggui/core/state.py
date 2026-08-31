@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
+from pathlib import Path
 
 from rembggui.core import crop_state as _crop_state
 from rembggui.core import parameters as _parameters
@@ -78,11 +79,21 @@ class PreviewResult:
 
 @dataclass(frozen=True)
 class ArtifactResult:
-    """A rendered artifact bound to the source and request that produced it."""
+    """A rendered artifact summary bound to its source and request."""
 
     source_id: str
     request_id: str
-    value: object
+    output_path: Path | str
+    frame_count: int | None = None
+    width: int | None = None
+    height: int | None = None
+    file_size: int | None = None
+    duration_ms: int | None = None
+    output_fps: int | None = None
+    model_id: str | None = None
+    execution_provider: str | None = None
+    cuts_reused: bool | None = None
+    job_duration_ms: int | None = None
 
 @dataclass(frozen=True)
 class PreviewSnapshot:
@@ -601,7 +612,7 @@ def reduce(state: AppState, event: Event) -> AppState:
             edited_cuts_error=None,
             edited_cuts_request_id=None,
             preflight_warning=False,
-            focus_target=FocusTarget.SUCCESS_BANNER,
+            focus_target=FocusTarget.JOB_DIALOG,
         )
     if isinstance(event, RenderFailed):
         if not _matches_render_result(

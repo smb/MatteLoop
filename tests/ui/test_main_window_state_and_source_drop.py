@@ -404,9 +404,9 @@ def test_invalid_saved_geometry_falls_back_to_default(window) -> None:
 def test_accessible_names_and_focus_targets_are_keyboard_controls(window) -> None:
     value, _ = window
     assert value.source_drop_target.accessibleName() == "Video drop area"
-    assert value.choose_video_button.accessibleName() == "Choose Video"
+    assert value.choose_video_button.accessibleName() == "Open Video"
     assert value.source_filename.accessibleName() == "Source video"
-    assert value.replace_video_button.accessibleName() == "Replace video"
+    assert value.replace_video_button.accessibleName() == "Open Video"
     assert value.original_canvas.accessibleName() == "Original video frame"
     assert value.result_canvas.accessibleName() == "Background-removed result"
     assert value.timeline_placeholder.accessibleName() == "Video timeline"
@@ -438,6 +438,17 @@ def test_every_approved_state_row_has_truthful_presentation(
     assert value.primary_action_name() == primary
 
 
+def test_source_open_button_uses_one_label_in_empty_and_loaded_states(window) -> None:
+    value, _ = window
+    value.render_state(AppState())
+    assert value.choose_video_button.text() == "Open Video…"
+    assert value.choose_video_button.accessibleName() == "Open Video"
+
+    value.render_state(_ready())
+    assert value.replace_video_button.text() == "Open Video…"
+    assert value.replace_video_button.accessibleName() == "Open Video"
+
+
 def test_stale_category_is_visible_and_preview_accessible_name_is_dynamic(
     window,
 ) -> None:
@@ -453,14 +464,14 @@ def test_stale_category_is_visible_and_preview_accessible_name_is_dynamic(
     assert value.preview_button.accessibleName() == "Prepare & Preview"
 
 
-def test_focus_target_is_actual_widget_after_queued_render(window, qtbot) -> None:
+def test_render_completion_focus_is_routed_to_the_job_dialog(window, qtbot) -> None:
     value, _ = window
     value.render_state(_current())
     qtbot.wait(20)
     assert QApplication.focusWidget() is value.result_canvas
     value.render_state(_rendered())
     qtbot.wait(20)
-    assert QApplication.focusWidget() is value.success_banner
+    assert value.requested_focus_name() == "job_dialog"
 
 
 def test_wheel_and_native_specs_include_one_canonical_font_source() -> None:
@@ -624,7 +635,7 @@ def test_actual_tab_order_skips_hidden_widgets_and_reaches_success_actions(
                 reduce(AppState(), SourceLoadRequested("source", "load")),
                 SourceLoadFailed("source", "load", "bad codec"),
             ),
-            "This video could not be read. Choose another video.",
+            "This video could not be read. Open another video.",
             None,
             "error",
             False,
@@ -846,9 +857,9 @@ class LiteralPresentationRow:
     recovery_enabled: bool = False
     preview_name: str = "Preview Frame"
     drop_name: str = "Video drop area"
-    choose_name: str = "Choose Video"
+    choose_name: str = "Open Video"
     source_name: str = "Source video"
-    replace_name: str = "Replace video"
+    replace_name: str = "Open Video"
     result_name: str = "Background-removed result"
     success_description: str = "Render complete"
     artifact_description: str = ""
@@ -927,13 +938,13 @@ def _literal_presentation_rows() -> list[LiteralPresentationRow]:
         LiteralPresentationRow(
             "source_error",
             source_error,
-            "This video could not be read. Choose another video.",
+            "This video could not be read. Open another video.",
             "",
-            "This video could not be read. Choose another video.",
+            "This video could not be read. Open another video.",
             "error",
             False,
-            "Choose another video",
-            "This video could not be read. Choose another video.",
+            "Open another video",
+            "This video could not be read. Open another video.",
             True,
             False,
             True,
@@ -1323,7 +1334,7 @@ def _literal_presentation_rows() -> list[LiteralPresentationRow]:
             False,
             True,
             "render",
-            "success_banner",
+            "job_dialog",
             False,
             True,
         ),
@@ -1348,7 +1359,7 @@ def _literal_presentation_rows() -> list[LiteralPresentationRow]:
             False,
             True,
             "preview",
-            "success_banner",
+            "job_dialog",
             False,
             True,
         ),
@@ -1456,9 +1467,9 @@ def _literal_presentation_rows() -> list[LiteralPresentationRow]:
             "recovery_enabled": recovery_enabled,
             "preview_name": preview_name,
             "drop_name": "Video drop area",
-            "choose_name": "Choose Video",
+            "choose_name": "Open Video",
             "source_name": "Source video",
-            "replace_name": "Replace video",
+            "replace_name": "Open Video",
             "result_name": "Background-removed result",
             "success_description": success_description,
             "artifact_description": artifact_description,
@@ -1643,7 +1654,7 @@ def _literal_presentation_rows() -> list[LiteralPresentationRow]:
             recovery_enabled=False,
         ),
         "complete_current": contract(
-            "success_banner",
+            "job_dialog",
             choose_visible=False,
             choose_enabled=False,
             replace_visible=True,
@@ -1655,7 +1666,7 @@ def _literal_presentation_rows() -> list[LiteralPresentationRow]:
             artifact_description="/tmp/result.webp",
         ),
         "complete_no_preview": contract(
-            "success_banner",
+            "job_dialog",
             choose_visible=False,
             choose_enabled=False,
             replace_visible=True,
@@ -1715,9 +1726,10 @@ def test_complete_literal_presentation_matrix(
     qtbot.wait(20)
     workspace_button, workspace_body = value.inspector.disclosures["workspace"]
     focus_widget = QApplication.focusWidget()
-    assert (focus_widget.objectName() if focus_widget is not None else None) == (
-        row.actual_focus
-    )
+    if row.focus != "job_dialog":
+        assert (focus_widget.objectName() if focus_widget is not None else None) == (
+            row.actual_focus
+        )
     assert value.result_canvas.text() == row.message
     assert value.result_canvas.status_label.text() == row.marker
     assert value.result_canvas.accessibleDescription() == row.description

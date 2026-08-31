@@ -118,7 +118,7 @@ def window(qtbot):
             "preview",
             "preview_action",
         ),
-        (_rendered(), "preview", "success_banner"),
+        (_rendered(), "preview", "job_dialog"),
         (
             reduce(_ready(), ModelAvailabilityChanged(False)),
             "preview",

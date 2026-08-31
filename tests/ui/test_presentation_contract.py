@@ -35,16 +35,16 @@ from rembggui.ui.presenter import present
 from rembggui.ui.theme import load_packaged_fonts
 
 _SOURCE_ERROR_CASES = [
-    (ErrorCode.SOURCE_NOT_LOCAL, "Choose a video stored on this Mac."),
-    (ErrorCode.SOURCE_UNREADABLE, "Choose a video file that can be opened and read."),
-    (ErrorCode.SOURCE_NO_VIDEO, "Choose a file that contains a video track."),
-    (ErrorCode.SOURCE_CORRUPT, "Choose another video file; this one appears damaged."),
-    (ErrorCode.SOURCE_ZERO_DURATION, "Choose a video with a positive duration."),
+    (ErrorCode.SOURCE_NOT_LOCAL, "Open a video stored on this Mac."),
+    (ErrorCode.SOURCE_UNREADABLE, "Open a video file that can be opened and read."),
+    (ErrorCode.SOURCE_NO_VIDEO, "Open a file that contains a video track."),
+    (ErrorCode.SOURCE_CORRUPT, "Open another video file; this one appears damaged."),
+    (ErrorCode.SOURCE_ZERO_DURATION, "Open a video with a positive duration."),
     (ErrorCode.SOURCE_HDR_UNSUPPORTED, "Convert to 8-bit SDR and try again."),
     (ErrorCode.SOURCE_DIMENSIONS_UNSUPPORTED, "Resize to 3840×2160 or smaller."),
     (ErrorCode.SOURCE_FPS_UNSUPPORTED, "Convert the video to 60 fps or less."),
-    (ErrorCode.SOURCE_DURATION_UNSUPPORTED, "Choose a video under 10 minutes."),
-    (ErrorCode.SOURCE_FORMAT_UNSUPPORTED, "Choose an MP4, MOV, WebM, or MKV video."),
+    (ErrorCode.SOURCE_DURATION_UNSUPPORTED, "Open a video under 10 minutes."),
+    (ErrorCode.SOURCE_FORMAT_UNSUPPORTED, "Open an MP4, MOV, WebM, or MKV video."),
 ]
 
 
@@ -179,7 +179,7 @@ def test_unmapped_source_error_uses_generic_copy() -> None:
     model = present(_source_error(ErrorCode.INVALID_ERROR))
 
     assert model.source_error_message == (
-        "This video could not be read. Choose another video."
+        "This video could not be read. Open another video."
     )
     assert model.source_error_detail == "technical detail"
 

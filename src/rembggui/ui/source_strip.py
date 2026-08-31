@@ -49,9 +49,9 @@ class SourceStrip(QWidget):
         self.duration = self._label("source_duration")
         self.frame_rate = self._label("source_frame_rate")
         self.file_size = self._label("source_file_size")
-        self.replace_button = QPushButton("Replace…")
+        self.replace_button = QPushButton("Open Video…")
         self.replace_button.setObjectName("replace_video")
-        self.replace_button.setAccessibleName("Replace video")
+        self.replace_button.setAccessibleName("Open Video")
         for widget in (
             self.filename,
             self.dimensions,
@@ -99,10 +99,10 @@ class SourceDropSurface(QWidget):
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.heading = QLabel("Drop a video here")
         self.heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.heading.setAccessibleName("Choose a video")
-        self.button = QPushButton("Choose Video…")
+        self.heading.setAccessibleName("Open a video")
+        self.button = QPushButton("Open Video…")
         self.button.setObjectName("choose_video")
-        self.button.setAccessibleName("Choose Video")
+        self.button.setAccessibleName("Open Video")
         self.button.setMinimumHeight(44)
         layout.addWidget(self.heading)
         layout.addWidget(self.button, alignment=Qt.AlignmentFlag.AlignCenter)

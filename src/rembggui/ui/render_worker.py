@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Protocol
 
@@ -54,6 +55,7 @@ class RenderWorker(QObject):
 
     @Slot()
     def run(self) -> None:
+        started_ns = time.monotonic_ns()
         try:
             provider_emitted = self._prepare_for_render()
             if self._rebuild_workspace is None:
@@ -74,10 +76,20 @@ class RenderWorker(QObject):
             output_path = artifact.output_path
             if not isinstance(output_path, Path):
                 raise TypeError("render result did not contain an output path")
+            provider = getattr(self._runtime, "active_provider", None)
+            if not isinstance(provider, str) or not provider:
+                provider = self._request.segmentation.execution_provider
             self.notification.emit(
                 RenderSucceeded(
                     self._job_id,
-                    ArtifactResult(self._source_id, self._request_id, output_path),
+                    _artifact_result(
+                        self._source_id,
+                        self._request_id,
+                        self._request,
+                        artifact,
+                        provider,
+                        max(0, (time.monotonic_ns() - started_ns) // 1_000_000),
+                    ),
                 )
             )
         except BaseException as error:
@@ -146,3 +158,42 @@ def _render_error(error: BaseException, job_id: str) -> AppError:
         "retry-render",
         job_id,
     )
+
+
+def _artifact_result(
+    source_id: str,
+    request_id: str,
+    request: RenderRequest,
+    artifact: RenderArtifact,
+    provider: str,
+    job_duration_ms: int,
+) -> ArtifactResult:
+    """Copy only the render summary needed after the worker has finished."""
+    return ArtifactResult(
+        source_id,
+        request_id,
+        artifact.output_path,
+        frame_count=_int_field(getattr(artifact, "frame_count", None)),
+        width=_int_field(getattr(artifact, "width", None)),
+        height=_int_field(getattr(artifact, "height", None)),
+        file_size=_int_field(getattr(artifact, "file_size", None)),
+        duration_ms=_int_field(getattr(artifact, "duration_ms", None)),
+        output_fps=request.sampling.fps,
+        model_id=request.segmentation.model_id,
+        execution_provider=provider,
+        cuts_reused=_bool_field(
+            getattr(artifact, "rebuilt", None),
+            default=False,
+        ),
+        job_duration_ms=job_duration_ms,
+    )
+
+
+def _int_field(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
+
+
+def _bool_field(value: object, *, default: bool) -> bool:
+    return value if isinstance(value, bool) else default

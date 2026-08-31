@@ -53,6 +53,16 @@ Nothing else gates V1. When that sentence is true end to end, V1 is done.
 | Persistence | `QSettings` primitives, window geometry, output directory. |
 | Cuts | Post-segmentation cuts are persisted, editable, selectable from a promoted cut-set picker, and reusable through Rebuild. **Scope reopened 2026-08-31:** re-rendering an edited clip otherwise repeats segmentation, including a 927 MiB model and 39 inferences, merely to re-encode. |
 
+### Recorded design deviations
+
+- **Render completion summary, 2026-08-31:** a successful Render or Rebuild now
+  leaves the job dialog open in a Complete state with the output summary and
+  Open output, Open folder, and Close actions. The design document specified
+  automatic close and focus on the success banner; this changed because a
+  render may run unattended for minutes, and the user needs to see what was
+  produced when they return. The existing success banner remains for later
+  reference.
+
 ---
 
 ## Deferred past V1

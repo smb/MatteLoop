@@ -331,7 +331,8 @@ class SourceController(QObject):
         )
 
     def _choose_video(self, replace: bool) -> None:
-        caption = "Replace video" if replace else "Choose video"
+        del replace
+        caption = "Open video"
         filename, _selected_filter = QFileDialog.getOpenFileName(
             self._dialog_parent,
             caption,

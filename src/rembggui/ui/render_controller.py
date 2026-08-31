@@ -634,6 +634,8 @@ class RenderController(QObject):
             self._dialog = PreviewJobDialog(self._dialog_parent)
         if not self._dialog_cancel_connected:
             self._dialog.cancel_requested.connect(self._cancel_active)
+            self._dialog.open_output_requested.connect(self._open_output)
+            self._dialog.open_folder_requested.connect(self._open_output_folder)
             self._dialog_cancel_connected = True
         self._dialog.reset(
             "Rebuilding from edited cuts"
@@ -728,7 +730,14 @@ class RenderController(QObject):
         self._store.dispatch(notification)
         if self._store.state.job.phase is JobState.IDLE:
             if self._dialog is not None:
-                self._dialog.close_for_terminal()
+                if isinstance(notification, RenderSucceeded):
+                    result = self._store.state.artifact_result
+                    if result is not None:
+                        self._dialog.show_completion(result)
+                    else:
+                        self._dialog.close_for_terminal()
+                else:
+                    self._dialog.close_for_terminal()
             if self._active_job_id == job_id:
                 self._active_job_id = None
                 self._active_workspace = None
@@ -741,7 +750,7 @@ class RenderController(QObject):
         state = self._store.state
         if not capabilities(state).can_open_output or state.artifact_result is None:
             return
-        path = _path_value(state.artifact_result.value)
+        path = _path_value(state.artifact_result.output_path)
         if path is not None:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
@@ -749,7 +758,7 @@ class RenderController(QObject):
         state = self._store.state
         if not capabilities(state).can_open_folder or state.artifact_result is None:
             return
-        path = _path_value(state.artifact_result.value)
+        path = _path_value(state.artifact_result.output_path)
         if path is not None:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
 

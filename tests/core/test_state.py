@@ -331,7 +331,7 @@ def matrix_cases() -> list[pytest.ParamSpecArg]:
         pytest.param(
             rendered,
             CapabilityExpectation(
-                focus=FocusTarget.SUCCESS_BANNER,
+                focus=FocusTarget.JOB_DIALOG,
                 replace_source=True,
                 edit=True,
                 preview=True,
@@ -634,7 +634,7 @@ def test_render_success_requires_source_request_and_job_identities() -> None:
 
     assert completed.artifact is ArtifactState.VALID
     assert completed.job.phase is JobState.IDLE
-    assert capabilities(completed).focus_target is FocusTarget.SUCCESS_BANNER
+    assert capabilities(completed).focus_target is FocusTarget.JOB_DIALOG
 
 
 def test_matching_success_can_safely_terminate_a_cancelling_preview() -> None:

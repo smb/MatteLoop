@@ -4,7 +4,7 @@
     "long_functions": 1
   },
   "src/rembggui/core/state.py": {
-    "lines": 869,
+    "lines": 880,
     "long_functions": 1
   },
   "src/rembggui/core/webp.py": {
@@ -84,7 +84,7 @@
     "long_functions": 1
   },
   "src/rembggui/ui/presenter.py": {
-    "lines": 159,
+    "lines": 160,
     "long_functions": 1
   }
 }
