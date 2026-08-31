@@ -25,6 +25,7 @@ from matteloop.jobs.source import decode_frame, probe_source
 from matteloop.smoke_child import spawn_smoke_target
 
 _FRAME_SIZE = (128, 128)
+_SMOKE_VIDEO_ENCODER = "mpeg4"
 _SPAWN_TIMEOUT_SECONDS = 30.0
 _SPAWN_CLEANUP_TIMEOUT_SECONDS = 5.0
 
@@ -145,7 +146,6 @@ def run_smoke(work_dir: Path, use_fake_model: bool = True) -> SmokeResult:
         raise TypeError("use_fake_model must be a bool")
     work_dir.mkdir(parents=True, exist_ok=True)
     rgba_owners = RgbaOwnershipTracker(_FRAME_SIZE)
-
     with tempfile.TemporaryDirectory(prefix="matteloop-smoke-", dir=work_dir) as raw:
         scratch = Path(raw)
         qt_platform, qt_image_formats = _check_qt_image_runtime()
@@ -244,7 +244,7 @@ def _check_qt_image_runtime() -> tuple[str, tuple[str, ...]]:
 def _generate_video_with_pyav(path: Path) -> Path:
     time_base = Fraction(1, 2)
     with av.open(str(path), mode="w") as container:
-        stream = container.add_stream("libx264", rate=2)
+        stream = cast(Any, container.add_stream(_SMOKE_VIDEO_ENCODER, rate=2))
         stream.width, stream.height = _FRAME_SIZE
         stream.pix_fmt = "yuv420p"
         stream.codec_context.time_base = time_base

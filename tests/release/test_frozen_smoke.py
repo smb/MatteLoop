@@ -26,6 +26,8 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 def test_native_smoke_exercises_real_offline_runtime_boundaries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    assert smoke_module._SMOKE_VIDEO_ENCODER == "mpeg4"
+
     def forbidden_network(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("native smoke attempted network access")
 
