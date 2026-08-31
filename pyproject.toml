@@ -25,6 +25,8 @@ matteloop = "matteloop.app:main"
 [dependency-groups]
 dev = [
   "build>=1.2,<2",
+  "delocate==0.13.0; sys_platform == 'darwin'",
+  "delvewheel==1.13.0; sys_platform == 'win32'",
   "mypy>=1.15,<2",
   "Nuitka==2.8.10",
   "patchelf==0.17.2.4; sys_platform == 'linux'",
