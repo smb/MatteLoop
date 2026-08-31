@@ -23,6 +23,8 @@ def ensure_source(
     opener: UrlOpener = urllib.request.urlopen,
 ) -> Path:
     """Return a cached source archive after checking its pinned SHA-256 digest."""
+    if urlsplit(source.url).scheme != "https":
+        raise ValueError(f"source URL must use HTTPS: {source.name}")
     cache_dir.mkdir(parents=True, exist_ok=True)
     archive = cache_dir / _archive_name(source)
     if archive.is_file() and _digest(archive) == source.sha256:
@@ -52,8 +54,12 @@ def extract_source(archive: Path, destination: Path, expected_root: str) -> Path
             raise ValueError(
                 f"archive root must be exactly {expected_root!r}, got {sorted(roots)!r}"
             )
+        _require_directory_root(source_archive, expected_root)
         source_archive.extractall(destination, filter="data")
-    return destination / expected_root
+    extracted_root = destination / expected_root
+    if not extracted_root.is_dir() or extracted_root.is_symlink():
+        raise ValueError("extracted archive root must be a real directory")
+    return extracted_root
 
 
 def _archive_name(source: SourceSpec) -> str:
@@ -79,9 +85,21 @@ def _prepare_destination(destination: Path) -> None:
 def _top_level_roots(source_archive: tarfile.TarFile) -> set[str]:
     roots: set[str] = set()
     for member in source_archive.getmembers():
-        parts = tuple(
-            part for part in PurePosixPath(member.name).parts if part not in (".", "/")
-        )
+        parts = _member_parts(member)
         if parts:
             roots.add(parts[0])
     return roots
+
+
+def _require_directory_root(
+    source_archive: tarfile.TarFile, expected_root: str
+) -> None:
+    for member in source_archive.getmembers():
+        if _member_parts(member) == (expected_root,) and not member.isdir():
+            raise ValueError("archive root entry must be a directory")
+
+
+def _member_parts(member: tarfile.TarInfo) -> tuple[str, ...]:
+    return tuple(
+        part for part in PurePosixPath(member.name).parts if part not in (".", "/")
+    )
