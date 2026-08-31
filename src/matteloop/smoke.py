@@ -42,6 +42,7 @@ class SmokeResult:
     shared_memory_roundtrip: bool
     shared_memory_unlinked: bool
     fake_session_used: bool
+    rembg_session_classes: int
     peak_full_res_rgba_owners: int
 
     def to_primitives(self) -> dict[str, object]:
@@ -94,6 +95,29 @@ def _ownership_is_measurable() -> bool:
     checks what it can actually prove instead.
     """
     return globals().get("__compiled__") is None
+
+
+def _count_loadable_rembg_sessions() -> int:
+    """Resolve every V1 rembg session class without touching model weights.
+
+    The frozen build excludes rembg.bg, so session classes are imported through
+    a stubbed package rather than rembg's own __init__. Nothing else in the
+    smoke exercises that path — it runs a fake session — so without this check a
+    bundle that cannot load a single real model would still report ok.
+    """
+    from matteloop.jobs.rembg_runtime import (
+        V1_SESSION_MODULE_COUNT,
+        load_rembg_session_classes,
+    )
+
+    classes = load_rembg_session_classes()
+    count = len(cast("list[object]", classes)) if isinstance(classes, list) else 0
+    if count and count != V1_SESSION_MODULE_COUNT:
+        raise RuntimeError(
+            f"resolved {count} rembg session classes, expected "
+            f"{V1_SESSION_MODULE_COUNT}"
+        )
+    return count
 
 
 def _assert_ownership_bounds(rgba_owners: RgbaOwnershipTracker) -> None:
@@ -149,6 +173,7 @@ def run_smoke(work_dir: Path, use_fake_model: bool = True) -> SmokeResult:
             raise RuntimeError("animated alpha WebP validation failed")
 
         child = _run_spawn_shared_memory(use_fake_model)
+        rembg_session_classes = _count_loadable_rembg_sessions()
 
     gc.collect()
     _assert_ownership_bounds(rgba_owners)
@@ -162,6 +187,7 @@ def run_smoke(work_dir: Path, use_fake_model: bool = True) -> SmokeResult:
         shared_memory_roundtrip=cast(bool, child["shared_memory_roundtrip"]),
         shared_memory_unlinked=cast(bool, child["shared_memory_unlinked"]),
         fake_session_used=cast(bool, child["fake_session_used"]),
+        rembg_session_classes=rembg_session_classes,
         peak_full_res_rgba_owners=rgba_owners.peak,
     )
 

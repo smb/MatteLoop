@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from PIL import Image
 
 import matteloop.app as app_module
 import matteloop.jobs.segmentation_host as segmentation_host_module
@@ -200,8 +201,6 @@ def test_child_rejects_forged_unsafe_erosion_before_rembg(
 @pytest.mark.parametrize(
     ("options", "expected"),
     [
-        (SegmentOptions("standard"), {"alpha_matting": False}),
-        (SegmentOptions("decontaminate"), {"alpha_matting": False}),
         (
             SegmentOptions("alpha_matting", 230, 20, 5),
             {
@@ -213,7 +212,7 @@ def test_child_rejects_forged_unsafe_erosion_before_rembg(
         ),
     ],
 )
-def test_run_rembg_uses_only_documented_edge_and_matting_kwargs(
+def test_alpha_matting_passes_only_documented_kwargs_to_rembg(
     monkeypatch: pytest.MonkeyPatch,
     options: SegmentOptions,
     expected: dict[str, object],
@@ -233,6 +232,58 @@ def test_run_rembg_uses_only_documented_edge_and_matting_kwargs(
     assert result.shape == (4, 5, 4)
     assert calls == [(session, expected)]
     assert "post_process_mask" not in calls[0][1]
+
+
+def test_the_standard_edge_path_composites_without_importing_rembg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shipped path must not change with pymatting's presence.
+
+    A frozen build has no pymatting, so routing the standard mode through
+    rembg.remove here would cover an implementation the packaged application
+    can never execute.
+    """
+
+    def fail(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("the standard edge path must not call rembg.remove")
+
+    class StandardSession:
+        def predict(self, image: Image.Image, **_: object) -> list[Image.Image]:
+            return [Image.new("L", image.size, 255)]
+
+    monkeypatch.setitem(sys.modules, "rembg", SimpleNamespace(remove=fail))
+
+    result = _run_rembg(
+        red_frame(),
+        _PreparedRembgSession(StandardSession(), ()),
+        SegmentOptions("standard"),
+    )
+
+    assert result.shape == (4, 5, 4)
+    assert (result[..., 3] == 255).all()
+
+
+def test_alpha_matting_falls_back_to_standard_when_pymatting_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    class FakeSession:
+        def predict(self, image: Image.Image, **kwargs: object) -> list[Image.Image]:
+            calls.append(kwargs)
+            return [Image.new("L", image.size, 255)]
+
+    monkeypatch.setitem(sys.modules, "pymatting", None)
+    with caplog.at_level("WARNING"):
+        result = _run_rembg(
+            red_frame(),
+            _PreparedRembgSession(FakeSession(), ()),
+            SegmentOptions("alpha_matting", 230, 20, 5),
+        )
+
+    assert result.shape == (4, 5, 4)
+    assert calls == [{}]
+    assert "pymatting is not included" in caplog.text
 
 
 @pytest.mark.parametrize(

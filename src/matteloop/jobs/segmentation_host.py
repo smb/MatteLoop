@@ -75,8 +75,8 @@ from matteloop.jobs.protocol import (
     decode_parent_message,
     encode_child_message,
     encode_parent_message,
-    validate_segment_options,
 )
+from matteloop.jobs.rembg_runtime import load_rembg_session_classes, run_rembg
 
 _JOIN_TIMEOUT_SECONDS = 1.0
 _MAX_FRAME_DIMENSION = 16_383
@@ -1332,9 +1332,7 @@ def _instantiate_verified_rembg_session(
     if ort_module is None:
         import onnxruntime as ort_module  # type: ignore[import-untyped,no-redef]
     if session_classes is None:
-        from rembg.sessions import sessions_class  # type: ignore[import-untyped]
-
-        session_classes = sessions_class
+        session_classes = load_rembg_session_classes()
     session_class = _resolve_rembg_session_class(
         model_id,
         session_classes,
@@ -1523,31 +1521,7 @@ def _model_cache_error(detail: str) -> AppError:
 def _run_rembg(
     source: Uint8Frame, session: object, options: SegmentOptions
 ) -> Uint8Frame:
-    options = validate_segment_options(options)
-    from rembg import remove  # type: ignore[import-untyped]
-
-    actual_session = session
-    inference_kwargs: dict[str, object] = {}
-    if type(session) is _PreparedRembgSession:
-        actual_session = session.session
-        inference_kwargs = dict(session.inference_kwargs)
-    inference_kwargs["alpha_matting"] = options.edge_mode == "alpha_matting"
-    if options.edge_mode == "alpha_matting":
-        inference_kwargs.update(
-            {
-                "alpha_matting_foreground_threshold": (
-                    options.alpha_matting_foreground_threshold
-                ),
-                "alpha_matting_background_threshold": (
-                    options.alpha_matting_background_threshold
-                ),
-                "alpha_matting_erode_size": options.alpha_matting_erode_size,
-            }
-        )
-    result = np.asarray(remove(source, session=actual_session, **inference_kwargs))
-    if result.dtype != np.dtype(np.uint8):
-        raise ValueError("rembg output dtype is not uint8")
-    return np.ascontiguousarray(result)
+    return run_rembg(source, session, options)
 
 
 def _validate_wire_descriptor(slot: SharedFrame) -> str | None:

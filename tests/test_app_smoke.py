@@ -114,6 +114,7 @@ def test_main_smoke_test_prints_machine_readable_success(
             shared_memory_roundtrip=True,
             shared_memory_unlinked=True,
             fake_session_used=True,
+            rembg_session_classes=13,
             peak_full_res_rgba_owners=2,
         ),
     )

@@ -55,6 +55,37 @@ def test_native_smoke_exercises_real_offline_runtime_boundaries(
         result.webp_frames = 3  # type: ignore[misc]
 
 
+def test_native_smoke_resolves_every_v1_session_class_without_weights(
+    tmp_path: Path,
+) -> None:
+    """The bundle excludes rembg.bg, so session loading needs its own evidence.
+
+    The smoke otherwise runs a fake session, which would let a build that cannot
+    resolve a single real model still report ok.
+    """
+    from matteloop.core.parameters import V1_MODEL_IDS
+    from matteloop.jobs.rembg_runtime import (
+        V1_SESSION_MODULE_COUNT,
+        load_rembg_session_classes,
+    )
+    from matteloop.jobs.segmentation_host import _resolve_rembg_session_class
+
+    result = run_smoke(tmp_path, use_fake_model=True)
+
+    assert result.rembg_session_classes == V1_SESSION_MODULE_COUNT
+    assert V1_SESSION_MODULE_COUNT == len(V1_MODEL_IDS)
+
+    catalog = ModelCatalog.load_resource()
+    classes = load_rembg_session_classes()
+    for model_id in V1_MODEL_IDS:
+        assert _resolve_rembg_session_class(
+            model_id,
+            classes,
+            catalog.rembg_version,
+            catalog.rembg_version,
+        ) is not None
+
+
 def test_smoke_result_contract_is_typed_and_immutable() -> None:
     assert SmokeResult.__dataclass_params__.frozen is True
     assert SmokeResult.__slots__
@@ -71,6 +102,7 @@ def test_smoke_result_exposes_the_brief_level_boundary_summary() -> None:
         shared_memory_roundtrip=True,
         shared_memory_unlinked=True,
         fake_session_used=True,
+        rembg_session_classes=13,
         peak_full_res_rgba_owners=3,
     )
 
@@ -439,9 +471,32 @@ def test_pyside_deploy_spec_parses_to_required_native_bundle_contract() -> None:
     args = set(shlex.split(parser.get("nuitka", "extra_args")))
     assert "--include-package=matteloop" in args
     assert "--include-module=matteloop.smoke_child" in args
-    assert "--include-package=rembg.sessions" in args
+    assert "--include-module=rembg.sessions.base" in args
+    assert {
+        "--include-module=rembg.sessions.birefnet_general",
+        "--include-module=rembg.sessions.birefnet_general_lite",
+        "--include-module=rembg.sessions.birefnet_portrait",
+        "--include-module=rembg.sessions.birefnet_dis",
+        "--include-module=rembg.sessions.birefnet_hrsod",
+        "--include-module=rembg.sessions.birefnet_cod",
+        "--include-module=rembg.sessions.birefnet_massive",
+        "--include-module=rembg.sessions.dis_anime",
+        "--include-module=rembg.sessions.dis_general_use",
+        "--include-module=rembg.sessions.silueta",
+        "--include-module=rembg.sessions.u2net",
+        "--include-module=rembg.sessions.u2netp",
+        "--include-module=rembg.sessions.u2net_human_seg",
+    } <= args
+    assert "--include-package=rembg.sessions" not in args
     assert "--include-package=onnxruntime" in args
     assert "--nofollow-import-to=av" in args
+    assert "--nofollow-import-to=pymatting" in args
+    assert "--nofollow-import-to=numba" in args
+    assert "--nofollow-import-to=llvmlite" in args
+    assert "--nofollow-import-to=scipy" in args
+    assert "--nofollow-import-to=skimage" in args
+    assert "--noinclude-dlls=*libqpdf*" in args
+    assert "--noinclude-dlls=*QtPdf*" in args
     assert "--disable-cache=ccache" in args
     assert "--include-module=PIL._imaging" in args
     assert "--include-module=PIL._webp" in args
@@ -459,6 +514,23 @@ def test_pyside_deploy_spec_parses_to_required_native_bundle_contract() -> None:
     assert "--noinclude-data-files=**/*.onnx" in args
     assert "--noinclude-data-files=**/tests/**" in args
     assert "--noinclude-data-files=**/*token*" in args
+
+
+def test_native_bundle_includes_project_license_notices() -> None:
+    parser = configparser.ConfigParser(
+        comment_prefixes=("/",), strict=False, allow_no_value=True
+    )
+    parser.read(
+        REPOSITORY_ROOT / "packaging" / "pysidedeploy.spec",
+        encoding="utf-8",
+    )
+
+    args = set(shlex.split(parser.get("nuitka", "extra_args")))
+
+    assert "--include-data-files=LICENSE=LICENSE" in args
+    assert (
+        "--include-data-files=THIRD_PARTY_NOTICES.md=THIRD_PARTY_NOTICES.md"
+    ) in args
 
 
 def test_pyside_deploy_accepts_spec_in_dry_run_mode(tmp_path: Path) -> None:
