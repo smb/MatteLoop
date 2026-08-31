@@ -40,6 +40,7 @@ from .sources import ensure_source, extract_source
 from .verifier import provenance_path
 
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
+_BUILDER_REVISION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +118,7 @@ def ensure_media_stack(
         machine=target.machine,
         python_tag=target.python_tag,
         deployment_target=target.deployment_target,
+        builder_revision=_BUILDER_REVISION,
     )
     identity_dir = cache_dir / identity
     context = _context(
@@ -398,6 +400,7 @@ def _build_and_repair_wheel(
         context.target, raw_wheel, prefix, repaired_output, context.tool_python
     )
     repair_environment = None
+    repair_evidence = None
     if context.target.target_id == "macos-arm64":
         repair = (str(context.tool_python), *repair)
         repair_environment = os.environ.copy()
@@ -409,12 +412,19 @@ def _build_and_repair_wheel(
         repair_environment["MACOSX_DEPLOYMENT_TARGET"] = (
             context.target.deployment_target
         )
+        repair_evidence = (
+            "env",
+            f"DYLD_LIBRARY_PATH={prefix / 'lib'}",
+            f"MACOSX_DEPLOYMENT_TARGET={context.target.deployment_target}",
+            *repair,
+        )
     _run_command(
         context,
         "repair",
         repair,
         environment=repair_environment,
         record=True,
+        record_as=repair_evidence,
     )
     return _one_wheel(repaired_output, "repair", context)
 
@@ -692,10 +702,12 @@ def _run_command(
     *,
     environment: Mapping[str, str] | None = None,
     record: bool = False,
+    record_as: Sequence[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     normalized = tuple(str(part) for part in command)
     if record:
-        context.build_commands.append(normalized)
+        evidence = normalized if record_as is None else tuple(map(str, record_as))
+        context.build_commands.append(evidence)
     kwargs: dict[str, Any] = {"check": False, "capture_output": True, "text": True}
     if environment is not None:
         kwargs["env"] = dict(environment)

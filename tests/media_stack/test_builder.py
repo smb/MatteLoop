@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tarfile
@@ -19,7 +20,7 @@ from scripts.media_stack.builder import (
     ensure_media_stack,
     main,
 )
-from scripts.media_stack.manifest import SourceSpec
+from scripts.media_stack.manifest import SourceSpec, media_stack_identity
 from scripts.media_stack.platforms import BuildTarget
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -380,7 +381,7 @@ def test_macos_repair_inherits_environment_with_staged_libraries_first(
     monkeypatch.setenv("MATTELOOP_REPAIR_SENTINEL", "preserved")
     runner = RecordingRunner()
 
-    ensure_media_stack(ROOT, tmp_path, runner=runner)
+    artifacts = ensure_media_stack(ROOT, tmp_path, runner=runner)
 
     repair_command, repair_kwargs = next(
         (command, kwargs)
@@ -400,6 +401,36 @@ def test_macos_repair_inherits_environment_with_staged_libraries_first(
     )
     assert environment["MACOSX_DEPLOYMENT_TARGET"] == "13.0"
     assert environment["MATTELOOP_REPAIR_SENTINEL"] == "preserved"
+    with tarfile.open(artifacts.compliance_archive) as archive:
+        commands = archive.extractfile("build/commands.txt").read().decode()
+    repair_line = next(
+        line for line in commands.splitlines() if "delocate-wheel" in line
+    )
+    repair_evidence = shlex.split(repair_line.removeprefix("$ "))
+    assert repair_evidence[:3] == [
+        "env",
+        "DYLD_LIBRARY_PATH=${STAGING}/prefix/lib",
+        "MACOSX_DEPLOYMENT_TARGET=13.0",
+    ]
+    assert "/existing/libraries" not in commands
+    assert "MATTELOOP_REPAIR_SENTINEL" not in commands
+    assert "preserved" not in commands
+
+
+def test_media_builder_revision_invalidates_prior_repair_evidence(
+    tmp_path: Path,
+) -> None:
+    artifacts = ensure_media_stack(ROOT, tmp_path, runner=RecordingRunner())
+    expected = media_stack_identity(
+        MANIFEST,
+        os_name=MACOS.os_name,
+        machine=MACOS.machine,
+        python_tag=MACOS.python_tag,
+        deployment_target=MACOS.deployment_target,
+        builder_revision=2,
+    )
+
+    assert artifacts.identity == expected
 
 
 def test_windows_build_uses_delvewheel_and_archives_its_licence(
@@ -421,6 +452,9 @@ def test_windows_build_uses_delvewheel_and_archives_its_licence(
     assert "windows-x64" in artifacts.compliance_archive.name
     with tarfile.open(artifacts.compliance_archive) as archive:
         assert "licences/delvewheel/LICENSE" in archive.getnames()
+        commands = archive.extractfile("build/commands.txt").read().decode()
+    assert "DYLD_LIBRARY_PATH" not in commands
+    assert "MACOSX_DEPLOYMENT_TARGET" not in commands
 
 
 def test_macos_compiler_evidence_probes_configured_cc_and_cmake(
