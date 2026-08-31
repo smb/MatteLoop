@@ -27,6 +27,7 @@ _FLOATING_TOKEN = re.compile(
     r"(?:^|[-_.])(?:current|head|latest|main|master|nightly|snapshot|stable|trunk)(?:$|[-_.])",
     re.IGNORECASE,
 )
+_EXACT_VERSION = re.compile(r"[0-9]+(?:\.[0-9]+)+")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -239,8 +240,8 @@ def _require_strings(value: Any, context: str) -> tuple[str, ...]:
 
 def _require_pinned_version(value: Any, context: str) -> str:
     version = _require_string(value, context)
-    if _FLOATING_TOKEN.search(version):
-        raise ValueError(f"{context} must be pinned")
+    if not _EXACT_VERSION.fullmatch(version):
+        raise ValueError(f"{context} must be an exact pinned version")
     return version
 
 

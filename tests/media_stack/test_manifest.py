@@ -3,6 +3,9 @@ from pathlib import Path
 import pytest
 
 from scripts.media_stack.manifest import (
+    SourceSpec,
+    ToolVersions,
+    VerificationContract,
     load_manifest,
     media_stack_identity,
 )
@@ -21,36 +24,53 @@ def _write_manifest(tmp_path: Path, replacement: tuple[str, str]) -> Path:
 
 def test_manifest_pins_the_lgpl_media_sources() -> None:
     manifest = load_manifest(MANIFEST)
-    assert [
-        (source.name, source.version, source.sha256) for source in manifest.sources
-    ] == [
-        (
-            "ffmpeg",
-            "8.0.1",
-            "05ee0b03119b45c0bdb4df654b96802e909e0a752f72e4fe3794f487229e5a41",
+    assert manifest.schema_version == 1
+    assert manifest.sources == (
+        SourceSpec(
+            name="ffmpeg",
+            version="8.0.1",
+            url="https://ffmpeg.org/releases/ffmpeg-8.0.1.tar.xz",
+            sha256="05ee0b03119b45c0bdb4df654b96802e909e0a752f72e4fe3794f487229e5a41",
+            archive_root="ffmpeg-8.0.1",
         ),
-        (
-            "libwebp",
-            "1.6.0",
-            "e4ab7009bf0629fd11982d4c2aa83964cf244cffba7347ecd39019a9e38c4564",
+        SourceSpec(
+            name="libwebp",
+            version="1.6.0",
+            url="https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-1.6.0.tar.gz",
+            sha256="e4ab7009bf0629fd11982d4c2aa83964cf244cffba7347ecd39019a9e38c4564",
+            archive_root="libwebp-1.6.0",
         ),
-        (
-            "pyav",
-            "16.1.0",
-            "a094b4fd87a3721dacf02794d3d2c82b8d712c85b9534437e82a8a978c175ffd",
+        SourceSpec(
+            name="pyav",
+            version="16.1.0",
+            url="https://files.pythonhosted.org/packages/78/cd/3a83ffbc3cc25b39721d174487fb0d51a76582f4a1703f98e46170ce83d4/av-16.1.0.tar.gz",
+            sha256="a094b4fd87a3721dacf02794d3d2c82b8d712c85b9534437e82a8a978c175ffd",
+            archive_root="av-16.1.0",
         ),
-    ]
+    )
     assert manifest.targets == ("macos-arm64", "windows-x64")
     assert manifest.python_abi == "cp313"
     assert manifest.macos_deployment_target == "13.0"
-    assert manifest.verification.required_codecs == (
-        "h264",
-        "hevc",
-        "libwebp_anim",
+    assert manifest.tools == ToolVersions(
+        build="1.6.0",
+        setuptools="84.0.0",
+        cython="3.3.0",
+        wheel="0.48.0",
+        delocate="0.13.0",
+        delvewheel="1.13.0",
     )
-    assert manifest.verification.required_formats == ("mov", "webp")
-
-
+    assert manifest.verification == VerificationContract(
+        required_codecs=("h264", "hevc", "libwebp_anim"),
+        required_formats=("mov", "webp"),
+        forbidden_tokens=(
+            "--enable-gpl",
+            "--enable-nonfree",
+            "libx264",
+            "libx265",
+            "libopenh264",
+        ),
+        forbidden_library_fragments=("x264", "x265", "openh264"),
+    )
 def test_manifest_rejects_a_malformed_source_digest(tmp_path: Path) -> None:
     path = _write_manifest(
         tmp_path,
@@ -78,6 +98,19 @@ def test_manifest_rejects_a_floating_source_version(tmp_path: Path) -> None:
     path = _write_manifest(tmp_path, ('version = "8.0.1"', 'version = "latest"'))
 
     with pytest.raises(ValueError, match="pinned"):
+        load_manifest(path)
+
+
+@pytest.mark.parametrize("floating_version", ["*", "1.x", ">=1", "^1.0"])
+def test_manifest_rejects_wildcard_and_range_tool_versions(
+    tmp_path: Path, floating_version: str
+) -> None:
+    path = _write_manifest(
+        tmp_path,
+        ('build = "1.6.0"', f'build = "{floating_version}"'),
+    )
+
+    with pytest.raises(ValueError, match="exact"):
         load_manifest(path)
 
 
