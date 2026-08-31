@@ -266,7 +266,6 @@ class CropCanvas(PreviewCanvas):
                     crop=raw_crop,
                     rotation=presentation.rotation,
                     pixel_aspect=presentation.pixel_aspect,
-                    zoom=self._display_zoom(presentation),
                     focused=focused if focused is not None else (
                         self._focused_target if self.hasFocus() else None
                     ),
@@ -277,18 +276,6 @@ class CropCanvas(PreviewCanvas):
             )
         except (TypeError, ValueError):
             self._geometry = None
-
-    def _display_zoom(self, presentation: CropPresentation) -> float:
-        """Match crop geometry to the cover-scaled frame displayed by the canvas."""
-        if not self._cover_frame:
-            return 1.0
-        display_width = max(1.0, float(presentation.width))
-        display_height = max(1.0, float(presentation.height))
-        viewport_width = max(1.0, float(self.width()))
-        viewport_height = max(1.0, float(self.height()))
-        fit = min(viewport_width / display_width, viewport_height / display_height)
-        cover = max(viewport_width / display_width, viewport_height / display_height)
-        return cover / fit
 
     def _announce_crop(self) -> None:
         presentation = self._presentation

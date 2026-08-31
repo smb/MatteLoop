@@ -105,7 +105,11 @@ class PreviewCanvas(QLabel):
         size = QSize(max(1, content.width()), max(1, content.height()))
         pixmap = QPixmap.fromImage(self._frame).scaled(
             size,
-            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            (
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding
+                if self._cover_frame
+                else Qt.AspectRatioMode.KeepAspectRatio
+            ),
             Qt.TransformationMode.SmoothTransformation,
         )
         if self._cover_frame and pixmap.size() != size:
@@ -129,7 +133,7 @@ class PreviewStage(QFrame):
         layout.setSpacing(8)
         self.original_canvas = CropCanvas()
         self.result_canvas = PreviewCanvas("Result", "result_canvas")
-        self.original_canvas.set_cover_frame(True)
+        self.original_canvas.set_cover_frame(False)
         self.result_canvas.set_cover_frame(True)
         self.original_canvas.setText("Original")
         self.result_canvas.setProperty("status", "none")

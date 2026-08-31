@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import pytest
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QImage
 
 from rembggui.core.crop_state import CropChanged
+from rembggui.core.geometry import MediaTransform, PointF
 from rembggui.core.specs import CropSpec
 from rembggui.ui.crop_canvas import CropCanvas
 from rembggui.ui.crop_presentation import CropPresentation
+from rembggui.ui.preview_canvas import PreviewStage
 
 
 def _presentation(crop: CropSpec = CropSpec(10, 10, 40, 20)) -> CropPresentation:
@@ -89,18 +92,76 @@ def test_crop_canvas_announces_current_oriented_bounds_on_its_standard_widget(
     assert "100 × 50" in canvas.accessibleDescription()
 
 
-def test_cover_frame_and_crop_overlay_share_the_stage_transform(qtbot) -> None:
-    canvas = CropCanvas()
-    qtbot.addWidget(canvas)
-    canvas.resize(200, 180)
-    canvas.set_cover_frame(True)
-    canvas.set_frame(QImage(100, 50, QImage.Format.Format_RGBA8888))
-    canvas.apply_presentation(_presentation(), active=True, editable=True)
+def _large_source_canvas(qtbot, crop: CropSpec) -> tuple[PreviewStage, CropCanvas]:
+    stage = PreviewStage()
+    qtbot.addWidget(stage)
+    canvas = stage.original_canvas
+    canvas.resize(478, 574)
+    canvas.set_frame(QImage(1280, 720, QImage.Format.Format_RGBA8888))
+    canvas.apply_presentation(
+        CropPresentation(
+            source_id="source",
+            width=1280,
+            height=720,
+            coded_width=1280,
+            coded_height=720,
+            rotation=0,
+            pixel_aspect=1,
+            crop=crop,
+        ),
+        active=True,
+        editable=True,
+    )
     canvas.show()
     qtbot.wait(10)
+    return stage, canvas
 
-    content = canvas._geometry.transform.content_rect
-    assert canvas.pixmap().size().width() == 200
-    assert canvas.pixmap().size().height() == 180
-    assert content.x == -80
-    assert content.width == 360
+
+def test_crop_canvas_fits_source_corners_inside_the_painted_pixmap(qtbot) -> None:
+    _stage, canvas = _large_source_canvas(qtbot, CropSpec(0, 0, 1280, 720))
+    assert canvas._geometry is not None
+    transform = canvas._geometry.transform
+    assert isinstance(transform, MediaTransform)
+
+    for corner in (PointF(0, 0), PointF(1280, 720)):
+        mapped = transform.source_to_widget(corner)
+        assert 0 <= mapped.x <= canvas.width()
+        assert 0 <= mapped.y <= canvas.height()
+
+    assert transform.scale == pytest.approx(478 / 1280)
+    assert transform.content_rect.width == pytest.approx(
+        canvas.pixmap().width(), abs=0.01
+    )
+    assert transform.content_rect.height == pytest.approx(
+        canvas.pixmap().height(), abs=1.0
+    )
+    assert transform.content_rect.x == pytest.approx(
+        (canvas.width() - canvas.pixmap().width()) / 2, abs=0.5
+    )
+    assert transform.content_rect.y == pytest.approx(
+        (canvas.height() - canvas.pixmap().height()) / 2, abs=0.5
+    )
+
+
+def test_crop_canvas_drag_uses_the_fitted_frame_scale(qtbot) -> None:
+    _stage, canvas = _large_source_canvas(qtbot, CropSpec(100, 100, 400, 200))
+    assert canvas._geometry is not None
+    transform = canvas._geometry.transform
+    assert isinstance(transform, MediaTransform)
+    events: list[object] = []
+    canvas.command_requested.connect(events.append)
+
+    qtbot.mousePress(
+        canvas,
+        Qt.MouseButton.LeftButton,
+        pos=QPoint(80, 200),
+    )
+    qtbot.mouseMove(canvas, QPoint(160, 200))
+    qtbot.mouseRelease(
+        canvas,
+        Qt.MouseButton.LeftButton,
+        pos=QPoint(160, 200),
+    )
+
+    assert isinstance(events[-1], CropChanged)
+    assert events[-1].crop == CropSpec(314, 100, 400, 200)
