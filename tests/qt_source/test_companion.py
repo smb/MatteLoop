@@ -31,6 +31,7 @@ PROJECT_EVIDENCE = (
     "packaging/smoke_child.py",
     "pyproject.toml",
     "scripts/build.py",
+    "scripts/compliance_evidence.py",
     "scripts/qt_source.py",
     "uv.lock",
 )
@@ -110,6 +111,7 @@ def test_qt_companion_contains_exact_sources_inventory_and_relink_evidence(
             "project/packaging/smoke_child.py",
             "project/pyproject.toml",
             "project/scripts/build.py",
+            "project/scripts/compliance_evidence.py",
             "project/scripts/qt_source.py",
             "project/uv.lock",
             "source-checksums.json",

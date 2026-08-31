@@ -43,6 +43,7 @@ _PROJECT_EVIDENCE = (
     "packaging/smoke_child.py",
     "pyproject.toml",
     "scripts/build.py",
+    "scripts/compliance_evidence.py",
     "scripts/qt_source.py",
     "uv.lock",
 )
