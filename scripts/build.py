@@ -271,6 +271,8 @@ def _preflight_wheel_members(
     packages: set[tuple[str, ...]] = set()
     for entry in entries:
         normalized = entry.filename.replace("\\", "/")
+        if entry.is_dir():
+            normalized = normalized[:-1]
         parts = tuple(normalized.split("/"))
         if _unsafe_wheel_path(normalized, parts):
             raise ValueError(f"unsafe wheel member path: {entry.filename}")

@@ -495,6 +495,23 @@ def test_wheel_extraction_requires_a_native_pyav_extension(tmp_path: Path) -> No
         native_build.extract_wheel_package(wheel, tmp_path / "extracted")
 
 
+def test_wheel_extraction_accepts_standard_explicit_directory_records(
+    tmp_path: Path,
+) -> None:
+    wheel = tmp_path / "candidate.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("av/", b"")
+        archive.writestr("av/video/", b"")
+        archive.writestr("av/__init__.py", "")
+        archive.writestr("av/video/frame.py", "")
+        archive.writestr("av/_core.so", b"native")
+
+    package = native_build.extract_wheel_package(wheel, tmp_path / "extracted")
+
+    assert package == tmp_path / "extracted" / "av"
+    assert (package / "video" / "frame.py").is_file()
+
+
 @pytest.mark.parametrize(
     "unsafe_name",
     (
@@ -502,6 +519,8 @@ def test_wheel_extraction_requires_a_native_pyav_extension(tmp_path: Path) -> No
         "/absolute.py",
         "C:\\outside.py",
         "av\\..\\outside.py",
+        "av//",
+        "av//sub/",
         "av//empty.py",
         "av/./dot.py",
     ),
@@ -521,6 +540,23 @@ def test_wheel_extraction_rejects_unsafe_member_paths_before_writing(
 
     assert not destination.exists()
     assert not (tmp_path / "outside.py").exists()
+
+
+def test_wheel_extraction_rejects_directory_file_collisions_before_writing(
+    tmp_path: Path,
+) -> None:
+    wheel = tmp_path / "candidate.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("av/", b"")
+        archive.writestr("AV", b"collision")
+        archive.writestr("av/__init__.py", "")
+        archive.writestr("av/_core.so", b"native")
+    destination = tmp_path / "extracted"
+
+    with pytest.raises(ValueError, match="duplicate wheel member path"):
+        native_build.extract_wheel_package(wheel, destination)
+
+    assert not destination.exists()
 
 
 @pytest.mark.parametrize("file_type", (stat.S_IFLNK, stat.S_IFIFO))
