@@ -16,6 +16,7 @@ from typing import Any, NoReturn, TypeGuard
 from zipfile import BadZipFile, ZipFile
 
 from .manifest import (
+    MEDIA_STACK_BUILDER_REVISION,
     MediaStackManifest,
     PyAVWheelTags,
     VerificationContract,
@@ -388,6 +389,7 @@ def _expected_provenance(
             machine=target.machine,
             python_tag=target.python_tag,
             deployment_target=target.deployment_target,
+            builder_revision=MEDIA_STACK_BUILDER_REVISION,
         ),
         "manifest_sha256": _sha256(manifest_path),
         "target_id": target.target_id,

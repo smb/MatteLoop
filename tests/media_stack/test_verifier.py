@@ -100,8 +100,15 @@ def _write_fake_wheel(
 
 
 def _provenance_payload(
-    wheel: Path, target: BuildTarget, manifest_path: Path = MANIFEST
+    wheel: Path,
+    target: BuildTarget,
+    manifest_path: Path = MANIFEST,
+    *,
+    builder_revision: int | None = None,
 ) -> dict[str, str]:
+    identity_options = {} if builder_revision is None else {
+        "builder_revision": builder_revision
+    }
     return {
         "identity": media_stack_identity(
             manifest_path,
@@ -109,6 +116,7 @@ def _provenance_payload(
             machine=target.machine,
             python_tag=target.python_tag,
             deployment_target=target.deployment_target,
+            **identity_options,
         ),
         "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
         "target_id": target.target_id,
@@ -122,9 +130,12 @@ def _write_provenance(
     wheel: Path,
     target: BuildTarget,
     manifest_path: Path = MANIFEST,
+    builder_revision: int | None = None,
     **replacements: str,
 ) -> None:
-    payload = _provenance_payload(wheel, target, manifest_path)
+    payload = _provenance_payload(
+        wheel, target, manifest_path, builder_revision=builder_revision
+    )
     payload.update(replacements)
     provenance_path(wheel).write_text(
         json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
@@ -393,6 +404,48 @@ def test_verification_inspects_the_extracted_wheel_with_current_cpython(
         dependencies=("@rpath/LIBWEBP.7.DYLIB",),
     )
     assert report.wheel_filename == wheel.name
+
+
+def test_verifier_accepts_provenance_from_the_current_builder_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts.media_stack import verifier
+
+    wheel = _wheel_path(tmp_path)
+    _write_fake_wheel(wheel)
+    _write_provenance(wheel, MACOS, builder_revision=2)
+    real_run = subprocess.run
+
+    def run(
+        command: tuple[str, ...], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        if command[0] == "delocate-listdeps":
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        return real_run(command, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(verifier.subprocess, "run", run)
+
+    report = verify_media_wheel(wheel, MANIFEST, MACOS)
+
+    assert report.identity == media_stack_identity(
+        MANIFEST,
+        os_name=MACOS.os_name,
+        machine=MACOS.machine,
+        python_tag=MACOS.python_tag,
+        deployment_target=MACOS.deployment_target,
+        builder_revision=2,
+    )
+
+
+def test_verifier_rejects_provenance_from_a_prior_builder_revision(
+    tmp_path: Path,
+) -> None:
+    wheel = _wheel_path(tmp_path)
+    _write_fake_wheel(wheel)
+    _write_provenance(wheel, MACOS, builder_revision=1)
+
+    with pytest.raises(MediaStackVerificationError, match="identity"):
+        verify_media_wheel(wheel, MANIFEST, MACOS)
 
 
 def test_fixture_subprocess_generates_webp_frames_at_the_production_minimum(

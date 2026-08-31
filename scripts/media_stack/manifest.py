@@ -31,6 +31,7 @@ _FLOATING_TOKEN = re.compile(
 )
 _EXACT_VERSION = re.compile(r"[0-9]+(?:\.[0-9]+)+")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+MEDIA_STACK_BUILDER_REVISION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,7 +140,7 @@ def media_stack_identity(
     machine: str,
     python_tag: str,
     deployment_target: str,
-    builder_revision: int = 1,
+    builder_revision: int = MEDIA_STACK_BUILDER_REVISION,
 ) -> str:
     """Return the short cache identity for one manifest and build contract."""
     payload = (

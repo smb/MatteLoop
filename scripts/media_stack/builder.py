@@ -23,6 +23,7 @@ from .artifact_set import (
 )
 from .compliance import create_compliance_archive
 from .manifest import (
+    MEDIA_STACK_BUILDER_REVISION,
     MediaStackManifest,
     SourceSpec,
     load_manifest,
@@ -40,7 +41,6 @@ from .sources import ensure_source, extract_source
 from .verifier import provenance_path
 
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
-_BUILDER_REVISION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,7 +118,7 @@ def ensure_media_stack(
         machine=target.machine,
         python_tag=target.python_tag,
         deployment_target=target.deployment_target,
-        builder_revision=_BUILDER_REVISION,
+        builder_revision=MEDIA_STACK_BUILDER_REVISION,
     )
     identity_dir = cache_dir / identity
     context = _context(
