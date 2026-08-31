@@ -6,9 +6,9 @@ copyright or related rights exist. That license does not replace the licenses
 of the third-party material described below.
 
 This file documents both the source distribution and the delivered native
-build contract. Each native build produces a target-specific complete source
-archive containing the exact media sources, build evidence, license texts, and
-notices for the verified platform artifact.
+build contract. Each successful native build requires the app, its
+target-specific media complete-source archive and checksum, and its Qt/PySide
+source companion and checksum together. No written source offer is used.
 
 ## Material stored in this repository
 
@@ -58,6 +58,32 @@ The locked dependency graph is recorded in `uv.lock`. It includes transitive
 packages beyond this summary. Release notices must be generated from the actual
 artifact rather than inferred only from this table.
 
+### Delivered Qt/PySide LGPL boundary
+
+The native app dynamically bundles components from PySide6,
+PySide6_Essentials, PySide6_Addons, and shiboken6, all exactly version 6.10.3.
+The packaging spec installs the complete GPL version 3 and LGPL version 3
+texts, a prominent Qt/PySide notice, and practical replacement instructions
+inside the app. Repository copies are in [`legal/`](legal/).
+
+Every successful build creates
+`MatteLoop-qt-sources-6.10.3-<identity>.tar.gz` and its canonical adjacent
+`.sha256`. The companion includes these original official archives unchanged:
+
+| Source archive | SHA-256 |
+|---|---|
+| `qtbase-everywhere-src-6.10.3.tar.xz` | `383dc907816338f0cba72088a524c07458dfc69ce684ca9132fcc4fe91c24b0b` |
+| `qtimageformats-everywhere-src-6.10.3.tar.xz` | `84605dd91037482b5b7c7ecc5c27aee8acc1cd7f1fe77bc564777ddf365d7d28` |
+| `pyside-setup-everywhere-src-6.10.3.tar.xz` | `2c7462fe0cecb5b8ac0a3d92014b8d0b88bd4d9f8646709dab5286d9416f45bc` |
+
+It also records official URLs and archive roots, the exact installed wheel
+tags and package-file inventories, bundled component-to-source mapping,
+complete GPL/LGPL texts, `RELINK.md`, the explicit no-patch inventory, and the
+project-side build/spec/smoke evidence. The replacement instructions cover
+ABI-compatible 6.10.3 dynamic libraries, bindings, and plugins for unsigned
+macOS and Windows. Local ad-hoc signing after macOS replacement is not a
+distributable signature and is not a project signing/notarization claim.
+
 ### Delivered LGPL media build
 
 The stock PyAV 16.1.0 wheel currently selected by `uv.lock` bundles FFmpeg with
@@ -80,13 +106,15 @@ all media evidence by digest and identity.
 
 The manual GitHub Actions workflow only creates a temporary unsigned build
 artifact. It does not publish, sign, notarize, create a release, or provide a
-permanent source host. Any later authorized native publication must place the
-matching complete source archive and checksum on a durable endpoint beside
-each application artifact. This boundary does not prevent publishing
-MatteLoop's own source under 0BSD.
+permanent source host. Any later authorized native publication must keep the
+application, matching media complete-source archive/checksum, and matching Qt
+source companion/checksum together on a durable endpoint. This boundary does
+not prevent publishing MatteLoop's own source under 0BSD.
 
 The unsigned macOS arm64 artifact completed the repository, media verifier,
 codec-fixture, bundle, checksum, and packaged smoke gates on 2026-09-01.
+It was built on macOS 26 with deployment target 13.0, but was not launched on
+an actual macOS 13 host.
 Windows x64 remains unqualified until its separately authorized native or
 manual Actions run passes the same gates; the macOS result is not evidence for
 the Windows artifact.

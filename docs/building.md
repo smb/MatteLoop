@@ -31,16 +31,21 @@ You need:
   also needs CMake and MSYS2 with `base-devel`, `make`, `diffutils`, `nasm`,
   and `pkgconf`, with the MSVC amd64 environment active.
 
-The locked build environment includes PySide6 6.10.3 (the project constraint
-is `~=6.10.1`), Nuitka 2.8.10, PyAV 16.1.0, Pillow 12.3.0, NumPy 2.5.2,
+The native prerequisite gate requires PySide6, PySide6_Essentials,
+PySide6_Addons, and shiboken6 to be installed at exactly 6.10.3. The locked
+build also includes Nuitka 2.8.10, PyAV 16.1.0, Pillow 12.3.0, NumPy 2.5.2,
 `rembg` 2.0.72, and CPU `onnxruntime` 1.29.0. Do not install a second Python
 environment for the build; run the commands below from the repository root.
 
 ## Licensing gate
 
 The repository's original code, documentation, and visual assets use 0BSD.
-The native bundle includes `LICENSE` and `THIRD_PARTY_NOTICES.md`, but those
-two files are not by themselves sufficient to qualify a release artifact.
+The native bundle includes the project's `LICENSE`, `THIRD_PARTY_NOTICES.md`,
+the complete `GPL-3.0.txt` and `LGPL-3.0.txt` texts, the prominent
+`QT-PYSIDE-LGPL-NOTICE.md`, and practical `RELINK.md`. Those installed files
+are necessary but are not by themselves sufficient to qualify a binary
+distribution: both corresponding-source archive/checksum pairs described
+below must remain beside the app.
 
 The stock PyAV 16.1.0 wheel currently contains FFmpeg libraries linked to
 `libx264` and `libx265`. It is never a publishable input for a MatteLoop native
@@ -111,6 +116,38 @@ SSL_CERT_FILE=/opt/homebrew/etc/ca-certificates/cert.pem \
   uv run --frozen --no-sync python scripts/build_media_stack.py --force --json
 ```
 
+## Qt/PySide corresponding-source companion
+
+`packaging/qt-source/manifest.toml` pins the corresponding source for the
+actual PySide6 6.10.3 bundle. Every `scripts/build.py` run verifies or fetches
+
+| Source | Version | SHA-256 | URL |
+|---|---:|---|---|
+| Qt Base | 6.10.3 | `383dc907816338f0cba72088a524c07458dfc69ce684ca9132fcc4fe91c24b0b` | <https://download.qt.io/official_releases/qt/6.10/6.10.3/submodules/qtbase-everywhere-src-6.10.3.tar.xz> |
+| Qt Image Formats | 6.10.3 | `84605dd91037482b5b7c7ecc5c27aee8acc1cd7f1fe77bc564777ddf365d7d28` | <https://download.qt.io/official_releases/qt/6.10/6.10.3/submodules/qtimageformats-everywhere-src-6.10.3.tar.xz> |
+| PySide Setup | 6.10.3 | `2c7462fe0cecb5b8ac0a3d92014b8d0b88bd4d9f8646709dab5286d9416f45bc` | <https://download.qt.io/official_releases/QtForPython/pyside6/PySide6-6.10.3-src/pyside-setup-everywhere-src-6.10.3.tar.xz> |
+
+The cache is `.matteloop-build-cache/qt-sources/<identity>/`. Its 24-character
+identity covers the raw Qt manifest, explicit recipe revision, exact installed
+versions and full wheel/package-file inventories for PySide6,
+PySide6_Essentials, PySide6_Addons, and shiboken6, plus the names and bytes of
+every bundled legal and project-side build evidence file. A cache hit is used
+only when the adjacent checksum is canonical and matches the archive.
+
+The deterministic output is
+`MatteLoop-qt-sources-6.10.3-<identity>.tar.gz`. It contains the three original
+source archives byte-for-byte, their checksums/URLs/archive roots, component
+and installed-package inventories, full GPL-3.0/LGPL-3.0 texts, the notice and
+`RELINK.md`, an explicit no-patch inventory, and the relevant packaging,
+build, publication-helper, smoke, lock, and project metadata. It does not use
+a written offer or substitute download links for source.
+
+`RELINK.md` documents rebuilding Qt Base, Qt Image Formats, Shiboken, and
+PySide, then replacing the bundle's dynamic libraries, bindings, and plugins
+with ABI-compatible 6.10.3 outputs on unsigned macOS or Windows. A local ad-hoc
+macOS re-sign after replacement is only an unsigned-use test step; it is not a
+signing or notarization claim.
+
 ## macOS
 
 Confirm the machine and install the locked environment:
@@ -138,10 +175,19 @@ The unsigned app bundle is written to `dist/MatteLoop.app`. The helper checks
 the pinned build tools and every data file named by the spec, automatically
 builds or reuses and re-verifies the custom media wheel, invokes
 `pyside6-deploy`, scans the final bundle for forbidden media components, and
-runs the packaged offline smoke test. Only after all gates pass does it place
-the matching compliance archive and `.sha256` file beside the application in
-`dist/`. The verifier report and artifact-set binding remain in the cache path
-printed by `scripts/build_media_stack.py --json`.
+runs the packaged offline smoke test. Only after all gates pass does it require
+these five deliverables together in `dist/`:
+
+1. `MatteLoop.app`;
+2. `MatteLoop-media-sources-macos-arm64-<identity>.tar.gz`;
+3. the media archive's adjacent `.sha256`;
+4. `MatteLoop-qt-sources-6.10.3-<identity>.tar.gz`; and
+5. the Qt companion's adjacent `.sha256`.
+
+The verifier report and artifact-set binding remain in the media cache path
+printed by `scripts/build_media_stack.py --json`. The application was built on
+macOS 26 with a 13.0 deployment target; it has not been launched on an actual
+macOS 13 host.
 
 ## Windows
 
@@ -164,10 +210,12 @@ uv run --frozen --no-sync python scripts/build.py
 ```
 
 The standalone bundle is written to `dist\MatteLoop.dist`, with the executable
-inside that directory. Windows x64 remains unqualified: no authorized local or
-manual Actions build has yet completed the wheel verifier, fixture checks,
-Nuitka bundle, forbidden-component scan, and packaged smoke gate. Do not infer
-Windows status from the committed workflow or macOS results.
+inside that directory. A successful binary distribution must keep that app
+directory plus its media source/checksum pair and Qt source/checksum pair
+together. Windows x64 remains unqualified: no authorized local or manual
+Actions build has yet completed the wheel verifier, fixture checks, Nuitka
+bundle, forbidden-component scan, packaged smoke, and source-companion gates.
+Do not infer Windows status from the committed workflow or macOS results.
 
 ## Manual GitHub Actions build
 
@@ -179,12 +227,12 @@ hash of the media manifest, all `scripts/media_stack/**/*.py` files,
 `scripts/build_media_stack.py`, and `scripts/verify_media_stack.py`; it has no
 broad restore key.
 
-The workflow uploads `dist/` as a temporary unsigned Actions artifact. It does
-not create a release, publish, sign, notarize, or permanently host the
-corresponding sources. A later authorized publication must distribute each
-application together with its matching target-specific compliance archive and
-checksum on a durable source endpoint; an expiring Actions artifact is not
-that endpoint.
+The workflow uploads all of `dist/` as one temporary unsigned Actions artifact,
+so the app and both source/checksum pairs follow the existing upload path. It
+does not create a release, publish, sign, notarize, or permanently host the
+corresponding sources. A later authorized publication must keep all five
+deliverables together on a durable endpoint; an expiring Actions artifact is
+not that endpoint.
 
 ## Models and first launch
 

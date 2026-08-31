@@ -43,9 +43,12 @@ the new MatteLoop location is preferred.
 
 Native builds automatically compile or reuse a source-pinned, verified LGPL
 FFmpeg/libwebp/PyAV wheel; the stock PyAV wheel is not an eligible packaging
-fallback. See [docs/building.md](docs/building.md) for local and manual Actions
-commands, compliance outputs, unsigned-artifact launch warnings, and current
-platform qualification status.
+fallback. They also create a checksum-verified Qt/PySide 6.10.3 source
+companion containing the exact official Qt Base, Qt Image Formats, and PySide
+Setup archives, package inventory, complete GPL/LGPL texts, and replacement
+instructions. See [docs/building.md](docs/building.md) for local and manual
+Actions commands, the five inseparable distribution outputs, unsigned-artifact
+launch warnings, and current platform qualification status.
 
 ## License
 
@@ -60,7 +63,11 @@ for its name or logo; they may be reused with the same freedom.
 Third-party libraries, fonts, and model weights keep their own licenses. Model
 weights download on first use and are not part of the MatteLoop distribution.
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the component and
-native-release details.
+native-release details. The full third-party [GPL version 3](legal/GPL-3.0.txt)
+and [LGPL version 3](legal/LGPL-3.0.txt) texts, prominent
+[Qt/PySide notice](legal/QT-PYSIDE-LGPL-NOTICE.md), and practical
+[replacement instructions](legal/RELINK.md) are kept in the repository and
+inside every native app; they do not change MatteLoop's 0BSD license.
 
 ### Synthetic fixture rotation
 
