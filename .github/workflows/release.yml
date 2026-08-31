@@ -48,6 +48,37 @@
           }
         },
         {
+          "name": "Install macOS media build tools",
+          "if": "runner.os == 'macOS'",
+          "run": "if ! command -v cmake >/dev/null || ! command -v nasm >/dev/null || ! command -v pkg-config >/dev/null; then\n  brew install cmake nasm pkg-config\nfi"
+        },
+        {
+          "name": "Configure MSVC amd64",
+          "if": "runner.os == 'Windows'",
+          "uses": "ilammy/msvc-dev-cmd@a102174a2b586eec2ea151a69e6fd14404a8ce7c",
+          "with": {
+            "arch": "amd64"
+          }
+        },
+        {
+          "name": "Install MSYS2 media build tools",
+          "if": "runner.os == 'Windows'",
+          "uses": "msys2/setup-msys2@fb197b72ce45fb24f17bf3f807a388985654d1f2",
+          "with": {
+            "msystem": "MSYS",
+            "path-type": "inherit",
+            "install": "base-devel make diffutils nasm pkgconf"
+          }
+        },
+        {
+          "name": "Cache media build stack",
+          "uses": "actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae",
+          "with": {
+            "path": ".matteloop-build-cache/media-stack",
+            "key": "media-stack-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('packaging/media-stack/manifest.toml', 'scripts/media_stack/**/*.py', 'scripts/build_media_stack.py', 'scripts/verify_media_stack.py') }}"
+          }
+        },
+        {
           "name": "Install frozen dependencies",
           "run": "uv sync --frozen --all-groups"
         },

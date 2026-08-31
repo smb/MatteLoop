@@ -574,6 +574,7 @@ def test_release_workflow_has_only_manual_unsigned_native_builds() -> None:
         ("windows-2022-x64", "windows-2022"),
         ("macos-15-arm64", "macos-15"),
     }
+    assert workflow["permissions"] == {"contents": "read"}
     assert job["permissions"] == {"contents": "read"}
     assert workflow["concurrency"] == {
         "group": "matteloop-native-release",
@@ -587,6 +588,56 @@ def test_release_workflow_has_only_manual_unsigned_native_builds() -> None:
         "python-version": "3.13",
         "version": "0.11.32",
     }
+
+    macos_toolchain = next(
+        step for step in steps if step["name"] == "Install macOS media build tools"
+    )
+    assert macos_toolchain["if"] == "runner.os == 'macOS'"
+    assert macos_toolchain["run"] == (
+        "if ! command -v cmake >/dev/null || ! command -v nasm >/dev/null || "
+        "! command -v pkg-config >/dev/null; then\n"
+        "  brew install cmake nasm pkg-config\n"
+        "fi"
+    )
+
+    msvc = next(step for step in steps if step["name"] == "Configure MSVC amd64")
+    assert msvc["if"] == "runner.os == 'Windows'"
+    assert msvc["uses"] == (
+        "ilammy/msvc-dev-cmd@a102174a2b586eec2ea151a69e6fd14404a8ce7c"
+    )
+    assert msvc["with"] == {"arch": "amd64"}
+
+    msys2 = next(
+        step for step in steps if step["name"] == "Install MSYS2 media build tools"
+    )
+    assert msys2["if"] == "runner.os == 'Windows'"
+    assert msys2["uses"] == (
+        "msys2/setup-msys2@fb197b72ce45fb24f17bf3f807a388985654d1f2"
+    )
+    assert msys2["with"] == {
+        "msystem": "MSYS",
+        "path-type": "inherit",
+        "install": "base-devel make diffutils nasm pkgconf",
+    }
+
+    cache = next(step for step in steps if step["name"] == "Cache media build stack")
+    assert cache["uses"] == "actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae"
+    assert cache["with"] == {
+        "path": ".matteloop-build-cache/media-stack",
+        "key": (
+            "media-stack-${{ runner.os }}-${{ matrix.target }}-"
+            "${{ hashFiles('packaging/media-stack/manifest.toml', "
+            "'scripts/media_stack/**/*.py', 'scripts/build_media_stack.py', "
+            "'scripts/verify_media_stack.py') }}"
+        ),
+    }
+    assert "restore-keys" not in cache["with"]
+    assert steps.index(msys2) < steps.index(cache) < next(
+        index
+        for index, step in enumerate(steps)
+        if step["name"] == "Build native standalone bundle"
+    )
+
     commands = "\n".join(str(step.get("run", "")) for step in steps)
     assert "uv sync --frozen --all-groups" in commands
     assert "--no-cache" not in commands
@@ -602,6 +653,7 @@ def test_release_workflow_has_only_manual_unsigned_native_builds() -> None:
     assert upload["with"]["name"] == "MatteLoop-unsigned-${{ matrix.target }}"
     assert upload["with"]["path"] == "dist"
     serialized = json.dumps(workflow).lower()
+    assert "cache-hit" not in serialized
     assert "secrets." not in serialized
     assert "codesign" not in serialized
     assert "signing" not in serialized
