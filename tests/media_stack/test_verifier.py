@@ -395,6 +395,57 @@ def test_verification_inspects_the_extracted_wheel_with_current_cpython(
     assert report.wheel_filename == wheel.name
 
 
+def test_fixture_subprocess_generates_webp_frames_at_the_production_minimum(
+    tmp_path: Path,
+) -> None:
+    from scripts.media_stack import verifier
+
+    wheel_root = tmp_path / "wheel"
+    fixtures = tmp_path / "fixtures"
+    fixtures.mkdir()
+    for name in ("h264-sdr.mp4", "h265-sdr.mp4"):
+        (fixtures / name).write_bytes(b"fixture")
+    fake_modules = {
+        "av/__init__.py": (
+            "from . import _core\n"
+            "ffmpeg_version_info = '8.0.1'\n"
+            "codecs_available = {'h264', 'hevc', 'libwebp_anim'}\n"
+            "formats_available = {'mov', 'webp'}\n"
+        ),
+        "av/_core.py": "library_meta = {}\n",
+        "matteloop/__init__.py": "",
+        "matteloop/core/__init__.py": "",
+        "matteloop/core/webp.py": (
+            "from PIL import Image\n"
+            "def encode_lossless_webp(frame_paths, delays_ms, output):\n"
+            "    assert delays_ms == (100, 100)\n"
+            "    assert [Image.open(path).size for path in frame_paths] == "
+            "[(128, 128), (128, 128)]\n"
+            "    output.write_bytes(b'verified')\n"
+            "def validate_webp(output, *, expected_frames, expected_duration_ms):\n"
+            "    assert output.read_bytes() == b'verified'\n"
+            "    assert (expected_frames, expected_duration_ms) == (2, 200)\n"
+        ),
+        "matteloop/jobs/__init__.py": "",
+        "matteloop/jobs/source.py": (
+            "class _Image:\n"
+            "    def close(self): pass\n"
+            "class _Decoded:\n"
+            "    image = _Image()\n"
+            "def probe_source(source): return source\n"
+            "def decode_frame(source, time, request_id): return _Decoded()\n"
+        ),
+    }
+    for relative, contents in fake_modules.items():
+        path = wheel_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents, encoding="utf-8")
+
+    payload = verifier._inspect_runtime(wheel_root, fixtures)
+
+    assert payload["ffmpeg_version"] == "8.0.1"
+
+
 def test_verification_uses_private_snapshots_after_original_paths_are_replaced(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

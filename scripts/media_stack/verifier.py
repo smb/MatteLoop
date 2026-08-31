@@ -72,7 +72,7 @@ if fixture_dir is not None:
         scratch = Path(raw)
         frame_paths = (scratch / "frame-0.png", scratch / "frame-1.png")
         for path, color in zip(frame_paths, ((20, 40, 80, 64), (160, 80, 20, 192))):
-            with Image.new("RGBA", (2, 2), color) as image:
+            with Image.new("RGBA", (128, 128), color) as image:
                 image.save(path)
         output = scratch / "verified.webp"
         encode_lossless_webp(frame_paths, (100, 100), output)
