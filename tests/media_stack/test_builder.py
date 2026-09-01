@@ -98,7 +98,7 @@ class RecordingRunner:
         if (
             ("/configure" in joined and "--disable-gpl" in joined)
             or command[0] == "make"
-            or (command[0] == "msys2" and "make -C" in joined)
+            or (command[0] == "msys2.cmd" and "make -C" in joined)
         ):
             return "ffmpeg"
         if "-m build" in joined or "bdist_wheel" in command:

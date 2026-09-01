@@ -144,12 +144,25 @@ def test_windows_ffmpeg_uses_msys2_and_the_msvc_toolchain() -> None:
     )
     configure = commands[0]
 
-    assert configure[:2] == ("msys2", "-c")
+    assert configure[:2] == ("msys2.cmd", "-c")
     assert "--toolchain=msvc" in configure[2]
     assert "../../ffmpeg/configure" in configure[2]
     assert "PKG_CONFIG_PATH=prefix/lib/pkgconfig" in configure[2]
-    assert commands[1][:2] == ("msys2", "-c")
-    assert commands[2][:2] == ("msys2", "-c")
+    assert commands[1][:2] == ("msys2.cmd", "-c")
+    assert commands[2][:2] == ("msys2.cmd", "-c")
+
+
+def test_windows_ffmpeg_invokes_the_actual_msys2_wrapper_filename() -> None:
+    # msys2/setup-msys2 installs a batch file literally named msys2.cmd, not
+    # an msys2.exe and not a bare "msys2". subprocess.run(["msys2", ...]) on
+    # Windows does not resolve PATHEXT the way a real shell would, so it
+    # raises FileNotFoundError instead of running anything -- reproduced on
+    # the real Windows runner as stage "ffmpeg" failing with exit code 127.
+    commands = ffmpeg_commands(
+        WINDOWS, Path("ffmpeg"), Path("build/ffmpeg"), Path("prefix")
+    )
+    for command in commands:
+        assert command[0] == "msys2.cmd"
 
 
 def test_windows_ffmpeg_does_not_add_macos_deployment_flags() -> None:

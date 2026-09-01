@@ -97,10 +97,10 @@ def ffmpeg_commands(
             *configure,
         )
         return (
-            ("msys2", "-c", _in_directory(build_dir, configured)),
-            ("msys2", "-c", _shell_command(("make", "-C", str(build_dir)))),
+            ("msys2.cmd", "-c", _in_directory(build_dir, configured)),
+            ("msys2.cmd", "-c", _shell_command(("make", "-C", str(build_dir)))),
             (
-                "msys2",
+                "msys2.cmd",
                 "-c",
                 _shell_command(("make", "-C", str(build_dir), "install")),
             ),
