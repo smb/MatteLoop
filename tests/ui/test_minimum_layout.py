@@ -81,16 +81,18 @@ def test_inspector_content_minimum_width_fits_each_scroll_viewport(qtbot) -> Non
             body.setVisible(True)
         application.processEvents()
 
-        for width, expected_inspector, expected_viewport in (
-            (1100, 340, 322),
-            (1440, 400, 382),
-        ):
+        for width, expected_inspector in ((1100, 340), (1440, 400)):
             window.resize(width, 720)
             content_minimum = window.inspector_content.minimumSizeHint().width()
+            viewport_width = window.inspector_scroll.viewport().width()
             assert window.inspector.width() == expected_inspector
-            assert window.inspector_scroll.viewport().width() == expected_viewport
-            assert window.inspector_content.width() == expected_viewport
-            assert content_minimum <= expected_viewport
+            # The scroll frame and scrollbar consume a few pixels of the
+            # inspector width; the exact amount is a Qt style detail (measured
+            # 14px on Linux/Fusion vs 18px on macOS for the same inspector
+            # width), not something this layout controls.
+            assert 10 <= expected_inspector - viewport_width <= 25
+            assert window.inspector_content.width() == viewport_width
+            assert content_minimum <= viewport_width
             assert not window.inspector_scroll.horizontalScrollBar().isVisible()
     finally:
         application.setStyleSheet(original_style_sheet)

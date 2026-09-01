@@ -326,7 +326,7 @@ def test_native_build_adds_raw_pyav_wheel_only_to_temporary_spec(
     dylib.parent.mkdir()
     dylib.write_bytes(b"dylib")
 
-    prepare_temporary_spec(source, destination, av_directory)
+    prepare_temporary_spec(source, destination, av_directory, os_name="darwin")
 
     assert f"--include-data-dir={av_directory}=av" in destination.read_text(
         encoding="utf-8"
