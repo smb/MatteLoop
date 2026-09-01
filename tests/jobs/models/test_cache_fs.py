@@ -604,11 +604,14 @@ def test_windows_native_child_open_is_root_handle_relative() -> None:
     )
 
     assert handle == 321
+    # SYNCHRONIZE must reach NtCreateFile: without it the kernel rejects
+    # FILE_SYNCHRONOUS_IO_NONALERT with STATUS_INVALID_PARAMETER, which is
+    # how a real Windows build failed on the first path component.
     assert calls == [
         (
             123,
             "cache",
-            _GENERIC_READ,
+            _GENERIC_READ | 0x00100000,
             _FILE_SHARE_READ,
             3,
             0x00000001 | 0x00000020 | 0x00200000,

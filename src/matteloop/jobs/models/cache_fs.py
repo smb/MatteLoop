@@ -22,6 +22,11 @@ _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 _WINDOWS_DIRECTORY_ACCESS = 0x80000000
 _WINDOWS_WRITABLE_DIRECTORY_ACCESS = 0xC0000000
 _WINDOWS_DIRECTORY_SHARE = 0x00000001
+# Every relative open asks for FILE_SYNCHRONOUS_IO_NONALERT, which
+# NtCreateFile rejects with STATUS_INVALID_PARAMETER unless the access mask
+# also carries SYNCHRONIZE. CreateFileW adds it implicitly; NtCreateFile does
+# not, which is why only the relative opens failed.
+_WINDOWS_SYNCHRONIZE = 0x00100000
 _WINDOWS_PUBLICATION_SHARE = 0x00000001 | 0x00000002 | 0x00000004
 # A publication parent is deliberately distinct from the restrictive model-cache
 # namespace.  It must create/remove children, serve as a relative rename target,
@@ -1366,7 +1371,7 @@ class _CtypesWindowsDirectoryApi:
         status = int(
             self._nt_create_file(
                 ctypes.byref(handle),
-                desired_access,
+                desired_access | _WINDOWS_SYNCHRONIZE,
                 ctypes.byref(attributes),
                 ctypes.byref(io_status),
                 None,
@@ -1459,7 +1464,9 @@ class _CtypesWindowsDirectoryApi:
             raise FileExistsError(code, "cache entry already exists", name)
         if code == 5:
             raise PermissionError(code, "cache entry access denied", name)
-        raise OSError(code, "relative cache operation failed", name)
+        raise OSError(
+            code, f"relative cache operation failed (NTSTATUS {status:#010x})", name
+        )
 
     @staticmethod
     def _require_hardened_open(
