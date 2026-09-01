@@ -30,6 +30,7 @@ extra_args =
 	--jobs=2
 	--no-deployment-flag=self-execution
 	--disable-cache=ccache
+	--assume-yes-for-downloads
 	--noinclude-qt-translations
 	--output-filename=matteloop
 	--include-qt-plugins=platforms,imageformats

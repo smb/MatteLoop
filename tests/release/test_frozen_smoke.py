@@ -506,6 +506,10 @@ def test_pyside_deploy_spec_parses_to_required_native_bundle_contract() -> None:
     assert "--noinclude-dlls=*libqpdf*" in args
     assert "--noinclude-dlls=*QtPdf*" in args
     assert "--disable-cache=ccache" in args
+    # Without this, a non-interactive Nuitka (no stdin) defaults its
+    # Dependency-Walker-download prompt to "no" and FATALs on Windows
+    # standalone builds -- reproduced on the real Windows runner.
+    assert "--assume-yes-for-downloads" in args
     assert "--include-module=PIL._imaging" in args
     assert "--include-module=PIL._webp" in args
     assert "--include-module=PIL.PngImagePlugin" in args
