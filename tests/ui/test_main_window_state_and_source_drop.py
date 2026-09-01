@@ -245,7 +245,9 @@ def test_preview_error_wins_over_unavailable_model_copy() -> None:
         ),
     )
     model = present(failed)
-    assert model.result_message == "Preview failed — retry Preview Frame"
+    # The failure that actually happened, not a generic phrase: a user who
+    # cannot preview needs to know it was the model checksum.
+    assert model.result_message == "Preview failed: checksum detail"
     assert model.preview_label == "Prepare & Preview"
 
 

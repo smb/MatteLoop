@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from PySide6.QtCore import QObject, Signal, Slot
 from PySide6.QtGui import QImage
 
@@ -21,6 +23,8 @@ from matteloop.ui.preview_controller.request_assembly import (
     _render_request,
 )
 from matteloop.ui.preview_controller.runtime import PreviewRuntime
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class _PreviewWorker(QObject):
@@ -157,7 +161,14 @@ def _notification_job_id(notification: object) -> str | None:
 
 def _preview_error(error: BaseException, job_id: str) -> AppError:
     if isinstance(error, AppError):
+        _LOGGER.error(
+            "preview job %s failed: %s: %s",
+            job_id,
+            error.code.value,
+            error.technical_detail,
+        )
         return error
+    _LOGGER.exception("preview job %s raised %s", job_id, type(error).__name__)
     return AppError(
         ErrorCode.INVALID_RENDER_REQUEST,
         "preview",

@@ -21,12 +21,14 @@ def _run_gui() -> int:
     from matteloop.core.execution_providers import provider_options_from_runtime
     from matteloop.core.parameters import V1_MODEL_IDS
     from matteloop.core.state import AppState, ModelAvailabilityChanged
+    from matteloop.logs import configure_logging
     from matteloop.ui.controller import SourceController
     from matteloop.ui.main_window import MainWindow
     from matteloop.ui.preferences import load_parameters
     from matteloop.ui.store import ReducerStore
     from matteloop.ui.theme import install_theme
 
+    configure_logging()
     application = QApplication.instance()
     if not isinstance(application, QApplication):
         application = QApplication(["matteloop"])

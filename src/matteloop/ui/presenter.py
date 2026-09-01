@@ -18,6 +18,14 @@ from matteloop.ui.source_presentation import present_source_metadata as s
 from matteloop.ui.timeline_presentation import present_timeline
 
 
+def _failure_message(error: object | None, retry: str) -> str:
+    """Say what actually failed, not just that something did."""
+    detail = getattr(error, "technical_detail", None)
+    if isinstance(detail, str) and detail:
+        return f"Preview failed: {detail}"
+    return f"Preview failed — {retry}"
+
+
 def present(state: AppState) -> PresentationModel:
     """Present reducer state without importing Qt, jobs, or runtime services."""
     allowed = capabilities(state)
@@ -32,7 +40,7 @@ def present(state: AppState) -> PresentationModel:
         message = "This video could not be read. Open another video."
     elif state.preview is PreviewState.ERROR:
         marker = "Preview failed"
-        message = "Preview failed — retry Preview Frame"
+        message = _failure_message(state.preview_error, "retry Preview Frame")
     elif state.preview is PreviewState.RUNNING:
         message = (
             "Current preview — previewing selected frame"
@@ -47,7 +55,7 @@ def present(state: AppState) -> PresentationModel:
             state.preview_attempt_error is not None
             and state.stale_category == "Preview failed"
         ):
-            marker = "Preview failed — preview again"
+            marker = _failure_message(state.preview_attempt_error, "preview again")
         else:
             marker = "Settings changed — preview again"
         message = marker
