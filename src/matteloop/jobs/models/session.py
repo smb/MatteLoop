@@ -191,6 +191,24 @@ class ModelSessionManager:
             self._active_result = result
             return result
 
+    def fetch(self, model_id: str) -> Path:
+        """Download and verify one weight without starting a session for it.
+
+        prepare() also launches the segmentation client, which is wrong for
+        a manager dialog that only wants the weight on disk beforehand.
+        """
+        with self._lock:
+            self._require_open()
+            spec = self._catalog.get(model_id)
+            if spec.execution_class is not ExecutionClass.LOCAL:
+                raise _preparation_error("model execution class is not supported")
+            return self._downloader.download(
+                spec,
+                self._cache_root,
+                self._progress,
+                self._cancelled,
+            )
+
     def remove(self, model_id: str) -> bool:
         with self._lock:
             spec = self._catalog.get(model_id)

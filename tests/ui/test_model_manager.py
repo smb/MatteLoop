@@ -30,7 +30,17 @@ class FakeModelRemovalService:
         self.active_id = active_id
         self.targets = targets or {}
         self.removed: list[str] = []
+        self.fetched: list[str] = []
         self.thread_ids: list[int] = []
+
+    def fetch(self, model_id: str) -> Path:
+        self.thread_ids.append(get_ident())
+        self.fetched.append(model_id)
+        target = self.targets.get(model_id)
+        assert target is not None
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"downloaded-weight")
+        return target
 
     def remove(self, model_id: str) -> bool:
         self.thread_ids.append(get_ident())
@@ -255,4 +265,83 @@ def test_model_manager_creates_the_cache_directory_before_showing_it(
 
     assert cache_root.is_dir()
     assert [url.toLocalFile() for url in opened] == [str(cache_root)]
+    controller.close()
+
+
+def test_model_manager_downloads_a_missing_weight_in_the_background(
+    tmp_path: Path, qtbot
+) -> None:
+    # Removing a weight was possible from the dialog but getting one back
+    # meant running a preview; a manager that can only delete is a trap.
+    target = _model_path(tmp_path, "u2netp")
+    manager = FakeModelRemovalService(targets={"u2netp": target})
+    controller = ModelManagerController(
+        ReducerStore(AppState()),
+        catalog=ModelCatalog.load_resource(),
+        cache_root=tmp_path,
+        manager=manager,
+    )
+    qtbot.addWidget(controller.dialog)
+    controller.open()
+    index = next(
+        position
+        for position, entry in enumerate(controller.dialog.entries)
+        if entry.model_id == "u2netp"
+    )
+    controller.dialog.model_list.setCurrentRow(index)
+
+    assert controller.dialog.download_button.isEnabled()
+    assert not controller.dialog.remove_button.isEnabled()
+
+    controller.dialog.download_button.click()
+
+    qtbot.waitUntil(lambda: manager.fetched == ["u2netp"], timeout=5000)
+    assert manager.thread_ids and manager.thread_ids[0] != get_ident()
+    qtbot.waitUntil(
+        lambda: controller.dialog.entries[index].cached, timeout=5000
+    )
+    assert not controller.dialog.download_button.isEnabled()
+    assert controller.dialog.remove_button.isEnabled()
+    controller.close()
+
+
+def test_model_manager_refuses_to_download_while_a_job_runs(
+    tmp_path: Path, qtbot
+) -> None:
+    manager = FakeModelRemovalService(
+        targets={"u2netp": _model_path(tmp_path, "u2netp")}
+    )
+    controller = ModelManagerController(
+        ReducerStore(
+            AppState(
+                source=SourceState.READY,
+                source_id="source-id",
+                source_value=object(),
+                job_request_id="request-id",
+                job=ActiveJob(
+                    "job-id",
+                    JobKind.RENDER,
+                    JobState.RENDERING,
+                    "Encode",
+                    FocusTarget.NONE,
+                ),
+            )
+        ),
+        catalog=ModelCatalog.load_resource(),
+        cache_root=tmp_path,
+        manager=manager,
+    )
+    qtbot.addWidget(controller.dialog)
+    controller.open()
+    controller.dialog.model_list.setCurrentRow(
+        next(
+            position
+            for position, entry in enumerate(controller.dialog.entries)
+            if entry.model_id == "u2netp"
+        )
+    )
+
+    controller.dialog.download_button.click()
+
+    assert manager.fetched == []
     controller.close()

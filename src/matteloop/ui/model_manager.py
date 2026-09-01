@@ -44,6 +44,8 @@ class ModelRemovalService(Protocol):
 
     def remove(self, model_id: str) -> bool: ...
 
+    def fetch(self, model_id: str) -> object: ...
+
 
 @dataclass(frozen=True, slots=True)
 class ModelEntry:
@@ -84,6 +86,7 @@ def present_model(entry: ModelEntry) -> AlignedRow:
 class ModelManagerDialog(QDialog):
     """List the V1 model cache and expose actions for its selected row."""
 
+    download_requested = Signal(object)
     remove_requested = Signal(object)
     show_cache_requested = Signal()
 
@@ -136,6 +139,9 @@ class ModelManagerDialog(QDialog):
         self.model_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         self.model_list.setItemDelegate(AlignedRowDelegate(self.model_list))
         self.model_list.setUniformItemSizes(True)
+        self.download_button = QPushButton("Download weight")
+        self.download_button.setObjectName("download_model")
+        self.download_button.setAccessibleName("Download selected model weight")
         self.remove_button = QPushButton("Remove downloaded weight")
         self.remove_button.setObjectName("remove_model")
         self.remove_button.setAccessibleName("Remove selected model weight")
@@ -153,6 +159,7 @@ class ModelManagerDialog(QDialog):
         layout.addWidget(self.cache_location_label)
         layout.addWidget(self.model_list, 1)
         actions = QHBoxLayout()
+        actions.addWidget(self.download_button)
         actions.addWidget(self.remove_button)
         actions.addWidget(self.show_cache_button)
         actions.addStretch(1)
@@ -163,6 +170,7 @@ class ModelManagerDialog(QDialog):
         self.model_list.currentItemChanged.connect(
             lambda _current, _previous: self._update_actions()
         )
+        self.download_button.clicked.connect(self._download_selected)
         self.remove_button.clicked.connect(self._remove_selected)
         self.show_cache_button.clicked.connect(self.show_cache_requested.emit)
         self.close_button.clicked.connect(self.close)
@@ -192,6 +200,7 @@ class ModelManagerDialog(QDialog):
     def set_busy(self, busy: bool) -> None:
         self._busy = busy
         self.model_list.setEnabled(not busy)
+        self.download_button.setEnabled(not busy)
         self.show_cache_button.setEnabled(not busy)
         self.close_button.setEnabled(not busy)
         self._update_actions()
@@ -268,6 +277,17 @@ class ModelManagerDialog(QDialog):
                 "Remove the selected downloaded weight and free its disk space."
             )
             self.remove_button.setAccessibleDescription("")
+        self.download_button.setEnabled(
+            not self._busy and entry is not None and not entry.cached
+        )
+        self.download_button.setToolTip(
+            "Download the selected weight now instead of waiting for a preview."
+        )
+
+    def _download_selected(self) -> None:
+        entry = self.selected_entry
+        if entry is not None and not entry.cached:
+            self.download_requested.emit(entry)
 
     def _remove_selected(self) -> None:
         entry = self.selected_entry
@@ -291,6 +311,28 @@ class _ModelRemovalWorker(QObject):
             self.removed.emit(self._model_id, self._manager.remove(self._model_id))
         except Exception as error:
             self.failed.emit(self._model_id, error)
+        finally:
+            self.finished.emit()
+
+
+class _ModelDownloadWorker(QObject):
+    downloaded = Signal(str)
+    failed = Signal(str, object)
+    finished = Signal()
+
+    def __init__(self, manager: ModelRemovalService, model_id: str) -> None:
+        super().__init__()
+        self._manager = manager
+        self._model_id = model_id
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self._manager.fetch(self._model_id)
+        except Exception as error:
+            self.failed.emit(self._model_id, error)
+        else:
+            self.downloaded.emit(self._model_id)
         finally:
             self.finished.emit()
 
@@ -322,10 +364,11 @@ class ModelManagerController(QObject):
             parent=dialog_parent,
         )
         self.dialog.set_removal_guard(self._removal_block_reason)
+        self.dialog.download_requested.connect(self._download_requested)
         self.dialog.remove_requested.connect(self._remove_requested)
         self.dialog.show_cache_requested.connect(self._show_cache)
         self._remove_thread: QThread | None = None
-        self._remove_worker: _ModelRemovalWorker | None = None
+        self._remove_worker: _ModelRemovalWorker | _ModelDownloadWorker | None = None
         self._removal_entry: ModelEntry | None = None
 
     def set_dialog_parent(self, parent: QWidget) -> None:
@@ -351,6 +394,50 @@ class ModelManagerController(QObject):
         if self._manager.active_id == entry.model_id:
             return "Cannot remove the model used by the active session."
         return None
+
+    def _download_requested(self, value: object) -> None:
+        manager = self._manager
+        if not isinstance(value, ModelEntry) or value.cached or manager is None:
+            return
+        if self._remove_thread is not None:
+            return
+        if self._store.state.job.phase is not JobState.IDLE:
+            self.dialog.set_message("Cannot download a model while a job is running.")
+            return
+        worker = _ModelDownloadWorker(manager, value.model_id)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        worker.downloaded.connect(self._download_succeeded)
+        worker.failed.connect(self._download_failed)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._removal_thread_finished)
+        thread.finished.connect(thread.deleteLater)
+        self._remove_thread = thread
+        self._remove_worker = worker
+        self._removal_entry = value
+        self.dialog.set_busy(True)
+        self.dialog.set_message(f"Downloading {value.display_name}…")
+        thread.started.connect(worker.run)
+        thread.start()
+
+    @Slot(str)
+    def _download_succeeded(self, model_id: str) -> None:
+        entry = self._removal_entry
+        if entry is None or entry.model_id != model_id:
+            return
+        self.dialog.refresh()
+        self.dialog.set_message(f"Downloaded {entry.display_name}.")
+        if self._store.state.parameters.model_id == model_id:
+            self._store.dispatch(ModelAvailabilityChanged(True))
+
+    @Slot(str, object)
+    def _download_failed(self, model_id: str, error: object) -> None:
+        entry = self._removal_entry
+        if entry is None or entry.model_id != model_id:
+            return
+        self.dialog.set_message(f"Could not download the weight: {error}")
+        QMessageBox.warning(self.dialog, "Could not download model", str(error))
 
     def _remove_requested(self, value: object) -> None:
         if not isinstance(value, ModelEntry) or not value.cached:
