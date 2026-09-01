@@ -267,6 +267,7 @@ def test_native_build_uses_configured_entrypoint_without_overriding_the_spec(
         "-c",
         str(tmp_path / "native.spec"),
         "--force",
+        "--keep-deployment-files",
     ]
 
 
@@ -1009,3 +1010,119 @@ def test_failure_diagnostics_are_a_noop_without_a_staging_directory(
     native_build._copy_failure_diagnostics(ValueError("nope"), root=root)
 
     assert not (root / "build-failure-diagnostics").exists()
+
+
+def test_deploy_command_keeps_deployment_files_for_recovery() -> None:
+    # Without --keep-deployment-files, pyside6-deploy deletes
+    # packaging/deployment/ itself right after building, before
+    # _recover_long_command_deploy_mismatch ever gets a chance to inspect it.
+    command = build_command(Path("pyside6-deploy"))
+    assert "--keep-deployment-files" in command
+
+
+def test_recovers_the_real_nuitka_output_when_pyside_deploy_mislabels_it(
+    tmp_path: Path,
+) -> None:
+    # On Windows, once the assembled Nuitka command line exceeds 7000
+    # characters, pyside6-deploy compiles an intermediate deploy_main.py
+    # instead of entrypoint.py, so Nuitka's own standalone output is named
+    # deploy_main.dist -- but pyside6-deploy's finalize() step still looks
+    # for entrypoint.dist and gives up without copying anything. Reproduced
+    # on the real Windows runner as "Executable not found ...
+    # entrypoint.dist" despite Nuitka itself compiling successfully.
+    deployment_staging = tmp_path / "packaging" / "deployment"
+    real_output = deployment_staging / "deploy_main.dist"
+    (real_output / "nested").mkdir(parents=True)
+    (real_output / "matteloop.exe").write_bytes(b"exe")
+    (real_output / "nested" / "asset.dat").write_bytes(b"data")
+    artifact = tmp_path / "dist" / "MatteLoop.dist"
+
+    native_build._recover_long_command_deploy_mismatch(artifact, deployment_staging)
+
+    assert (artifact / "matteloop.exe").read_bytes() == b"exe"
+    assert (artifact / "nested" / "asset.dat").read_bytes() == b"data"
+
+
+def test_recovery_never_overwrites_an_artifact_pyside_deploy_already_produced(
+    tmp_path: Path,
+) -> None:
+    deployment_staging = tmp_path / "packaging" / "deployment"
+    (deployment_staging / "deploy_main.dist").mkdir(parents=True)
+    artifact = tmp_path / "dist" / "MatteLoop.dist"
+    artifact.mkdir(parents=True)
+    (artifact / "matteloop.exe").write_bytes(b"already there")
+
+    native_build._recover_long_command_deploy_mismatch(artifact, deployment_staging)
+
+    assert (artifact / "matteloop.exe").read_bytes() == b"already there"
+    assert not (artifact / "deploy_main.dist").exists()
+
+
+def test_recovery_is_a_noop_without_a_deployment_staging_directory(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "dist" / "MatteLoop.dist"
+
+    native_build._recover_long_command_deploy_mismatch(
+        artifact, tmp_path / "packaging" / "deployment"
+    )
+
+    assert not artifact.exists()
+
+
+def test_recovery_refuses_to_guess_between_ambiguous_dist_directories(
+    tmp_path: Path,
+) -> None:
+    deployment_staging = tmp_path / "packaging" / "deployment"
+    (deployment_staging / "deploy_main.dist").mkdir(parents=True)
+    (deployment_staging / "stale.dist").mkdir(parents=True)
+    artifact = tmp_path / "dist" / "MatteLoop.dist"
+
+    native_build._recover_long_command_deploy_mismatch(artifact, deployment_staging)
+
+    assert not artifact.exists()
+
+
+def test_native_build_recovers_a_mislabeled_bundle_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # End-to-end wiring check: pyside6-deploy "succeeds" (exit 0) but never
+    # creates the expected artifact, because it mislabeled its own output as
+    # deploy_main.dist instead of MatteLoop.dist. The recovery step inside
+    # _run_native_build must notice, copy the real output into place, and
+    # let the rest of the pipeline (media-error scan, compliance, size
+    # report) proceed normally.
+    artifact = tmp_path / "dist" / "MatteLoop.dist"
+    real_output = tmp_path / "packaging" / "deployment" / "deploy_main.dist"
+    compliance = tmp_path / "MatteLoop-media-sources-macos-arm64-identity.tar.gz"
+    compliance.write_bytes(b"exact compliance archive")
+    qt_companion = _qt_companion(tmp_path)
+    prepared = SimpleNamespace(
+        av_directory=tmp_path / "extracted" / "av",
+        compliance_archive=compliance,
+        target=MACOS,
+        contract=CONTRACT,
+        identity="identity",
+    )
+    _stub_native_main(
+        monkeypatch, tmp_path, artifact, prepared, qt_companion=qt_companion
+    )
+
+    calls: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if len(calls) == 1:
+            # Simulates pyside6-deploy: Nuitka itself succeeds and writes its
+            # standalone output to deploy_main.dist, but pyside6-deploy's own
+            # finalize() mislooks for entrypoint.dist and never copies
+            # anything to the real artifact path.
+            real_output.mkdir(parents=True)
+            (real_output / "matteloop.exe").write_bytes(b"bundle")
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(native_build.subprocess, "run", run)
+
+    assert native_build.main([]) == 0
+    assert (artifact / "matteloop.exe").read_bytes() == b"bundle"
+    assert not (tmp_path / "packaging" / "deployment").exists()

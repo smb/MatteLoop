@@ -219,6 +219,10 @@ def build_command(
         "-c",
         str(spec_path),
         "--force",
+        # Without this, pyside6-deploy deletes packaging/deployment/ itself
+        # right after building, which would remove the evidence
+        # _recover_long_command_deploy_mismatch needs on Windows.
+        "--keep-deployment-files",
     ]
 
 
@@ -442,9 +446,11 @@ def main(argv: list[str] | None = None) -> int:
 def _run_native_build(media_wheel: Path | None, rebuild_media_stack: bool) -> int:
     deploy_path = deploy_executable()
     artifact = expected_artifact(sys.platform)
+    deployment_staging = ROOT / "packaging" / "deployment"
     print("Building unsigned native bundle with pyside6-deploy…", flush=True)
     try:
         remove_previous_artifact(sys.platform)
+        shutil.rmtree(deployment_staging, ignore_errors=True)
         with temporary_onnxruntime_dylib_alias():
             with tempfile.TemporaryDirectory(
                 prefix=".matteloop-build-", dir=ROOT
@@ -473,6 +479,7 @@ def _run_native_build(media_wheel: Path | None, rebuild_media_stack: bool) -> in
                 completed = subprocess.run(
                     build_command(deploy_path, temporary_spec), cwd=ROOT, check=False
                 )
+        _recover_long_command_deploy_mismatch(artifact, deployment_staging)
     except (OSError, RuntimeError, ValueError) as error:
         print(
             f"Native build preparation or launch failed: {error}",
@@ -480,7 +487,38 @@ def _run_native_build(media_wheel: Path | None, rebuild_media_stack: bool) -> in
         )
         _copy_failure_diagnostics(error)
         return 1
+    finally:
+        shutil.rmtree(deployment_staging, ignore_errors=True)
     return _finish_native_build(completed, artifact, prepared, qt_companion)
+
+
+def _recover_long_command_deploy_mismatch(
+    artifact: Path, deployment_staging: Path
+) -> None:
+    """Copy Nuitka's real standalone output into place when pyside6-deploy's
+    own Windows long-command workaround broke its success detection.
+
+    On Windows, pyside6-deploy silently compiles an intermediate
+    deploy_main.py instead of packaging/entrypoint.py whenever the
+    assembled Nuitka command line exceeds 7000 characters -- our spec's many
+    --include-data-files entries for the PyAV wheel reliably cross that
+    threshold. Nuitka then names its standalone output deploy_main.dist, but
+    pyside6-deploy's own finalize() step still looks for entrypoint.dist
+    (the *original* source file's stem) and, finding nothing, logs an error
+    and returns without copying anything -- reproduced on the real Windows
+    runner as "Executable not found ... entrypoint.dist" despite Nuitka
+    itself compiling successfully.
+    """
+    if artifact.exists() or not deployment_staging.is_dir():
+        return
+    candidates = [
+        entry
+        for entry in deployment_staging.iterdir()
+        if entry.is_dir() and entry.suffix == ".dist"
+    ]
+    if len(candidates) != 1:
+        return
+    shutil.copytree(candidates[0], artifact, dirs_exist_ok=True)
 
 
 def _copy_failure_diagnostics(error: Exception, *, root: Path = ROOT) -> None:
