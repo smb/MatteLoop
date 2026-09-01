@@ -22,5 +22,5 @@ packaging/deployment/
 .matteloop-local-media/
 .worktrees/
 onnxruntime_profile__*.json
-core
+/core
 qemu_*.core

@@ -1550,3 +1550,24 @@ def test_fit_rejects_wrong_pixels_with_valid_dimensions_during_final_copy(
     assert exc.value.code is ErrorCode.INVALID_OUTPUT
     assert "RGBA source" in exc.value.technical_detail
     assert output.read_bytes() == b"existing"
+
+
+def test_fsync_opens_the_file_writable(tmp_path: Path) -> None:
+    # Windows' os.fsync maps to _commit(), which fails with EBADF on a
+    # read-only handle -- reproduced on the real Windows runner as
+    # "lossless WebP encoding failed: OSError: [Errno 9] Bad file descriptor".
+    target = tmp_path / "output.webp"
+    target.write_bytes(b"RIFF")
+    modes: list[str] = []
+    real_open = Path.open
+
+    def record_open(self: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        modes.append(mode)
+        return real_open(self, mode, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Path, "open", record_open)
+        webp_module._fsync_file(target)
+
+    assert modes == ["rb+"]
+    assert target.read_bytes() == b"RIFF"

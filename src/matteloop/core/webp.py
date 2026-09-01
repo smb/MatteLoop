@@ -1407,7 +1407,7 @@ def _sibling_temporary(destination: Path) -> Path:
 
 
 def _fsync_file(path: Path) -> None:
-    with path.open("rb") as output:
+    with path.open("rb+") as output:  # Windows _commit() needs a writable fd
         os.fsync(output.fileno())
 
 
