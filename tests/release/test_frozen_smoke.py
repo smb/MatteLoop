@@ -542,6 +542,24 @@ def test_native_bundle_includes_project_license_notices() -> None:
     assert "--include-data-files=legal/RELINK.md=RELINK.md" in args
 
 
+def test_distributed_legal_files_preserve_the_measured_macos_floor() -> None:
+    relink = (REPOSITORY_ROOT / "legal" / "RELINK.md").read_text(encoding="utf-8")
+    notices = (REPOSITORY_ROOT / "THIRD_PARTY_NOTICES.md").read_text(
+        encoding="utf-8"
+    )
+
+    for document in (" ".join(relink.split()), " ".join(notices.split())):
+        assert "complete app requires macOS 15" in document
+        assert (
+            "custom media FFmpeg/libwebp dylibs retain a 13.0 minimum" in document
+        )
+        assert "not been launched on an actual macOS 15 host" in document
+        assert "delivered app targets macOS 13.0" not in document
+        assert "actual macOS 13 host" not in document
+    assert "CMAKE_OSX_DEPLOYMENT_TARGET=15.0" in relink
+    assert "preserve the app's macOS 15 support floor" in relink
+
+
 def test_pyside_deploy_accepts_spec_in_dry_run_mode(tmp_path: Path) -> None:
     executable_name = (
         "pyside6-deploy.exe" if sys.platform == "win32" else "pyside6-deploy"

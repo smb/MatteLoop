@@ -113,8 +113,10 @@ not prevent publishing MatteLoop's own source under 0BSD.
 
 The unsigned macOS arm64 artifact completed the repository, media verifier,
 codec-fixture, bundle, checksum, and packaged smoke gates on 2026-09-01.
-It was built on macOS 26 with deployment target 13.0, but was not launched on
-an actual macOS 13 host.
+The complete app requires macOS 15 or later because its bundled PySide6 and
+Shiboken bindings report a 15.0 minimum. Its separately built custom media
+FFmpeg/libwebp dylibs retain a 13.0 minimum. The app was built on macOS 26 but
+has not been launched on an actual macOS 15 host.
 Windows x64 remains unqualified until its separately authorized native or
 manual Actions run passes the same gates; the macOS result is not evidence for
 the Windows artifact.

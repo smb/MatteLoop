@@ -278,10 +278,10 @@ host, not estimates:
 
 | Gate | Measured result |
 |---|---|
-| Exact repository gate | ruff passed; mypy passed 95 source files; pytest passed 1,507 tests with 15 warnings in 58.87 seconds |
+| Exact repository gate | ruff passed; mypy passed 95 source files; pytest passed 1,508 tests with 15 warnings in 60.08 seconds |
 | Forced media build | 322.39 seconds; identity `f1798ac74a887540408547eb`; wheel `av-16.1.0-cp311-abi3-macosx_13_0_arm64.whl` |
 | Cache hit | 8.59 seconds; returned the same five media output paths, skipped compilation, validated the artifact set, and reran the verifier |
-| Application build | 245.20 seconds; bundle scan, packaged offline smoke, and both source-companion gates passed |
+| Application build | 280.24 seconds; bundle scan, packaged offline smoke, and both source-companion gates passed |
 
 The committed verifier loaded the cached wheel with CPython 3.13, decoded the
 committed H.264 and H.265 fixtures, and exercised production animated-WebP
@@ -301,10 +301,10 @@ Measured output sizes were:
 
 | Output | Location | Size |
 |---|---|---:|
-| Unsigned app | `dist/MatteLoop.app` | 320,808,789 bytes (305.9 MiB), 293 files |
+| Unsigned app | `dist/MatteLoop.app` | 320,809,352 bytes (305.9 MiB), 293 files |
 | Media complete-source archive | `dist/MatteLoop-media-sources-macos-arm64-f1798ac74a887540408547eb.tar.gz` | 23,715,259 bytes |
 | Media source checksum | the adjacent `.sha256` | 134 bytes |
-| Qt/PySide source companion | `dist/MatteLoop-qt-sources-6.10.3-8e89556c54d42155a0e47eb9.tar.gz` | 70,549,477 bytes |
+| Qt/PySide source companion | `dist/MatteLoop-qt-sources-6.10.3-78318b4b85de26573a4e9493.tar.gz` | 70,549,567 bytes |
 | Qt/PySide checksum | the adjacent `.sha256` | 126 bytes |
 | Verified media wheel | the identity cache's `finished/` directory | 11,917,706 bytes |
 | Provenance | adjacent `*.provenance.json` | 316 bytes |

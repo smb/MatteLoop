@@ -5,8 +5,12 @@ Qt/PySide parts of the unsigned MatteLoop native application. They are not a
 project signing, notarization, release, or support promise.
 
 Replacement libraries and bindings must remain ABI-compatible with Qt/PySide
-6.10.3 and with the bundle's platform and architecture. Keep an untouched copy
-of the application before replacing files.
+6.10.3 and with the bundle's platform and architecture. The complete app
+requires macOS 15 or later; an ABI-compatible replacement Qt/PySide runtime
+must preserve the app's macOS 15 support floor. The separately built custom
+media FFmpeg/libwebp dylibs retain a 13.0 minimum and are not rebuilt from this
+Qt source companion. This app has not been launched on an actual macOS 15 host.
+Keep an untouched copy of the application before replacing files.
 
 ## Verify and unpack the source companion
 
@@ -44,8 +48,8 @@ before rebuilding.
 ## Build the replacement components on macOS
 
 Use an arm64 macOS toolchain with CMake and Ninja, Xcode command-line tools,
-and CPython 3.13. The delivered app targets macOS 13.0, so preserve that
-minimum:
+and CPython 3.13. Configure the replacement Qt/PySide runtime for the complete
+app's macOS 15 support floor:
 
 ```sh
 mkdir -p work/src work/build work/install
@@ -55,7 +59,7 @@ tar -xf sources/pyside-setup-everywhere-src-6.10.3.tar.xz -C work/src
 
 cmake -S work/src/qtbase-everywhere-src-6.10.3 -B work/build/qtbase -G Ninja \
   -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
-  -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+  -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
   -DCMAKE_INSTALL_PREFIX="$PWD/work/install" \
   -DQT_BUILD_EXAMPLES=OFF -DQT_BUILD_TESTS=OFF
 cmake --build work/build/qtbase --parallel
@@ -64,7 +68,7 @@ cmake --install work/build/qtbase
 cmake -S work/src/qtimageformats-everywhere-src-6.10.3 \
   -B work/build/qtimageformats -G Ninja \
   -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
-  -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+  -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
   -DCMAKE_PREFIX_PATH="$PWD/work/install" \
   -DCMAKE_INSTALL_PREFIX="$PWD/work/install" \
   -DQT_BUILD_EXAMPLES=OFF -DQT_BUILD_TESTS=OFF
@@ -80,7 +84,7 @@ options and prerequisites for this exact source are in that tree's
 
 ```sh
 cd work/src/pyside-setup-everywhere-src-6.10.3
-python3.13 setup.py build \
+MACOSX_DEPLOYMENT_TARGET=15.0 python3.13 setup.py build \
   --qtpaths="$OLDPWD/work/install/bin/qtpaths" \
   --ignore-git --parallel=4
 ```
