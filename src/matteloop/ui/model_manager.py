@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import stat
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,7 +34,11 @@ from matteloop.ui.aligned_rows import (
     install_aligned_row,
 )
 from matteloop.ui.ports import StateStore
-from matteloop.ui.source_presentation import format_source_file_size
+from matteloop.ui.source_presentation import (
+    DownloadRateEstimator,
+    format_model_download_detail,
+    format_source_file_size,
+)
 
 MODEL_ENTRY_ROLE = ROW_DATA_ROLE + 11
 
@@ -44,7 +49,7 @@ class ModelRemovalService(Protocol):
 
     def remove(self, model_id: str) -> bool: ...
 
-    def fetch(self, model_id: str) -> object: ...
+    def fetch(self, model_id: str, progress: object = None) -> object: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,6 +323,7 @@ class _ModelRemovalWorker(QObject):
 class _ModelDownloadWorker(QObject):
     downloaded = Signal(str)
     failed = Signal(str, object)
+    progressed = Signal(int, int)
     finished = Signal()
 
     def __init__(self, manager: ModelRemovalService, model_id: str) -> None:
@@ -328,13 +334,16 @@ class _ModelDownloadWorker(QObject):
     @Slot()
     def run(self) -> None:
         try:
-            self._manager.fetch(self._model_id)
+            self._manager.fetch(self._model_id, self._report)
         except Exception as error:
             self.failed.emit(self._model_id, error)
         else:
             self.downloaded.emit(self._model_id)
         finally:
             self.finished.emit()
+
+    def _report(self, completed: int, total: int) -> None:
+        self.progressed.emit(completed, total)
 
 
 class ModelManagerController(QObject):
@@ -407,6 +416,8 @@ class ModelManagerController(QObject):
         worker = _ModelDownloadWorker(manager, value.model_id)
         thread = QThread(self)
         worker.moveToThread(thread)
+        self._download_rate = DownloadRateEstimator()
+        worker.progressed.connect(self._download_progressed)
         worker.downloaded.connect(self._download_succeeded)
         worker.failed.connect(self._download_failed)
         worker.finished.connect(thread.quit)
@@ -420,6 +431,18 @@ class ModelManagerController(QObject):
         self.dialog.set_message(f"Downloading {value.display_name}…")
         thread.started.connect(worker.run)
         thread.start()
+
+    @Slot(int, int)
+    def _download_progressed(self, completed: int, total: int) -> None:
+        entry = self._removal_entry
+        if entry is None:
+            return
+        speed = self._download_rate.update(completed, time.monotonic())
+        self.dialog.set_message(
+            format_model_download_detail(
+                entry.display_name, completed, total, speed
+            )
+        )
 
     @Slot(str)
     def _download_succeeded(self, model_id: str) -> None:

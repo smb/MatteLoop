@@ -33,9 +33,11 @@ class FakeModelRemovalService:
         self.fetched: list[str] = []
         self.thread_ids: list[int] = []
 
-    def fetch(self, model_id: str) -> Path:
+    def fetch(self, model_id: str, progress=None) -> Path:
         self.thread_ids.append(get_ident())
         self.fetched.append(model_id)
+        if progress is not None:
+            progress(2_000_000, 8_000_000)
         target = self.targets.get(model_id)
         assert target is not None
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -292,11 +294,26 @@ def test_model_manager_downloads_a_missing_weight_in_the_background(
 
     assert controller.dialog.download_button.isEnabled()
     assert not controller.dialog.remove_button.isEnabled()
+    messages: list[str] = []
+    original = controller.dialog.set_message
+
+    def record(message: str) -> None:
+        messages.append(message)
+        original(message)
+
+    controller.dialog.set_message = record  # type: ignore[method-assign]
 
     controller.dialog.download_button.click()
 
     qtbot.waitUntil(lambda: manager.fetched == ["u2netp"], timeout=5000)
     assert manager.thread_ids and manager.thread_ids[0] != get_ident()
+    # The dialog reports the same size detail the job popup would, so a
+    # multi-hundred-megabyte download is not a frozen-looking button.
+    qtbot.waitUntil(
+        lambda: any("1.9 MiB of 7.6 MiB" in message for message in messages),
+        timeout=5000,
+    )
+    assert any(message.startswith("Downloading ") for message in messages)
     qtbot.waitUntil(
         lambda: controller.dialog.entries[index].cached, timeout=5000
     )

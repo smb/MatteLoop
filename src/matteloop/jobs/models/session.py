@@ -191,11 +191,15 @@ class ModelSessionManager:
             self._active_result = result
             return result
 
-    def fetch(self, model_id: str) -> Path:
+    def fetch(
+        self, model_id: str, progress: ProgressCallback | None = None
+    ) -> Path:
         """Download and verify one weight without starting a session for it.
 
         prepare() also launches the segmentation client, which is wrong for
-        a manager dialog that only wants the weight on disk beforehand.
+        a manager dialog that only wants the weight on disk beforehand. That
+        dialog reports progress itself, so it can pass its own callback
+        instead of the one bound to the job context.
         """
         with self._lock:
             self._require_open()
@@ -205,7 +209,7 @@ class ModelSessionManager:
             return self._downloader.download(
                 spec,
                 self._cache_root,
-                self._progress,
+                self._progress if progress is None else progress,
                 self._cancelled,
             )
 
