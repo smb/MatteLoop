@@ -1308,3 +1308,28 @@ def test_real_windows_api_binds_a_cache_directory_end_to_end(tmp_path: Path) -> 
 
     assert reopened is not None
     reopened.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="compares the two Windows stat sources")
+def test_bound_lstat_matches_os_fstat_identity(tmp_path: Path) -> None:
+    """The cache's own lstat must agree with os.fstat about file identity.
+
+    Several checks compare an identity from bound.lstat() against one from
+    os.fstat(); they are only meaningful if both sources report st_dev and
+    st_ino the same way.
+    """
+    bound = BoundModelDirectory.bind(tmp_path, "2.0.72", "u2netp", create=True)
+    assert bound is not None
+    with bound:
+        (bound.path / "weight.onnx").write_bytes(b"weight")
+        from_api = bound.lstat("weight.onnx")
+        descriptor = bound.open_read("weight.onnx")
+        try:
+            from_os = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+
+    assert (from_api.st_dev, from_api.st_ino) == (from_os.st_dev, from_os.st_ino), (
+        f"bound.lstat dev/ino {from_api.st_dev}/{from_api.st_ino} != "
+        f"os.fstat {from_os.st_dev}/{from_os.st_ino}"
+    )
