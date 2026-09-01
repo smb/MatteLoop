@@ -17,7 +17,7 @@
 
 ## Global Constraints
 
-- Support Windows 11 x86_64, macOS 13+ arm64 and x86_64, and Ubuntu 22.04 x86_64; builds are separate and unsigned.
+- Support Windows 11 x86_64, macOS 15+ arm64 and x86_64, and Ubuntu 22.04 x86_64; builds are separate and unsigned. The custom media dylibs retain a separate macOS 13.0 deployment target.
 - Require Python `>=3.13,<3.14` for development and packaging; end-user artifacts bundle Python and require no external `ffmpeg`, ImageMagick, `img2webp`, Bash, or Python.
 - Pin `rembg[cpu]==2.0.72`; do not expose custom model paths or custom ONNX sessions. This release supports Python 3.11–3.13 and includes exactly 15 prompt-free local models.
 - Select `birefnet-portrait` on first launch. Model weights live outside the application bundle and are never committed.

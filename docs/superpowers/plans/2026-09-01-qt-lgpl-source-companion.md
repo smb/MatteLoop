@@ -167,7 +167,7 @@ Use `fix: record sanitized delocate environment` with a substantive body and a `
 
 **Step 1: Add publication-boundary assertions where suitable**
 
-Extend existing release/native tests to prove documentation names both source/checksum pairs and forbids unsupported Windows/macOS 13/signing/notarization claims where a stable assertion is valuable.
+Extend existing release/native tests to prove documentation names both source/checksum pairs and forbids claims of Windows qualification, actual-host macOS 15 launch, signing, or notarization where a stable assertion is valuable.
 
 **Step 2: Document the exact contract**
 

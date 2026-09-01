@@ -13,7 +13,7 @@ in `dist/`.
 
 Windows remains unqualified. This work does not publish, upload, sign, or
 notarize an artifact and does not claim that a replacement build has been
-tested on an actual macOS 13 host.
+tested on an actual macOS 15 host.
 
 ## Exact corresponding sources
 
@@ -148,9 +148,11 @@ distribution keeps these five deliverables together:
 4. the Qt source companion; and
 5. the Qt companion checksum.
 
-The local host is macOS 26 targeting a 13.0 minimum. The artifact has not been
-launched on an actual macOS 13 host. Windows, Actions execution, signing,
-notarization, upload, release creation, and publication remain unclaimed.
+The local host is macOS 26. The custom media dylibs target macOS 13.0, while
+direct inspection of the complete app establishes a macOS 15 floor because of
+the bundled PySide6 bindings. The artifact has not been launched on an actual
+macOS 15 host. Windows, Actions execution, signing, notarization, upload,
+release creation, and publication remain unclaimed.
 
 ## Testing and qualification
 
@@ -161,7 +163,7 @@ TDD behavior coverage proves:
   source primitive;
 - deterministic normalized companion bytes and exact content inventory;
 - exact four-distribution prerequisite enforcement;
-- packaging spec declaration of all three legal files;
+- packaging spec declaration of all four legal and relink files;
 - build failure when the Qt companion is absent or invalid;
 - both source pairs and checksums are required for successful evidence
   publication;
@@ -174,4 +176,3 @@ repository gate, a fresh forced media build, media cache hit, real app rebuild,
 both checksum/content inspections, in-bundle legal/relink inspection, committed
 bundle gate, packaged smoke, and direct Mach-O minimum-version inspection. Only
 actual measured results update documentation and the Task 8 report.
-

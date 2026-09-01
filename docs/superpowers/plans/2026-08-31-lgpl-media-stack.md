@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Read `docs/engineering-guardrails.md` and `docs/v1-scope.md` before implementation; they override this plan if repository policy changes.
-- V1 native targets are macOS 13+ arm64 and Windows x64 only; Linux, macOS x64, and universal artifacts remain deferred.
+- V1 native targets are macOS 15+ arm64 and Windows x64 only; Linux, macOS x64, and universal artifacts remain deferred. The media wheel itself continues to use the strict `macosx_13_0_arm64` tag and 13.0 dylib deployment target.
 - MatteLoop's own source, documentation, and assets remain 0BSD.
 - Native release artifacts must not contain GPL, non-free, x264, x265, or OpenH264 components.
 - FFmpeg and libwebp remain dynamically linked, separately identifiable `.dylib` or `.dll` files.

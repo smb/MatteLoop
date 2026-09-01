@@ -2,9 +2,9 @@
 
 MatteLoop is a desktop app for previewing local videos, removing their
 backgrounds, and exporting lossless transparent animated WebP files. V1
-targets macOS 13+ arm64 and Windows x64; Linux artifacts remain deferred. The
-current native qualification covers macOS arm64 only, and native artifacts are
-unsigned.
+targets macOS 15+ arm64 and Windows x64; Linux artifacts remain deferred. The
+current native qualification covers macOS 15+ arm64 only, and native artifacts
+are unsigned.
 
 ## Run from source
 

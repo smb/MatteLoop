@@ -469,7 +469,7 @@ V1's tested media baseline is 8-bit SDR video in:
 - Decode normalizes orientation, pixel aspect, and 8-bit SDR frames into sRGB RGBA. HDR/10-bit input is rejected in V1 with an explicit conversion recommendation rather than silently tone-mapped.
 - Individual decode limits are 3840×2160, 60 source fps, and 10 minutes, but the combined supported envelope requires both inference pixel-frames and worst-case post-padding/stretch encoded pixel-frames to be at most 2.5 billion. The limits are not independently cumulative: a 4K/60-fps/10-minute job is far outside the supported envelope. Larger combined jobs require the explicit large-job confirmation and are best-effort.
 - Local files with Unicode and spaces are supported. Network shares, URLs, DRM media, image sequences, and live streams are outside V1.
-- Platform artifacts: Windows 11 x86_64; macOS 13+ arm64 and x86_64 as separate builds; Ubuntu 22.04 x86_64 with glibc 2.35 or newer. Other distributions may work but are not release targets.
+- Platform artifacts: Windows 11 x86_64; macOS 15+ arm64 and x86_64 as separate builds; Ubuntu 22.04 x86_64 with glibc 2.35 or newer. Other distributions may work but are not release targets.
 - High-DPI scaling at 100%, 150%, and 200% is tested. Minimum usable display is 1100×720.
 
 ## Failure and Edge Cases
@@ -604,7 +604,7 @@ No curated real-video collection is required or maintained. Before a release, th
 - Pin direct dependencies and maintain a lock/constraints file per release.
 - Use `pyside6-deploy`/Nuitka configuration as the primary packager.
 - Ordinary local checks run lint, type checks, pytest core/integration tests, and synthetic fixture validation only; they do not download real model weights or freeze artifacts.
-- Manually started qualification builds Windows 11 x86_64, macOS 13+ arm64 and x86_64, and Ubuntu 22.04 x86_64 on matching native machines; each produces its own artifact and no universal binary is promised. Checked-in remote automation remains optional and may run only after separate user authorization.
+- Manually started qualification builds Windows 11 x86_64, macOS 15+ arm64 and x86_64, and Ubuntu 22.04 x86_64 on matching native machines; each produces its own artifact and no universal binary is promised. Checked-in remote automation remains optional and may run only after separate user authorization.
 - Deliver Windows `.exe` bundle, separate macOS `.app` archives per architecture, and an Ubuntu 22.04/glibc 2.35 x86_64 executable bundle. One-file mode is used only if cold start and model/plugin discovery remain reliable; otherwise ship a self-contained directory/archive.
 - Manual release qualification runs the real-model, codec, frozen-process, memory, notices, and packaged `--smoke-test` checks before artifacts are distributed. There is no automatic nightly qualification requirement.
 - Release artifacts do not bundle model weights. First-use download and cache behavior is part of the UI.

@@ -21,7 +21,7 @@ You need:
 - CPython 3.13.x. The project accepts `>=3.13,<3.14`.
 - `uv` 0.11.32. The workflow pins this version and `uv.lock` pins the Python
   dependencies.
-- macOS 13 or later on arm64, plus the Xcode Command Line Tools. Install the
+- macOS 15 or later on arm64, plus the Xcode Command Line Tools. Install the
   tools with `xcode-select --install` if `xcode-select -p` reports that they
   are missing. A first media-stack build also needs CMake, NASM, and
   `pkg-config`; install them with `brew install cmake nasm pkg-config`.
@@ -186,8 +186,10 @@ these five deliverables together in `dist/`:
 
 The verifier report and artifact-set binding remain in the media cache path
 printed by `scripts/build_media_stack.py --json`. The application was built on
-macOS 26 with a 13.0 deployment target; it has not been launched on an actual
-macOS 13 host.
+macOS 26. Its custom FFmpeg/libwebp media dylibs target 13.0, but direct Mach-O
+inspection sets the whole-app support floor at macOS 15 because the bundled
+PySide6 6.10.3 bindings require 15.0. It has not been launched on an actual
+macOS 15 host.
 
 ## Windows
 
@@ -268,25 +270,30 @@ artifact.
 
 ## Verification status
 
-macOS arm64 qualified on 2026-09-01 on macOS 26.6.2 (build 25G83), using
+The unsigned macOS 15+ arm64 build qualified on 2026-09-01 on macOS 26.6.2
+(build 25G83), using
 CPython 3.13.14, Apple clang 21.0.0, CMake 4.4.3, NASM 3.02,
 `pkg-config` 3.0.6, and local `uv` 0.12.7. The workflow remains pinned to the
 host, not estimates:
 
 | Gate | Measured result |
 |---|---|
-| Exact repository gate | ruff passed; mypy passed 95 source files; pytest passed 1,479 tests with 15 warnings in 54.95 seconds |
-| Forced media build | 342.81 seconds; identity `824842398768745fa5e6e346`; wheel `av-16.1.0-cp311-abi3-macosx_13_0_arm64.whl` |
-| Cache hit | 9.21 seconds; returned the same five output paths, skipped compilation, validated the artifact set, and reran the verifier |
-| Application build | 259.29 seconds; bundle scan and packaged offline smoke passed |
+| Exact repository gate | ruff passed; mypy passed 95 source files; pytest passed 1,507 tests with 15 warnings in 58.87 seconds |
+| Forced media build | 322.39 seconds; identity `f1798ac74a887540408547eb`; wheel `av-16.1.0-cp311-abi3-macosx_13_0_arm64.whl` |
+| Cache hit | 8.59 seconds; returned the same five media output paths, skipped compilation, validated the artifact set, and reran the verifier |
+| Application build | 245.20 seconds; bundle scan, packaged offline smoke, and both source-companion gates passed |
 
 The committed verifier loaded the cached wheel with CPython 3.13, decoded the
 committed H.264 and H.265 fixtures, and exercised production animated-WebP
 encode/validation. Its report records FFmpeg 8.0.1; `h264`, `hevc`, and
 `libwebp_anim`; `mov` and `webp`; LGPL-2.1-or-later library metadata; and no
-forbidden dependency. Direct Mach-O inspection found a macOS 13.0 minimum on
-all ten bundled dylibs. The committed final-bundle gate returned no findings.
-The packaged smoke passed video decode, two-frame alpha WebP, Qt WebP support,
+forbidden dependency. Direct inspection found all ten custom media dylibs at
+`minos 13.0`. Across the complete app's 144 Mach-O files, 78 report 11.0, one
+reports 12.0, 42 report 13.0, 16 report 14.0, and seven report 15.0. The seven
+15.0 objects are the bundled PySide6/Shiboken bindings and establish the V1
+macOS 15 floor; lower minima on other files do not lower the whole-bundle
+requirement. The committed final-bundle gate returned no findings. The
+packaged smoke passed video decode, two-frame alpha WebP, Qt WebP support,
 spawn-mode shared memory creation/unlink, and all 13 rembg session-class
 resolutions.
 
@@ -294,16 +301,21 @@ Measured output sizes were:
 
 | Output | Location | Size |
 |---|---|---:|
-| Unsigned app | `dist/MatteLoop.app` | 320,755,322 bytes (305.9 MiB) |
-| Complete source archive | `dist/MatteLoop-media-sources-macos-arm64-824842398768745fa5e6e346.tar.gz` | 23,715,255 bytes |
-| Source checksum | the adjacent `.sha256` | 134 bytes |
-| Verified media wheel | the identity cache's `finished/` directory | 11,917,635 bytes |
+| Unsigned app | `dist/MatteLoop.app` | 320,808,789 bytes (305.9 MiB), 293 files |
+| Media complete-source archive | `dist/MatteLoop-media-sources-macos-arm64-f1798ac74a887540408547eb.tar.gz` | 23,715,259 bytes |
+| Media source checksum | the adjacent `.sha256` | 134 bytes |
+| Qt/PySide source companion | `dist/MatteLoop-qt-sources-6.10.3-8e89556c54d42155a0e47eb9.tar.gz` | 70,549,477 bytes |
+| Qt/PySide checksum | the adjacent `.sha256` | 126 bytes |
+| Verified media wheel | the identity cache's `finished/` directory | 11,917,706 bytes |
 | Provenance | adjacent `*.provenance.json` | 316 bytes |
 | Verifier report | `finished/verification-report.json` | 14,284 bytes |
 | Artifact-set binding | adjacent `*.artifact-set.json` | 890 bytes |
 
-The archive checksum passed `shasum -a 256 -c`. This qualification covers the
-unsigned macOS artifact only. Windows x64, workflow execution, signing,
+Both archive checksums passed `shasum -a 256 -c`; the Qt companion contains all
+three official source archives at their pinned digests, complete legal and
+replacement files, and exact installed-package inventories. This qualification
+covers the unsigned macOS 15+ arm64 artifact, built on macOS 26.6.2 but not
+launched on an actual macOS 15 host. Windows x64, workflow execution, signing,
 notarization, upload, release creation, publication, permanent source hosting,
 Gatekeeper distribution behavior, and SmartScreen behavior remain unclaimed
 or unexercised.

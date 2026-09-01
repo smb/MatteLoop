@@ -4,7 +4,7 @@
 `docs/superpowers/plans/2026-08-28-matteloop-implementation.md` disagree, **this
 file wins**. Read it together with `docs/engineering-guardrails.md`.
 
-Revision: 2026-08-31, following the publication packaging decision.
+Revision: 2026-09-01, following native dependency qualification.
 
 Product rename, 2026-08-31: `rembgGUI` is now **MatteLoop**. New installs use
 the `matteloop` package, command, settings identity, cache, and workspace
@@ -47,7 +47,7 @@ Nothing else gates V1. When that sentence is true end to end, V1 is done.
 
 | Area | V1 commitment |
 |---|---|
-| Platform | **macOS 13+ arm64 and Windows x64 packaged artifacts.** Run from source (`uv run matteloop`) remains supported; Linux stays deferred. |
+| Platform | **macOS 15+ arm64 and Windows x64 packaged artifacts.** The macOS floor follows the measured minimum of the bundled PySide6 6.10.3 bindings; the custom media dylibs retain their separate 13.0 deployment target. Run from source (`uv run matteloop`) remains supported; Linux stays deferred. |
 | Models | **13 models**: `birefnet-portrait` (default), `u2net`, `u2netp`, `u2net_human_seg`, `silueta`, `isnet-general-use`, `isnet-anime`, `birefnet-general`, `birefnet-general-lite`, `birefnet-dis`, `birefnet-hrsod`, `birefnet-cod`, `birefnet-massive`. Excluded: `bria-rmbg` (model-specific licence requires its own consent flow) and `u2net_cloth_seg` (needs a clothing-category input the UI cannot provide). |
 | Edge treatment | `Standard` and `Decontaminate colors`. |
 | Source media | Local 8-bit SDR MP4/MOV, H.264/H.265. |
