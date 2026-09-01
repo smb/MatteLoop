@@ -50,6 +50,7 @@ def test_libwebp_configures_shared_library_without_cli_or_example_targets() -> N
 
     assert configure[:3] == ("cmake", "-S", "libwebp")
     assert {
+        "-DCMAKE_BUILD_TYPE=Release",
         "-DBUILD_SHARED_LIBS=ON",
         "-DWEBP_LINK_STATIC=OFF",
         "-DWEBP_BUILD_ANIM_UTILS=OFF",
@@ -63,8 +64,30 @@ def test_libwebp_configures_shared_library_without_cli_or_example_targets() -> N
         "-DWEBP_BUILD_WEBPMUX=OFF",
         "-DWEBP_BUILD_EXTRAS=OFF",
     }.issubset(configure)
-    assert commands[1] == ("cmake", "--build", "build/libwebp")
-    assert commands[2] == ("cmake", "--install", "build/libwebp")
+    assert commands[1] == ("cmake", "--build", "build/libwebp", "--config", "Release")
+    assert commands[2] == (
+        "cmake",
+        "--install",
+        "build/libwebp",
+        "--config",
+        "Release",
+    )
+
+
+def test_libwebp_build_and_install_use_the_same_explicit_config_on_every_target() -> (
+    None
+):
+    # A CMake multi-config generator (Visual Studio, used on Windows) defaults
+    # --build to Debug and --install to Release when neither passes --config,
+    # so cmake --install fails looking for a Release binary that was never
+    # built. Both steps must always name the same, explicit configuration.
+    for target in (MACOS, WINDOWS):
+        commands = libwebp_commands(
+            target, Path("libwebp"), Path("build/libwebp"), Path("prefix")
+        )
+        build_config = commands[1][commands[1].index("--config") + 1]
+        install_config = commands[2][commands[2].index("--config") + 1]
+        assert build_config == install_config == "Release"
 
 
 def test_macos_ffmpeg_configures_shared_lgpl_libraries_against_the_prefix() -> None:

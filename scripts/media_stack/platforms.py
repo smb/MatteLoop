@@ -57,6 +57,7 @@ def libwebp_commands(
         "-B",
         str(build_dir),
         f"-DCMAKE_INSTALL_PREFIX={prefix}",
+        "-DCMAKE_BUILD_TYPE=Release",
         "-DBUILD_SHARED_LIBS=ON",
         "-DWEBP_LINK_STATIC=OFF",
         "-DWEBP_BUILD_ANIM_UTILS=OFF",
@@ -79,8 +80,8 @@ def libwebp_commands(
         )
     return (
         tuple(configure),
-        ("cmake", "--build", str(build_dir)),
-        ("cmake", "--install", str(build_dir)),
+        ("cmake", "--build", str(build_dir), "--config", "Release"),
+        ("cmake", "--install", str(build_dir), "--config", "Release"),
     )
 
 
