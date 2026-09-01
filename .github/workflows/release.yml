@@ -20,9 +20,21 @@
     "contents": "read"
   },
   "jobs": {
+    "plan": {
+      "runs-on": "ubuntu-22.04",
+      "outputs": {
+        "targets": "${{ steps.select.outputs.targets }}"
+      },
+      "steps": [
+        {
+          "id": "select",
+          "run": "case \"${{ inputs.platform }}\" in\n  windows) targets='[{\"target\":\"windows-2022-x64\",\"os\":\"windows-2022\"}]' ;;\n  macos) targets='[{\"target\":\"macos-15-arm64\",\"os\":\"macos-15\"}]' ;;\n  *) targets='[{\"target\":\"windows-2022-x64\",\"os\":\"windows-2022\"},{\"target\":\"macos-15-arm64\",\"os\":\"macos-15\"}]' ;;\nesac\necho \"targets=$targets\" >> \"$GITHUB_OUTPUT\""
+        }
+      ]
+    },
     "native-package": {
       "name": "${{ matrix.target }}",
-      "if": "inputs.platform == 'both' || startsWith(matrix.target, inputs.platform)",
+      "needs": "plan",
       "permissions": {
         "contents": "read"
       },
@@ -30,16 +42,7 @@
       "strategy": {
         "fail-fast": false,
         "matrix": {
-          "include": [
-            {
-              "target": "windows-2022-x64",
-              "os": "windows-2022"
-            },
-            {
-              "target": "macos-15-arm64",
-              "os": "macos-15"
-            }
-          ]
+          "include": "${{ fromJson(needs.plan.outputs.targets) }}"
         }
       },
       "steps": [

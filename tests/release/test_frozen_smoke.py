@@ -3,11 +3,13 @@ from __future__ import annotations
 import configparser
 import importlib.util
 import json
+import os
 import shlex
 import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import tomllib
 import urllib.request
 from dataclasses import FrozenInstanceError
@@ -600,12 +602,16 @@ def test_release_workflow_has_only_manual_unsigned_native_builds() -> None:
         "macos",
         "windows",
     }
+    plan = workflow["jobs"]["plan"]
+    select_script = plan["steps"][0]["run"]
+    assert '"target":"windows-2022-x64","os":"windows-2022"' in select_script
+    assert '"target":"macos-15-arm64","os":"macos-15"' in select_script
+
     job = workflow["jobs"]["native-package"]
-    includes = job["strategy"]["matrix"]["include"]
-    assert {(item["target"], item["os"]) for item in includes} == {
-        ("windows-2022-x64", "windows-2022"),
-        ("macos-15-arm64", "macos-15"),
-    }
+    assert job["needs"] == "plan"
+    assert job["strategy"]["matrix"]["include"] == (
+        "${{ fromJson(needs.plan.outputs.targets) }}"
+    )
     assert workflow["permissions"] == {"contents": "read"}
     assert job["permissions"] == {"contents": "read"}
     assert workflow["concurrency"] == {
@@ -696,15 +702,36 @@ def test_release_workflow_has_only_manual_unsigned_native_builds() -> None:
     assert "publish" not in serialized
 
 
-def test_release_workflow_platform_input_gates_each_matrix_target() -> None:
+@pytest.mark.parametrize(
+    ("platform", "expected_targets"),
+    [
+        ("windows", {"windows-2022-x64"}),
+        ("macos", {"macos-15-arm64"}),
+        ("both", {"windows-2022-x64", "macos-15-arm64"}),
+    ],
+)
+def test_release_workflow_platform_input_selects_matching_targets(
+    platform: str, expected_targets: set[str]
+) -> None:
     workflow_path = REPOSITORY_ROOT / ".github" / "workflows" / "release.yml"
     workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+    script = workflow["jobs"]["plan"]["steps"][0]["run"]
+    rendered = script.replace("${{ inputs.platform }}", platform)
 
-    job = workflow["jobs"]["native-package"]
-    condition = job["if"]
+    with tempfile.TemporaryDirectory() as raw:
+        output_path = Path(raw) / "github_output"
+        output_path.touch()
+        subprocess.run(
+            ["bash", "-c", rendered],
+            check=True,
+            env={**os.environ, "GITHUB_OUTPUT": str(output_path)},
+        )
+        line = output_path.read_text(encoding="utf-8").strip()
 
-    assert "inputs.platform == 'both'" in condition
-    assert "startsWith(matrix.target, inputs.platform)" in condition
+    key, _, value = line.partition("=")
+    assert key == "targets"
+    targets = json.loads(value)
+    assert {item["target"] for item in targets} == expected_targets
 
 
 def test_packaging_smoke_launcher_is_importable_without_shadowing_packaging() -> None:
