@@ -56,3 +56,19 @@ jobs:
           enable-cache: true
       - run: uv sync --locked --all-groups
       - run: uv run pytest -q ${{ matrix.paths }}
+
+  windows:
+    # The Windows-only code paths (NT directory API, stat identities, path
+    # handling) are replaced by fakes in the suite above, so defects in them
+    # reached users while every Linux job stayed green.
+    runs-on: windows-2022
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --locked --all-groups
+      - run: uv run pytest -q

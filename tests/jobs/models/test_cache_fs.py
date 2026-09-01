@@ -10,7 +10,11 @@ from types import SimpleNamespace
 import pytest
 
 import matteloop.jobs.models.cache_fs as cache_fs
-from matteloop.jobs.models.cache_fs import UnsafeCacheError, _bind_windows
+from matteloop.jobs.models.cache_fs import (
+    BoundModelDirectory,
+    UnsafeCacheError,
+    _bind_windows,
+)
 
 _FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
@@ -1279,3 +1283,25 @@ def test_windows_native_enumeration_parses_names_from_bound_handle(
 
     assert [name for name, _info in entries] == ["alpha.bin", "beta.bin"]
     assert queries == [11, 10]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="exercises the real Windows NT API")
+def test_real_windows_api_binds_a_cache_directory_end_to_end(tmp_path: Path) -> None:
+    """Bind through the actual ctypes implementation, not a fake API.
+
+    Every other Windows binding test substitutes _WindowsDirectoryApi, so a
+    defect in the real NtCreateFile call reaches users untested: the frozen
+    build failed with "[Errno 87] relative cache operation failed: 'Users'"
+    while the whole suite was green.
+    """
+    bound = BoundModelDirectory.bind(tmp_path, "2.0.72", "u2netp", create=True)
+
+    assert bound is not None
+    with bound:
+        assert bound.path.is_dir()
+    assert (tmp_path / "2.0.72" / "u2netp").is_dir()
+
+    reopened = BoundModelDirectory.bind(tmp_path, "2.0.72", "u2netp", create=False)
+
+    assert reopened is not None
+    reopened.close()
