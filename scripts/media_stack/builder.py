@@ -403,7 +403,13 @@ def _build_and_repair_wheel(
     command = pyav_build_command(
         context.target, pyav_source, prefix, raw_output, context.tool_python
     )
-    _run_command(context, "pyav", command, record=True)
+    # setup.py's own cythonize() call uses paths relative to its own
+    # directory (e.g. "av/filter/loudnorm.py"), which only resolves against
+    # this process's cwd when Windows' old-style "python setup.py ..." is the
+    # invocation. macOS's "python -m build ... <source_dir>" already resolves
+    # paths against the given source_dir regardless of cwd, so this is a
+    # harmless no-op there.
+    _run_command(context, "pyav", command, record=True, cwd=pyav_source)
     raw_wheel = _one_wheel(raw_output, "pyav", context)
     repair = repair_wheel_command(
         context.target, raw_wheel, prefix, repaired_output, context.tool_python
@@ -712,6 +718,7 @@ def _run_command(
     environment: Mapping[str, str] | None = None,
     record: bool = False,
     record_as: Sequence[str] | None = None,
+    cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     normalized = tuple(str(part) for part in command)
     if record:
@@ -720,6 +727,8 @@ def _run_command(
     kwargs: dict[str, Any] = {"check": False, "capture_output": True, "text": True}
     if environment is not None:
         kwargs["env"] = dict(environment)
+    if cwd is not None:
+        kwargs["cwd"] = str(cwd)
     try:
         completed = context.runner(normalized, **kwargs)
     except OSError as error:

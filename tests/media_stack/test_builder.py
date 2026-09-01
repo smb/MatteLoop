@@ -238,6 +238,22 @@ def test_cache_miss_runs_native_build_verification_and_compliance_in_order(
     assert artifacts.report.is_file()
 
 
+def test_pyav_build_runs_with_its_source_directory_as_cwd(tmp_path: Path) -> None:
+    # setup.py's own cythonize() call resolves relative paths like
+    # "av/filter/loudnorm.py" against this process's cwd on Windows' old-style
+    # "python setup.py ..." invocation -- without an explicit cwd, that
+    # resolved against the repo root instead of the PyAV source tree and
+    # failed with "doesn't match any files" on a real Windows build.
+    runner = RecordingRunner()
+
+    ensure_media_stack(ROOT, tmp_path, runner=runner)
+
+    pyav_call = next(
+        kwargs for command, kwargs in runner.calls if runner._stage(command) == "pyav"
+    )
+    assert Path(pyav_call["cwd"]).name == "av-16.1.0"
+
+
 def test_invalid_manifest_retains_a_named_invocation_staging_directory(
     tmp_path: Path,
 ) -> None:
