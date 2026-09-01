@@ -1351,3 +1351,29 @@ def test_decode_cancellation_is_checked_between_frames(tmp_path):
 
     assert error.value.code is ErrorCode.JOB_CANCELLED
     assert checks == 3
+
+
+def test_open_handle_revision_tolerates_windows_stat_identity_fields() -> None:
+    # Windows fills st_dev/st_ino differently for os.stat(path) and
+    # os.fstat(fd), which made every decode on the frozen Windows build fail
+    # with "source changed while it was opened".
+    path = source_module.SourceRevision(
+        device=42, inode=7, size=1024, mtime_ns=5, ctime_ns=9
+    )
+    handle = source_module.SourceRevision(
+        device=0, inode=0, size=1024, mtime_ns=5, ctime_ns=0
+    )
+
+    assert source_module._same_open_file(handle, path)
+    assert not source_module._same_open_file(
+        source_module.SourceRevision(
+            device=0, inode=0, size=2048, mtime_ns=5, ctime_ns=0
+        ),
+        path,
+    )
+    assert not source_module._same_open_file(
+        source_module.SourceRevision(
+            device=0, inode=0, size=1024, mtime_ns=6, ctime_ns=0
+        ),
+        path,
+    )
