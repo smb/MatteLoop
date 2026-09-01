@@ -16,6 +16,7 @@ nuitka-crash-report.xml
 .cache/rembg/
 .matteloop-work/
 .matteloop-build-cache/
+build-failure-diagnostics/
 .rembggui-work/
 .matteloop-local-media/
 .worktrees/

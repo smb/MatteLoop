@@ -105,7 +105,7 @@
           "uses": "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
           "with": {
             "name": "media-stack-staging-${{ matrix.target }}",
-            "path": ".matteloop-build-cache/media-stack/.staging-*/prefix\n.matteloop-build-cache/media-stack/.staging-*/build/*/config.log\n.matteloop-build-cache/media-stack/.staging-*/build/*/*.log",
+            "path": "build-failure-diagnostics",
             "if-no-files-found": "warn"
           }
         },

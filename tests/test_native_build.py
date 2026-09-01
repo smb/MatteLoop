@@ -944,3 +944,42 @@ def _stub_native_main(
     monkeypatch.setattr(native_build, "prepare_temporary_spec", prepare_spec)
     monkeypatch.setattr(native_build.subprocess, "run", run)
     return commands
+
+
+def test_failure_diagnostics_copy_staging_prefix_to_a_fixed_glob_free_path(
+    tmp_path: Path,
+) -> None:
+    # actions/upload-artifact's glob does not match a dot-prefixed directory
+    # name like .staging-<uuid> by default and silently uploads nothing; the
+    # destination must be a fixed, non-random path CI can reference directly.
+    staging_dir = tmp_path / ".staging-deadbeef"
+    prefix = staging_dir / "prefix" / "lib"
+    prefix.mkdir(parents=True)
+    (prefix / "avformat.lib").write_bytes(b"stub")
+    log_dir = staging_dir / "build" / "ffmpeg"
+    log_dir.mkdir(parents=True)
+    (log_dir / "config.log").write_text("configure output", encoding="utf-8")
+    root = tmp_path / "repo"
+    root.mkdir()
+    error = RuntimeError("stage 'pyav' failed")
+    error.staging_dir = staging_dir  # type: ignore[attr-defined]
+
+    native_build._copy_failure_diagnostics(error, root=root)
+
+    destination = root / "build-failure-diagnostics"
+    assert (destination / "prefix" / "lib" / "avformat.lib").read_bytes() == b"stub"
+    assert (destination / "build" / "ffmpeg" / "config.log").read_text(
+        encoding="utf-8"
+    ) == "configure output"
+
+
+def test_failure_diagnostics_are_a_noop_without_a_staging_directory(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+
+    native_build._copy_failure_diagnostics(RuntimeError("no staging_dir"), root=root)
+    native_build._copy_failure_diagnostics(ValueError("nope"), root=root)
+
+    assert not (root / "build-failure-diagnostics").exists()

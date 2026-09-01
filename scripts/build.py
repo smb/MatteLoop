@@ -478,8 +478,30 @@ def _run_native_build(media_wheel: Path | None, rebuild_media_stack: bool) -> in
             f"Native build preparation or launch failed: {error}",
             file=sys.stderr,
         )
+        _copy_failure_diagnostics(error)
         return 1
     return _finish_native_build(completed, artifact, prepared, qt_companion)
+
+
+def _copy_failure_diagnostics(error: Exception, *, root: Path = ROOT) -> None:
+    """Copy a failed media-stack stage's build output to a fixed, glob-free
+    path so CI can upload it without matching a randomly-named, dot-prefixed
+    staging directory (actions/upload-artifact's glob does not match paths
+    like .staging-<uuid> by default and silently uploads nothing)."""
+    staging_dir = getattr(error, "staging_dir", None)
+    if not isinstance(staging_dir, Path) or not staging_dir.is_dir():
+        return
+    destination = root / "build-failure-diagnostics"
+    if destination.exists():
+        shutil.rmtree(destination)
+    prefix = staging_dir / "prefix"
+    if prefix.is_dir():
+        shutil.copytree(prefix, destination / "prefix")
+    for log_path in staging_dir.glob("build/*/*.log"):
+        relative = log_path.relative_to(staging_dir)
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(log_path, target)
 
 
 def _finish_native_build(
