@@ -27,6 +27,7 @@ _WINDOWS_DIRECTORY_SHARE = 0x00000001
 # also carries SYNCHRONIZE. CreateFileW adds it implicitly; NtCreateFile does
 # not, which is why only the relative opens failed.
 _WINDOWS_SYNCHRONIZE = 0x00100000
+_FILE_ID_INFO_CLASS = 18
 _WINDOWS_PUBLICATION_SHARE = 0x00000001 | 0x00000002 | 0x00000004
 # A publication parent is deliberately distinct from the restrictive model-cache
 # namespace.  It must create/remove children, serve as a relative rename target,
@@ -1425,7 +1426,7 @@ class _CtypesWindowsDirectoryApi:
             (
                 file_type | 0o600,
                 inode,
-                int(info.VolumeSerialNumber),
+                self._volume_identifier(handle, int(info.VolumeSerialNumber)),
                 int(info.NumberOfLinks),
                 0,
                 0,
@@ -1435,6 +1436,29 @@ class _CtypesWindowsDirectoryApi:
                 self._filetime_seconds(info.CreationTime),
             )
         )
+
+    def _volume_identifier(self, handle: int, fallback: int) -> int:
+        """Return the volume id os.fstat reports for the same handle.
+
+        GetFileInformationByHandle yields a 32-bit serial, while CPython's
+        stat reads FILE_ID_INFO's 64-bit one. Identity checks that compare
+        this against os.fstat see two different volumes for one file and
+        reject it, so the wider value has to come from the same source.
+        """
+        import ctypes
+
+        class FileIdInfo(ctypes.Structure):
+            _fields_ = (
+                ("VolumeSerialNumber", ctypes.c_uint64),
+                ("FileId", ctypes.c_ubyte * 16),
+            )
+
+        identity = FileIdInfo()
+        if not self._get_information(
+            handle, _FILE_ID_INFO_CLASS, ctypes.byref(identity), ctypes.sizeof(identity)
+        ):
+            return fallback
+        return int(identity.VolumeSerialNumber)
 
     @staticmethod
     def _filetime_seconds(value: object) -> float:
