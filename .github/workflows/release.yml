@@ -84,8 +84,9 @@
           }
         },
         {
-          "name": "Cache media build stack",
-          "uses": "actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae",
+          "name": "Restore media build stack cache",
+          "id": "media-stack-cache",
+          "uses": "actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae",
           "with": {
             "path": ".matteloop-build-cache/media-stack",
             "key": "media-stack-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('packaging/media-stack/manifest.toml', 'scripts/media_stack/**/*.py', 'scripts/build_media_stack.py', 'scripts/verify_media_stack.py') }}"
@@ -98,6 +99,15 @@
         {
           "name": "Build native standalone bundle",
           "run": "uv run --frozen --no-sync python scripts/build.py"
+        },
+        {
+          "name": "Save media build stack cache",
+          "if": "always() && steps.media-stack-cache.outputs.cache-hit != 'true'",
+          "uses": "actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae",
+          "with": {
+            "path": ".matteloop-build-cache/media-stack",
+            "key": "media-stack-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('packaging/media-stack/manifest.toml', 'scripts/media_stack/**/*.py', 'scripts/build_media_stack.py', 'scripts/verify_media_stack.py') }}"
+          }
         },
         {
           "name": "Upload retained media-stack staging on failure",

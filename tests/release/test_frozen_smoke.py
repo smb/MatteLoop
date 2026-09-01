@@ -666,26 +666,54 @@ def test_release_workflow_has_only_manual_unsigned_native_builds() -> None:
         "install": "base-devel make diffutils nasm pkgconf",
     }
 
-    cache = next(step for step in steps if step["name"] == "Cache media build stack")
-    assert cache["uses"] == "actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae"
-    assert cache["with"] == {
+    cache_key = (
+        "media-stack-${{ runner.os }}-${{ matrix.target }}-"
+        "${{ hashFiles('packaging/media-stack/manifest.toml', "
+        "'scripts/media_stack/**/*.py', 'scripts/build_media_stack.py', "
+        "'scripts/verify_media_stack.py') }}"
+    )
+    restore = next(
+        step for step in steps if step["name"] == "Restore media build stack cache"
+    )
+    assert restore["id"] == "media-stack-cache"
+    assert restore["uses"] == (
+        "actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae"
+    )
+    assert restore["with"] == {
         "path": ".matteloop-build-cache/media-stack",
-        "key": (
-            "media-stack-${{ runner.os }}-${{ matrix.target }}-"
-            "${{ hashFiles('packaging/media-stack/manifest.toml', "
-            "'scripts/media_stack/**/*.py', 'scripts/build_media_stack.py', "
-            "'scripts/verify_media_stack.py') }}"
-        ),
+        "key": cache_key,
     }
-    assert "restore-keys" not in cache["with"]
-    cache_index = steps.index(cache)
+    assert "restore-keys" not in restore["with"]
+
+    save = next(
+        step for step in steps if step["name"] == "Save media build stack cache"
+    )
+    # actions/cache's own automatic save is gated on the whole job succeeding
+    # (post-if: success()), so a later, unrelated step failing (e.g. Nuitka)
+    # silently threw away a media-stack build that had already succeeded and
+    # was expensive to redo -- reproduced across real CI runs where the media
+    # stack rebuilt from scratch every time despite no cache-key-relevant
+    # file having changed. Restore/save must be split so save can run with
+    # if: always() regardless of what happens after it.
+    assert save["if"] == (
+        "always() && steps.media-stack-cache.outputs.cache-hit != 'true'"
+    )
+    assert save["uses"] == "actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae"
+    assert save["with"] == {
+        "path": ".matteloop-build-cache/media-stack",
+        "key": cache_key,
+    }
+
+    restore_index = steps.index(restore)
+    save_index = steps.index(save)
     build_index = next(
         index
         for index, step in enumerate(steps)
         if step["name"] == "Build native standalone bundle"
     )
-    assert steps.index(msvc) < steps.index(msys2) < cache_index < build_index
-    assert steps.index(macos_toolchain) < cache_index < build_index
+    assert steps.index(msvc) < steps.index(msys2) < restore_index < build_index
+    assert steps.index(macos_toolchain) < restore_index < build_index
+    assert build_index < save_index
 
     commands = "\n".join(str(step.get("run", "")) for step in steps)
     assert "uv sync --frozen --all-groups" in commands
@@ -702,7 +730,6 @@ def test_release_workflow_has_only_manual_unsigned_native_builds() -> None:
     assert upload["with"]["name"] == "MatteLoop-unsigned-${{ matrix.target }}"
     assert upload["with"]["path"] == "dist"
     serialized = json.dumps(workflow).lower()
-    assert "cache-hit" not in serialized
     assert "secrets." not in serialized
     assert "codesign" not in serialized
     assert "signing" not in serialized
