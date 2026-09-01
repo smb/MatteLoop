@@ -6,10 +6,41 @@ on:
     branches: [main]
 
 jobs:
+  lint:
+    runs-on: ubuntu-22.04
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --locked --all-groups
+      - run: uv run python scripts/check_guardrails.py
+      - run: uv run ruff check .
+      - run: uv run mypy src
+
   test:
     runs-on: ubuntu-22.04
     env:
       QT_QPA_PLATFORM: offscreen
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: core
+            paths: >-
+              tests/core tests/test_app_smoke.py
+              tests/test_legacy_data_locations.py tests/test_media_factory.py
+              tests/test_native_build.py tests/test_packaged_entrypoint.py
+              tests/test_resources.py tests/test_scope_contract.py
+          - name: jobs
+            paths: tests/jobs
+          - name: ui
+            paths: tests/ui
+          - name: packaging
+            paths: tests/release tests/qt_source tests/media_stack
     steps:
       - uses: actions/checkout@v4
       - name: Install Qt runtime libraries
@@ -21,7 +52,4 @@ jobs:
           python-version: "3.13"
           enable-cache: true
       - run: uv sync --locked --all-groups
-      - run: uv run python scripts/check_guardrails.py
-      - run: uv run ruff check .
-      - run: uv run mypy src
-      - run: uv run pytest -q
+      - run: uv run pytest -q ${{ matrix.paths }}
