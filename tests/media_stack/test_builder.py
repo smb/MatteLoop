@@ -254,6 +254,43 @@ def test_pyav_build_runs_with_its_source_directory_as_cwd(tmp_path: Path) -> Non
     assert Path(pyav_call["cwd"]).name == "av-16.1.0"
 
 
+def test_windows_ffmpeg_import_libraries_are_copied_from_bin_into_lib(
+    tmp_path: Path,
+) -> None:
+    # FFmpeg's --enable-shared MSVC install places import .lib files next to
+    # the .dll in bin/, but PyAV's setup.py only searches <ffmpeg-dir>/lib for
+    # them -- reproduced on the real Windows runner as LINK : fatal error
+    # LNK1181: cannot open input file 'avformat.lib'.
+    prefix = tmp_path / "prefix"
+    (prefix / "bin").mkdir(parents=True)
+    (prefix / "bin" / "avformat.dll").write_bytes(b"dll")
+    (prefix / "bin" / "avformat.lib").write_bytes(b"implib")
+    (prefix / "bin" / "avcodec.lib").write_bytes(b"implib")
+
+    builder._install_windows_import_libraries(prefix)
+
+    assert (prefix / "lib" / "avformat.lib").read_bytes() == b"implib"
+    assert (prefix / "lib" / "avcodec.lib").read_bytes() == b"implib"
+    assert not (prefix / "lib" / "avformat.dll").exists()
+
+
+def test_windows_build_relocates_import_libraries_but_macos_does_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[Path] = []
+    monkeypatch.setattr(
+        builder, "_install_windows_import_libraries", calls.append
+    )
+
+    ensure_media_stack(ROOT, tmp_path / "macos-cache", runner=RecordingRunner())
+    assert calls == []
+
+    monkeypatch.setattr(builder, "detect_target", lambda **_kwargs: WINDOWS)
+    ensure_media_stack(ROOT, tmp_path / "windows-cache", runner=RecordingRunner())
+    assert len(calls) == 1
+    assert calls[0].name == "prefix"
+
+
 def test_invalid_manifest_retains_a_named_invocation_staging_directory(
     tmp_path: Path,
 ) -> None:

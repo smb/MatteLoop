@@ -186,6 +186,7 @@ def test_pyav_build_commands_use_the_platform_specific_build_interface() -> None
         "env",
         "PKG_CONFIG_PATH=prefix/lib/pkgconfig",
         "MACOSX_DEPLOYMENT_TARGET=13.0",
+        "_PYTHON_HOST_PLATFORM=macosx-13.0-arm64",
         "ARCHFLAGS=-arch arm64",
         "tool/python",
         "-m",
@@ -216,6 +217,21 @@ def test_macos_pyav_build_forces_a_single_architecture_wheel_tag() -> None:
     )
 
     assert "ARCHFLAGS=-arch arm64" in macos
+
+
+def test_macos_pyav_build_forces_the_wheel_platform_tag_to_match_the_binary() -> None:
+    # Reproduced on the real macOS-15-arm64 GitHub runner: ARCHFLAGS alone
+    # made the compiled extension arm64-only, but the wheel's platform tag
+    # (which comes from distutils' get_platform(), driven by
+    # _PYTHON_HOST_PLATFORM, not ARCHFLAGS) still read "universal2" because
+    # the runner's own Python build is universal2. delocate-wheel then failed
+    # with "Failed to find any binary with the required architecture:
+    # 'x86_64'" because the tag promised an architecture the binary lacked.
+    macos = pyav_build_command(
+        MACOS, Path("av"), Path("prefix"), Path("wheels"), Path("tool/python")
+    )
+
+    assert "_PYTHON_HOST_PLATFORM=macosx-13.0-arm64" in macos
 
 
 def test_wheel_repair_uses_the_platform_specific_dependency_tool() -> None:

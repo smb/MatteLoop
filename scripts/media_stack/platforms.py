@@ -138,11 +138,17 @@ def pyav_build_command(
     environment = ["env", f"PKG_CONFIG_PATH={prefix / 'lib' / 'pkgconfig'}"]
     if target.target_id == "macos-arm64":
         environment.append(f"MACOSX_DEPLOYMENT_TARGET={target.deployment_target}")
-        # Without an explicit ARCHFLAGS, setuptools' wheel tag depends on SDK
-        # availability on the build machine, not just the running
-        # architecture; a build host with the x86_64 SDK also present can
-        # produce a universal2-tagged wheel even on arm64 hardware, and
-        # verify_media_stack.py requires an exact macos-arm64 tag.
+        # ARCHFLAGS makes the compiler emit an arm64-only extension, but the
+        # wheel's platform *tag* comes from distutils' get_platform(), which
+        # reads _PYTHON_HOST_PLATFORM (not ARCHFLAGS) and otherwise reports
+        # the interpreter's own build (universal2 on the GitHub macOS
+        # runner). Without this, the tag stayed "universal2" while the
+        # binary was arm64-only, and delocate-wheel then failed with
+        # "Failed to find any binary with the required architecture:
+        # 'x86_64'" -- reproduced on the real macOS runner.
+        environment.append(
+            f"_PYTHON_HOST_PLATFORM=macosx-{target.deployment_target}-arm64"
+        )
         environment.append("ARCHFLAGS=-arch arm64")
     return (
         *environment,

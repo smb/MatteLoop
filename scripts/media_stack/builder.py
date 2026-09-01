@@ -391,6 +391,23 @@ def _build_libraries(
         "ffmpeg",
         ffmpeg_commands(context.target, sources["ffmpeg"], ffmpeg_build, prefix),
     )
+    if context.target.target_id == "windows-x64":
+        _install_windows_import_libraries(prefix)
+
+
+def _install_windows_import_libraries(prefix: Path) -> None:
+    """Copy FFmpeg's MSVC import .lib files from bin/ into lib/.
+
+    FFmpeg's --enable-shared MSVC install places the .lib import libraries
+    next to the .dll in bin/, but PyAV's setup.py only searches
+    <ffmpeg-dir>/lib for them, which fails link.exe with LNK1181: cannot
+    open input file 'avformat.lib' (reproduced on the real Windows runner).
+    """
+    bin_dir = prefix / "bin"
+    lib_dir = prefix / "lib"
+    lib_dir.mkdir(parents=True, exist_ok=True)
+    for library in bin_dir.glob("*.lib"):
+        shutil.copy2(library, lib_dir / library.name)
 
 
 def _build_and_repair_wheel(
