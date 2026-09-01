@@ -64,6 +64,8 @@ class MediaStackBuildError(RuntimeError):
         staging_dir: Path,
         *,
         staging_retained: bool | None = None,
+        stdout: str = "",
+        stderr: str = "",
     ) -> None:
         self.stage = stage
         self.command = tuple(command)
@@ -72,16 +74,23 @@ class MediaStackBuildError(RuntimeError):
         self.staging_retained = (
             staging_dir.is_dir() if staging_retained is None else staging_retained
         )
+        self.stdout = stdout
+        self.stderr = stderr
         rendered = " ".join(self.command)
         staging_status = (
             f"staging retained at {staging_dir}"
             if self.staging_retained
             else f"staging was not created at {staging_dir}"
         )
-        super().__init__(
+        message = (
             f"stage {stage!r} failed with exit code {returncode}: {rendered}; "
             f"{staging_status}"
         )
+        if stdout.strip():
+            message += f"\n--- stdout ---\n{stdout}"
+        if stderr.strip():
+            message += f"\n--- stderr ---\n{stderr}"
+        super().__init__(message)
 
 
 @dataclass(slots=True)
@@ -717,7 +726,12 @@ def _run_command(
         raise MediaStackBuildError(stage, normalized, 127, context.staging) from error
     if completed.returncode != 0:
         raise MediaStackBuildError(
-            stage, normalized, completed.returncode, context.staging
+            stage,
+            normalized,
+            completed.returncode,
+            context.staging,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
         )
     return completed
 

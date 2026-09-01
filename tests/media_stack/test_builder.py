@@ -536,6 +536,18 @@ def test_failed_verification_retains_staging_without_promoting_wheel(
     assert not tuple(tmp_path.glob("*/finished/*.whl"))
 
 
+def test_failed_stage_surfaces_the_command_output_instead_of_only_exit_code(
+    tmp_path: Path,
+) -> None:
+    runner = RecordingRunner(fail_stage="verify")
+
+    with pytest.raises(MediaStackBuildError) as raised:
+        ensure_media_stack(ROOT, tmp_path, runner=runner)
+
+    assert raised.value.stderr == "declared failure"
+    assert "declared failure" in str(raised.value)
+
+
 def test_failed_force_rebuild_preserves_prior_verified_artifacts(
     tmp_path: Path,
 ) -> None:
