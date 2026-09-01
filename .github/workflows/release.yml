@@ -1,7 +1,16 @@
 {
   "name": "Unsigned native packages",
   "on": {
-    "workflow_dispatch": {}
+    "workflow_dispatch": {
+      "inputs": {
+        "platform": {
+          "description": "Which platform(s) to build",
+          "type": "choice",
+          "default": "both",
+          "options": ["both", "macos", "windows"]
+        }
+      }
+    }
   },
   "concurrency": {
     "group": "matteloop-native-release",
@@ -13,6 +22,7 @@
   "jobs": {
     "native-package": {
       "name": "${{ matrix.target }}",
+      "if": "inputs.platform == 'both' || startsWith(matrix.target, inputs.platform)",
       "permissions": {
         "contents": "read"
       },

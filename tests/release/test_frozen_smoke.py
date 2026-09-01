@@ -592,7 +592,14 @@ def test_release_workflow_has_only_manual_unsigned_native_builds() -> None:
     workflow_path = REPOSITORY_ROOT / ".github" / "workflows" / "release.yml"
     workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
 
-    assert workflow["on"] == {"workflow_dispatch": {}}
+    assert set(workflow["on"]) == {"workflow_dispatch"}
+    dispatch = workflow["on"]["workflow_dispatch"]
+    assert dispatch["inputs"]["platform"]["default"] == "both"
+    assert set(dispatch["inputs"]["platform"]["options"]) == {
+        "both",
+        "macos",
+        "windows",
+    }
     job = workflow["jobs"]["native-package"]
     includes = job["strategy"]["matrix"]["include"]
     assert {(item["target"], item["os"]) for item in includes} == {
@@ -687,6 +694,17 @@ def test_release_workflow_has_only_manual_unsigned_native_builds() -> None:
     assert "signing" not in serialized
     assert "notar" not in serialized
     assert "publish" not in serialized
+
+
+def test_release_workflow_platform_input_gates_each_matrix_target() -> None:
+    workflow_path = REPOSITORY_ROOT / ".github" / "workflows" / "release.yml"
+    workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+
+    job = workflow["jobs"]["native-package"]
+    condition = job["if"]
+
+    assert "inputs.platform == 'both'" in condition
+    assert "startsWith(matrix.target, inputs.platform)" in condition
 
 
 def test_packaging_smoke_launcher_is_importable_without_shadowing_packaging() -> None:
