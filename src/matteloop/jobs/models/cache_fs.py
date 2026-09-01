@@ -9,6 +9,7 @@ Even an in-place reparse mutation cannot redirect an operation to another tree.
 from __future__ import annotations
 
 import errno
+import logging
 import os
 import stat
 from collections.abc import Iterator
@@ -36,6 +37,8 @@ _WINDOWS_PUBLICATION_DIRECTORY_ACCESS = (
 )
 _WINDOWS_DIRECTORY_FLAGS = 0x02000000 | 0x00200000
 
+
+_LOGGER = logging.getLogger(__name__)
 
 class _WindowsDirectoryApi(Protocol):
     def open_anchor(
@@ -468,7 +471,12 @@ def _bind_windows(
                     share_mode=_WINDOWS_DIRECTORY_SHARE,
                     flags=_WINDOWS_DIRECTORY_FLAGS,
                 )
-            except FileNotFoundError:
+            except FileNotFoundError as error:
+                _LOGGER.warning(
+                    "model cache directory %s could not be opened: %s",
+                    component_path,
+                    error,
+                )
                 return None
             handles.append(handle)
             _validate_windows_directory_handle(active_api, handle)

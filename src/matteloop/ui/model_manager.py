@@ -510,7 +510,9 @@ class ModelManagerController(QObject):
             return
         if not removed:
             self.dialog.refresh()
-            self.dialog.set_message("The selected weight was already absent.")
+            self.dialog.set_message(
+                f"No weight could be removed at {entry.artifact_path}."
+            )
             return
         freed = format_source_file_size(entry.disk_size_bytes or 0)
         self.dialog.refresh()

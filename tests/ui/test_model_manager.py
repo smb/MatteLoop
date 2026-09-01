@@ -314,11 +314,14 @@ def test_model_manager_downloads_a_missing_weight_in_the_background(
         timeout=5000,
     )
     assert any(message.startswith("Downloading ") for message in messages)
+    # Waits for the worker thread to clear the dialog's busy state too, which
+    # is what re-enables the buttons.
     qtbot.waitUntil(
-        lambda: controller.dialog.entries[index].cached, timeout=5000
+        lambda: controller.dialog.entries[index].cached
+        and controller.dialog.remove_button.isEnabled(),
+        timeout=5000,
     )
     assert not controller.dialog.download_button.isEnabled()
-    assert controller.dialog.remove_button.isEnabled()
     controller.close()
 
 
