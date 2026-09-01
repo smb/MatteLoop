@@ -215,10 +215,44 @@ def test_model_manager_opens_the_canonical_cache_directory(
     )
     qtbot.addWidget(controller.dialog)
     opened: list[QUrl] = []
-    monkeypatch.setattr(QDesktopServices, "openUrl", opened.append)
+
+    def open_url(url: QUrl) -> bool:
+        opened.append(url)
+        return True
+
+    monkeypatch.setattr(QDesktopServices, "openUrl", open_url)
 
     controller.dialog.show_cache_button.click()
 
     assert len(opened) == 1
     assert opened[0].toLocalFile() == str(tmp_path)
+    controller.close()
+
+
+def test_model_manager_creates_the_cache_directory_before_showing_it(
+    tmp_path: Path, monkeypatch, qtbot
+) -> None:
+    # Nothing creates the cache directory before the first download, and
+    # QDesktopServices.openUrl on a missing directory fails silently, so the
+    # button did nothing at all on a fresh install.
+    cache_root = tmp_path / "models"
+    controller = ModelManagerController(
+        ReducerStore(),
+        catalog=ModelCatalog.load_resource(),
+        cache_root=cache_root,
+        manager=None,
+    )
+    qtbot.addWidget(controller.dialog)
+    opened: list[QUrl] = []
+
+    def open_url(url: QUrl) -> bool:
+        opened.append(url)
+        return True
+
+    monkeypatch.setattr(QDesktopServices, "openUrl", open_url)
+
+    controller.dialog.show_cache_button.click()
+
+    assert cache_root.is_dir()
+    assert [url.toLocalFile() for url in opened] == [str(cache_root)]
     controller.close()

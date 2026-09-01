@@ -834,3 +834,47 @@ def test_linux_patch_tool_is_exactly_pinned_in_project_and_lock() -> None:
         "marker": "sys_platform == 'linux'",
         "specifier": "==0.17.2.4",
     } in application["metadata"]["requires-dev"]["dev"]
+
+
+def test_release_packaging_keeps_lgpl_sources_out_of_the_application_zip(
+    tmp_path: Path,
+) -> None:
+    # The build leaves the LGPL corresponding sources next to the bundle, so
+    # an unsplit archive would add ~90 MB to every user's download. They must
+    # still be published, just as their own release assets.
+    workflow_path = REPOSITORY_ROOT / ".github" / "workflows" / "release.yml"
+    workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+    step = next(
+        s
+        for s in workflow["jobs"]["publish"]["steps"]
+        if s["name"].startswith("Separate the application")
+    )
+    bundle = tmp_path / "bundles" / "MatteLoop-unsigned-windows-2022-x64"
+    (bundle / "MatteLoop.dist").mkdir(parents=True)
+    (bundle / "MatteLoop.dist" / "matteloop.exe").write_bytes(b"app")
+    (bundle / "MatteLoop-media-sources-windows-x64-abc.tar.gz").write_bytes(b"src")
+    (bundle / "MatteLoop-qt-sources-6.10.3-def.tar.gz").write_bytes(b"src")
+
+    subprocess.run(
+        ["bash", "-e", "-c", step["run"]],
+        cwd=tmp_path,
+        check=True,
+        env={**os.environ, "GITHUB_REF_NAME": "v9.9.9"},
+        capture_output=True,
+    )
+
+    assets = {path.name for path in (tmp_path / "assets").iterdir()}
+    assert assets == {
+        "MatteLoop-v9.9.9-windows-2022-x64.zip",
+        "MatteLoop-media-sources-windows-x64-abc.tar.gz",
+        "MatteLoop-qt-sources-6.10.3-def.tar.gz",
+    }
+    app_zip = tmp_path / "assets" / "MatteLoop-v9.9.9-windows-2022-x64.zip"
+    archived = subprocess.run(
+        ["unzip", "-Z1", str(app_zip)],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    assert "MatteLoop.dist/matteloop.exe" in archived
+    assert not [name for name in archived if "sources" in name]

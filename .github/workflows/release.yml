@@ -175,15 +175,15 @@
           }
         },
         {
-          "name": "Package one archive per target",
-          "run": "mkdir -p assets\nfor bundle in bundles/MatteLoop-unsigned-*; do\n  target=\"${bundle##*/MatteLoop-unsigned-}\"\n  (cd \"$bundle\" && zip -qry \"../../assets/MatteLoop-${GITHUB_REF_NAME}-${target}.zip\" .)\ndone\nls -lh assets"
+          "name": "Separate the application from its LGPL source archives",
+          "run": "mkdir -p assets\nfor bundle in bundles/MatteLoop-unsigned-*; do\n  target=\"${bundle##*/MatteLoop-unsigned-}\"\n  # The source archives beside the bundle are the LGPL corresponding\n  # sources; they ship as their own assets so the application download is\n  # not 90 MB heavier for every user. Whatever remains is the application.\n  find \"$bundle\" -maxdepth 1 -name \"MatteLoop-*-sources-*\" -exec mv {} assets/ \\;\n  (cd \"$bundle\" && zip -qry \"../../assets/MatteLoop-${GITHUB_REF_NAME}-${target}.zip\" .)\ndone\nls -lh assets"
         },
         {
           "name": "Create the draft release",
           "env": {
             "GH_TOKEN": "${{ github.token }}"
           },
-          "run": "gh release create \"$GITHUB_REF_NAME\" assets/*.zip \\\n  --repo \"$GITHUB_REPOSITORY\" \\\n  --draft \\\n  --title \"MatteLoop $GITHUB_REF_NAME\" \\\n  --notes 'Unsigned builds. Windows warns via SmartScreen and macOS needs a right-click Open on first launch.'"
+          "run": "gh release create \"$GITHUB_REF_NAME\" assets/* \\\n  --repo \"$GITHUB_REPOSITORY\" \\\n  --draft \\\n  --title \"MatteLoop $GITHUB_REF_NAME\" \\\n  --notes 'Unsigned builds. Windows warns via SmartScreen and macOS needs a right-click Open on first launch.\n\nThe MatteLoop-*-sources-* archives are the complete corresponding sources for the LGPL libraries (FFmpeg, libwebp, Qt) inside the application, published here as required by their licences. They are not needed to run MatteLoop.'"
         }
       ]
     }

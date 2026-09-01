@@ -429,9 +429,16 @@ class ModelManagerController(QObject):
 
     @Slot()
     def _show_cache(self) -> None:
-        QDesktopServices.openUrl(
-            QUrl.fromLocalFile(str(self.dialog.cache_root))
-        )
+        # Nothing has created the cache directory before the first download,
+        # and openUrl on a missing directory fails silently.
+        root = self.dialog.cache_root
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            self.dialog.set_message(f"Could not open the model folder: {error}")
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(root))):
+            self.dialog.set_message(f"Model folder: {root}")
 
 
 def manager_active_id() -> str | None:
