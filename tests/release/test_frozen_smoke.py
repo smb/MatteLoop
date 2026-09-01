@@ -512,6 +512,10 @@ def test_pyside_deploy_spec_parses_to_required_native_bundle_contract() -> None:
     # Dependency-Walker-download prompt to "no" and FATALs on Windows
     # standalone builds -- reproduced on the real Windows runner.
     assert "--assume-yes-for-downloads" in args
+    # "attach" keeps stdout usable when the app is run from a console (the
+    # frozen smoke reads JSON from it) without opening a console window of
+    # its own on a double click.
+    assert "--windows-console-mode=attach" in args
     assert "--include-module=PIL._imaging" in args
     assert "--include-module=PIL._webp" in args
     assert "--include-module=PIL.PngImagePlugin" in args
@@ -604,7 +608,8 @@ def test_release_workflow_has_only_manual_unsigned_native_builds() -> None:
     workflow_path = REPOSITORY_ROOT / ".github" / "workflows" / "release.yml"
     workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
 
-    assert set(workflow["on"]) == {"workflow_dispatch"}
+    assert set(workflow["on"]) == {"workflow_dispatch", "push"}
+    assert workflow["on"]["push"] == {"tags": ["v*"]}
     dispatch = workflow["on"]["workflow_dispatch"]
     assert dispatch["inputs"]["platform"]["default"] == "both"
     assert set(dispatch["inputs"]["platform"]["options"]) == {
@@ -748,7 +753,17 @@ def test_release_workflow_has_only_manual_unsigned_native_builds() -> None:
     assert "codesign" not in serialized
     assert "signing" not in serialized
     assert "notar" not in serialized
-    assert "publish" not in serialized
+
+    # Publishing exists but stays gated on a version tag, uses the job token
+    # rather than a stored credential, and leaves the release as a draft so
+    # an unsigned build is never public without a deliberate click.
+    publish = workflow["jobs"]["publish"]
+    assert publish["needs"] == "native-package"
+    assert publish["if"] == "startsWith(github.ref, 'refs/tags/v')"
+    assert publish["permissions"] == {"contents": "write"}
+    create = publish["steps"][-1]
+    assert create["env"] == {"GH_TOKEN": "${{ github.token }}"}
+    assert "--draft" in create["run"]
 
 
 @pytest.mark.parametrize(

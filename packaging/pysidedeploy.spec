@@ -30,6 +30,7 @@ extra_args =
 	--jobs=2
 	--no-deployment-flag=self-execution
 	--assume-yes-for-downloads
+	--windows-console-mode=attach
 	--noinclude-qt-translations
 	--output-filename=matteloop
 	--include-qt-plugins=platforms,imageformats
