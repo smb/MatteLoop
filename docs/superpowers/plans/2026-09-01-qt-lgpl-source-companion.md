@@ -171,6 +171,14 @@ Extend existing release/native tests to prove documentation names both source/ch
 
 **Step 2: Document the exact contract**
 
+Explain the automatic Qt companion, exact source URLs/digests, CA-bundle
+invocation, cache identity/location, four exact installed packages, all five
+inseparable deliverables, verification commands, bundle legal/relink files, and
+manual nonpublishing Actions boundary. State that the macOS 26 host built media
+dylibs for 13.0 but the complete app requires macOS 15 because of measured
+bundled PySide6 bindings, was not launched on an actual macOS 15 host, leaves
+Windows unqualified, and treats patents separately. Do not add measurements
+until qualification runs.
 
 **Step 3: Run documentation/release tests and commit**
 
@@ -189,8 +197,10 @@ Run: `uv run ruff check . && uv run mypy src && QT_QPA_PLATFORM=offscreen uv run
 
 Also run the committed engineering guardrail/G6 checker. Record exact counts/durations/status.
 
+**Step 2: Force a fresh media build**
 
-Run the documented exact `scripts/build_media_stack.py --force` JSON contract with `SSL_CERT_FILE=/opt/homebrew/etc/ca-certificates/cert.pem`; measure wall time. Inspect `build/commands.txt` for the exact sanitized repair env, verify checksums, wheel tag, committed verifier result/fixture output, and Mach-O minos evidence. Stop before any new code correction if a new defect appears.
+Run the documented exact `scripts/build_media_stack.py --force` JSON contract,
+setting `SSL_CERT_FILE` to the environment's CA bundle if required; measure wall time. Inspect `build/commands.txt` for the exact sanitized repair env, verify checksums, wheel tag, committed verifier result/fixture output, and Mach-O minos evidence. Stop before any new code correction if a new defect appears.
 
 **Step 3: Prove the media cache hit**
 
@@ -198,6 +208,10 @@ Run the same builder without `--force`; measure time and confirm identical ident
 
 **Step 4: Build the real app and Qt companion**
 
+Run `scripts/build.py` with the verified media cache; measure time. Verify app,
+media archive/checksum, Qt companion/checksum, exact original source hashes,
+normalized inventory/provenance, legal/relink files inside companion and app,
+bundle gate, packaged offline smoke, and direct Mach-O target evidence.
 
 **Step 5: Record only measured results and rerun final verification**
 

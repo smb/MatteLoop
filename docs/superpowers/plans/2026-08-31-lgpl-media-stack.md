@@ -20,6 +20,7 @@
 - Preserve MP4/MOV H.264 and H.265 decoding and lossless animated alpha WebP output.
 - Do not add H.264/H.265 encoding, a media CLI runtime dependency, or platform-specific media APIs.
 - The stock PyAV wheel may remain in the development environment but must never be accepted by `scripts/build.py` for a native artifact.
+- Downloads must verify TLS and SHA-256; never disable certificate verification. Set `SSL_CERT_FILE` if the local environment needs a specific CA bundle.
 - Cache identity includes manifest bytes, builder revision, target OS/architecture, CPython ABI, and macOS deployment target. Every cache hit is re-verified.
 - No new source module may exceed 800 lines and no function may exceed 60 lines.
 - Tests describe behavior, not task numbers or review rounds.
@@ -444,6 +445,7 @@ Run `git diff -- pyproject.toml uv.lock` and preserve every unrelated licensing 
 "delvewheel==1.13.0; sys_platform == 'win32'",
 ```
 
+Run `uv lock` with `SSL_CERT_FILE` set to the environment's CA bundle if one is required.
 
 - [ ] **Step 2: Write failing builder and compliance tests**
 
@@ -777,6 +779,7 @@ Document:
 - `scripts/build.py` automatically builds or reuses the custom media wheel;
 - first cache-miss prerequisites for macOS arm64 and Windows x64;
 - `--rebuild-media-stack` forces compilation and `--media-wheel PATH` remains verified;
+- a local invocation may set `SSL_CERT_FILE` to a custom CA bundle if required;
 - exact source versions and verified SHA-256 values;
 - cache location and invalidation inputs;
 - application, compliance archive, checksum, and verifier report outputs;
@@ -797,6 +800,8 @@ Expected: all checks pass. If failures come from unrelated concurrent changes, r
 
 - [ ] **Step 4: Build and verify the real macOS media wheel**
 
+On the local arm64 build host, run outside restrictive sandboxing when native
+compilers or shared memory require it:
 
 ```sh
 SSL_CERT_FILE=/opt/homebrew/etc/ca-certificates/cert.pem \

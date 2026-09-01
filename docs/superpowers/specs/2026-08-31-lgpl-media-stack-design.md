@@ -237,8 +237,10 @@ distribution model.
 ## TLS and network behavior
 
 Downloads use normal certificate verification and honor `SSL_CERT_FILE` and
-the host trust configuration. They never disable TLS verification. On the
-`/opt/homebrew/etc/ca-certificates/cert.pem`, which contains
+the host trust configuration. They never disable TLS verification. A local
+environment with a custom CA bundle, such as the Homebrew bundle at
+`/opt/homebrew/etc/ca-certificates/cert.pem`, is honored the same way;
+GitHub-hosted runners use their native trust store.
 
 Checksums remain mandatory even when TLS succeeds. A download or checksum
 failure reports the component and expected digest and stops before extraction.

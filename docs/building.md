@@ -109,7 +109,9 @@ run `scripts/build_media_stack.py --force` or pass
 PATH` accepts an explicit candidate only when its adjacent provenance, report,
 compliance archive, and artifact-set binding exist and all verification passes.
 
-download, and native build. Do not disable TLS or substitute `/etc/ssl/cert.pem`:
+Use the host's normal certificate trust store for every sync,
+download, and native build. Do not disable TLS or substitute `/etc/ssl/cert.pem`;
+set `SSL_CERT_FILE` if a local environment needs a specific CA bundle:
 
 ```sh
 SSL_CERT_FILE=/opt/homebrew/etc/ca-certificates/cert.pem \
@@ -120,6 +122,8 @@ SSL_CERT_FILE=/opt/homebrew/etc/ca-certificates/cert.pem \
 
 `packaging/qt-source/manifest.toml` pins the corresponding source for the
 actual PySide6 6.10.3 bundle. Every `scripts/build.py` run verifies or fetches
+these original official archives over plain HTTPS with normal certificate
+verification:
 
 | Source | Version | SHA-256 | URL |
 |---|---:|---|---|
@@ -274,6 +278,7 @@ The unsigned macOS 15+ arm64 build qualified on 2026-09-01 on macOS 26.6.2
 (build 25G83), using
 CPython 3.13.14, Apple clang 21.0.0, CMake 4.4.3, NASM 3.02,
 `pkg-config` 3.0.6, and local `uv` 0.12.7. The workflow remains pinned to the
+documented `uv` 0.11.32. These are measured results from a local arm64
 host, not estimates:
 
 | Gate | Measured result |
