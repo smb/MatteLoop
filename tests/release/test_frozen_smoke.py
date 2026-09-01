@@ -505,7 +505,9 @@ def test_pyside_deploy_spec_parses_to_required_native_bundle_contract() -> None:
     assert "--nofollow-import-to=skimage" in args
     assert "--noinclude-dlls=*libqpdf*" in args
     assert "--noinclude-dlls=*QtPdf*" in args
-    assert "--disable-cache=ccache" in args
+    # ccache stays ON: it is what makes a repeat Nuitka compile cheap, and
+    # the CI job caches Nuitka's cache directory across runs.
+    assert "--disable-cache=ccache" not in args
     # Without this, a non-interactive Nuitka (no stdin) defaults its
     # Dependency-Walker-download prompt to "no" and FATALs on Windows
     # standalone builds -- reproduced on the real Windows runner.
@@ -714,6 +716,18 @@ def test_release_workflow_has_only_manual_unsigned_native_builds() -> None:
     assert steps.index(msvc) < steps.index(msys2) < restore_index < build_index
     assert steps.index(macos_toolchain) < restore_index < build_index
     assert build_index < save_index
+
+    nuitka_restore = next(
+        step for step in steps if step["name"] == "Restore Nuitka compile cache"
+    )
+    nuitka_save = next(
+        step for step in steps if step["name"] == "Save Nuitka compile cache"
+    )
+    assert nuitka_restore["with"]["restore-keys"] == (
+        "nuitka-${{ runner.os }}-${{ matrix.target }}-"
+    )
+    assert nuitka_save["if"] == "always()"
+    assert steps.index(nuitka_restore) < build_index < steps.index(nuitka_save)
 
     commands = "\n".join(str(step.get("run", "")) for step in steps)
     assert "uv sync --frozen --all-groups" in commands

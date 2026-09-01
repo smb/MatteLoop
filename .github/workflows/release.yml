@@ -7,7 +7,11 @@
           "description": "Which platform(s) to build",
           "type": "choice",
           "default": "both",
-          "options": ["both", "macos", "windows"]
+          "options": [
+            "both",
+            "macos",
+            "windows"
+          ]
         }
       }
     }
@@ -97,6 +101,15 @@
           "run": "uv sync --frozen --all-groups"
         },
         {
+          "name": "Restore Nuitka compile cache",
+          "uses": "actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae",
+          "with": {
+            "path": "~/.cache/Nuitka\n~/Library/Caches/Nuitka\n~\\AppData\\Local\\Nuitka\\Nuitka\\Cache",
+            "key": "nuitka-${{ runner.os }}-${{ matrix.target }}-${{ github.sha }}",
+            "restore-keys": "nuitka-${{ runner.os }}-${{ matrix.target }}-"
+          }
+        },
+        {
           "name": "Build native standalone bundle",
           "run": "uv run --frozen --no-sync python scripts/build.py"
         },
@@ -107,6 +120,15 @@
           "with": {
             "path": ".matteloop-build-cache/media-stack",
             "key": "media-stack-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('packaging/media-stack/manifest.toml', 'scripts/media_stack/**/*.py', 'scripts/build_media_stack.py', 'scripts/verify_media_stack.py') }}"
+          }
+        },
+        {
+          "name": "Save Nuitka compile cache",
+          "if": "always()",
+          "uses": "actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae",
+          "with": {
+            "path": "~/.cache/Nuitka\n~/Library/Caches/Nuitka\n~\\AppData\\Local\\Nuitka\\Nuitka\\Cache",
+            "key": "nuitka-${{ runner.os }}-${{ matrix.target }}-${{ github.sha }}"
           }
         },
         {
