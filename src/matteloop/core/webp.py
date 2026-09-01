@@ -1569,7 +1569,7 @@ def _identity_from_stat(path_stat: os.stat_result) -> _FileIdentity:
         inode=path_stat.st_ino,
         size=path_stat.st_size,
         modified_ns=path_stat.st_mtime_ns,
-        changed_ns=path_stat.st_ctime_ns,
+        changed_ns=0 if os.name == "nt" else path_stat.st_ctime_ns,
     )
 
 

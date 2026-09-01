@@ -75,7 +75,7 @@ def _stat_identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
         info.st_ino,
         info.st_size,
         info.st_mtime_ns,
-        info.st_ctime_ns,
+        0 if os.name == "nt" else info.st_ctime_ns,
     )
 
 

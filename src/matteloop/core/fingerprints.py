@@ -305,7 +305,7 @@ def _stat_identity(source_stat: os.stat_result) -> tuple[int, int, int, int, int
         source_stat.st_ino,
         source_stat.st_size,
         source_stat.st_mtime_ns,
-        source_stat.st_ctime_ns,
+        0 if os.name == "nt" else source_stat.st_ctime_ns,
     )
 
 

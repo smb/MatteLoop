@@ -6,6 +6,7 @@ import os
 import struct
 from dataclasses import replace
 from fractions import Fraction
+from pathlib import Path
 from types import SimpleNamespace
 
 import av
@@ -1353,27 +1354,22 @@ def test_decode_cancellation_is_checked_between_frames(tmp_path):
     assert checks == 3
 
 
-def test_open_handle_revision_tolerates_windows_stat_identity_fields() -> None:
-    # Windows fills st_dev/st_ino differently for os.stat(path) and
-    # os.fstat(fd), which made every decode on the frozen Windows build fail
+def test_revision_drops_the_ctime_windows_reports_inconsistently(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Windows reports a different st_ctime for os.stat(path) than for
+    # os.fstat(fd) of the same file, so any revision mixing both sources
+    # never matched there -- every decode on the frozen Windows build failed
     # with "source changed while it was opened".
-    path = source_module.SourceRevision(
-        device=42, inode=7, size=1024, mtime_ns=5, ctime_ns=9
-    )
-    handle = source_module.SourceRevision(
-        device=0, inode=0, size=1024, mtime_ns=5, ctime_ns=0
-    )
+    target = tmp_path / "clip.mp4"
+    target.write_bytes(b"data")
+    info = target.lstat()
 
-    assert source_module._same_open_file(handle, path)
-    assert not source_module._same_open_file(
-        source_module.SourceRevision(
-            device=0, inode=0, size=2048, mtime_ns=5, ctime_ns=0
-        ),
-        path,
-    )
-    assert not source_module._same_open_file(
-        source_module.SourceRevision(
-            device=0, inode=0, size=1024, mtime_ns=6, ctime_ns=0
-        ),
-        path,
-    )
+    assert source_module._revision_from_stat(info).ctime_ns == info.st_ctime_ns
+
+    monkeypatch.setattr(source_module.os, "name", "nt")
+    windows = source_module._revision_from_stat(info)
+
+    assert windows.ctime_ns == 0
+    assert (windows.size, windows.mtime_ns) == (info.st_size, info.st_mtime_ns)
+    assert (windows.device, windows.inode) == (info.st_dev, info.st_ino)

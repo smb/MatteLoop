@@ -428,7 +428,7 @@ def _input_container(
     try:
         with source.open("rb") as source_file:
             opened = _revision_from_stat(os.fstat(source_file.fileno()))
-            if not _same_open_file(opened, before):
+            if opened != before:
                 raise _source_changed("source changed while it was opened")
             try:
                 with av.open(source_file, mode="r") as container:
@@ -436,7 +436,7 @@ def _input_container(
             finally:
                 after_open = _revision_from_stat(os.fstat(source_file.fileno()))
                 after_path = _path_revision(source)
-                if not _same_open_file(after_open, before) or after_path != before:
+                if after_open != before or after_path != before:
                     raise _source_changed("source changed during media access")
     except AppError:
         raise
@@ -461,19 +461,13 @@ def _path_revision(source: Path) -> SourceRevision:
     return _revision_from_stat(source_stat)
 
 
-def _same_open_file(handle: SourceRevision, path: SourceRevision) -> bool:
-    """Compare an fstat revision with a path revision (Windows fills st_dev
-    and st_ino differently for the two calls; path-to-path stays exact)."""
-    return (handle.size, handle.mtime_ns) == (path.size, path.mtime_ns)
-
-
 def _revision_from_stat(source_stat: os.stat_result) -> SourceRevision:
     return SourceRevision(
         device=source_stat.st_dev,
         inode=source_stat.st_ino,
         size=source_stat.st_size,
         mtime_ns=source_stat.st_mtime_ns,
-        ctime_ns=source_stat.st_ctime_ns,
+        ctime_ns=0 if os.name == "nt" else source_stat.st_ctime_ns,
     )
 
 
