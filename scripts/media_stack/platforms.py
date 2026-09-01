@@ -138,6 +138,12 @@ def pyav_build_command(
     environment = ["env", f"PKG_CONFIG_PATH={prefix / 'lib' / 'pkgconfig'}"]
     if target.target_id == "macos-arm64":
         environment.append(f"MACOSX_DEPLOYMENT_TARGET={target.deployment_target}")
+        # Without an explicit ARCHFLAGS, setuptools' wheel tag depends on SDK
+        # availability on the build machine, not just the running
+        # architecture; a build host with the x86_64 SDK also present can
+        # produce a universal2-tagged wheel even on arm64 hardware, and
+        # verify_media_stack.py requires an exact macos-arm64 tag.
+        environment.append("ARCHFLAGS=-arch arm64")
     return (
         *environment,
         str(python),

@@ -186,6 +186,7 @@ def test_pyav_build_commands_use_the_platform_specific_build_interface() -> None
         "env",
         "PKG_CONFIG_PATH=prefix/lib/pkgconfig",
         "MACOSX_DEPLOYMENT_TARGET=13.0",
+        "ARCHFLAGS=-arch arm64",
         "tool/python",
         "-m",
         "build",
@@ -204,6 +205,17 @@ def test_pyav_build_commands_use_the_platform_specific_build_interface() -> None
         "--dist-dir",
         "wheels",
     )
+
+
+def test_macos_pyav_build_forces_a_single_architecture_wheel_tag() -> None:
+    # Reproduced on the real macOS-15-arm64 GitHub runner: without ARCHFLAGS,
+    # setuptools tagged the wheel "universal2" there (but "arm64" on a local
+    # arm64 Mac), and verify_media_stack.py requires an exact macos-arm64 tag.
+    macos = pyav_build_command(
+        MACOS, Path("av"), Path("prefix"), Path("wheels"), Path("tool/python")
+    )
+
+    assert "ARCHFLAGS=-arch arm64" in macos
 
 
 def test_wheel_repair_uses_the_platform_specific_dependency_tool() -> None:
