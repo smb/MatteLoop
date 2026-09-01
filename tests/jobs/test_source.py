@@ -340,8 +340,8 @@ def test_vfr_peak_rate_is_scanned_even_with_average_and_guessed_rates(tmp_path):
         frame.pts = pts
         frame.time_base = Fraction(1, 100)
     stream = _color_stream(matrix=1)
-    stream.width = 2
-    stream.height = 2
+    stream.width = 16
+    stream.height = 8
     stream.time_base = Fraction(1, 100)
     stream.start_time = 0
     stream.duration = 20
@@ -377,8 +377,8 @@ def test_exact_consistent_cfr_metadata_is_the_only_scan_free_path(tmp_path):
     frame.pts = 0
     frame.time_base = Fraction(1, 2)
     stream = _color_stream(matrix=1)
-    stream.width = 2
-    stream.height = 2
+    stream.width = 16
+    stream.height = 8
     stream.time_base = Fraction(1, 2)
     stream.start_time = 0
     stream.duration = 3
@@ -403,6 +403,40 @@ def test_exact_consistent_cfr_metadata_is_the_only_scan_free_path(tmp_path):
 
     assert info.duration == Fraction(3, 2)
     assert info.peak_rate == Fraction(2)
+
+
+def test_probe_rejects_a_source_narrower_or_shorter_than_the_minimum(tmp_path):
+    frame = _yuv_frame(81, 90, 240, matrix=1, color_range=1)
+    frame.pts = 0
+    frame.time_base = Fraction(1, 2)
+    stream = _color_stream(matrix=1)
+    stream.width = 4
+    stream.height = 720
+    stream.time_base = Fraction(1, 2)
+    stream.start_time = 0
+    stream.duration = 3
+    stream.average_rate = Fraction(2)
+    stream.guessed_rate = Fraction(2)
+    stream.base_rate = Fraction(2)
+    stream.frames = 3
+
+    class Container:
+        duration = None
+
+        def decode(self, selected_stream):
+            raise AssertionError("metadata-proven CFR must not scan")
+
+    with pytest.raises(AppError) as error:
+        _source_info(
+            tmp_path / "narrow.mp4",
+            SourceRevision(1, 2, 3, 4, 5),
+            Container(),
+            stream,
+            frame,
+        )
+
+    assert error.value.code is ErrorCode.SOURCE_DIMENSIONS_UNSUPPORTED
+    assert "8" in error.value.technical_detail
 
 
 @pytest.mark.parametrize("frame_pts", [(0, 1, 1), (0, 2, 1)])
@@ -847,9 +881,15 @@ def _yuv_frame(
     *,
     matrix: int,
     color_range: int,
-    width: int = 2,
-    height: int = 2,
+    width: int = 16,
+    height: int = 16,
 ):
+    # libswscale on Linux x86_64 corrupts the heap (glibc "corrupted size vs.
+    # prev_size", SIGABRT) reformatting some 2x2/6x6/8x8 yuv420p frames through
+    # VideoReformatter — reproduced with av 16.1.0 / libswscale 9.1.100, not on
+    # macOS arm64. 16x16 is proven safe there; every caller fills the frame
+    # uniformly and asserts a single pixel, so a larger frame changes nothing
+    # about what is being tested.
     frame = av.VideoFrame(width, height, "yuv420p")
     frame.colorspace = matrix
     frame.color_range = color_range
@@ -898,17 +938,37 @@ def test_yuv_matrix_selection_changes_literal_rgba_conversion():
     bt709 = _yuv_frame(81, 90, 240, matrix=1, color_range=1)
     bt601 = _yuv_frame(81, 90, 240, matrix=5, color_range=1)
 
-    assert _normalized_image(bt709, _color_stream(matrix=1), bt709).getpixel(
+    bt709_pixel = _normalized_image(bt709, _color_stream(matrix=1), bt709).getpixel(
         (0, 0)
-    ) == (255, 23, 0, 255)
-    assert _normalized_image(bt601, _color_stream(matrix=5), bt601).getpixel(
+    )
+    bt601_pixel = _normalized_image(bt601, _color_stream(matrix=5), bt601).getpixel(
         (0, 0)
-    ) == (252, 0, 0, 255)
+    )
+
+    # libswscale's exact byte-level rounding for this matrix conversion differs
+    # by a channel or two between SIMD implementations: measured (255, 23, 0,
+    # 255) / (253, 0, 0, 255) on Linux x86_64 and (255, 24, 0, 255) / (254, 0,
+    # 0, 255) on macOS arm64. Assert the stable structure plus a tolerance band
+    # on the one varying channel per pixel, rather than brittle exact bytes.
+    assert bt709_pixel[0] == 255
+    assert 21 <= bt709_pixel[1] <= 26
+    assert bt709_pixel[2] == 0
+    assert bt709_pixel[3] == 255
+
+    assert 250 <= bt601_pixel[0] <= 255
+    assert bt601_pixel[1] == 0
+    assert bt601_pixel[2] == 0
+    assert bt601_pixel[3] == 255
+
+    assert bt709_pixel != bt601_pixel
 
 
 def test_untagged_hd_yuv_assumes_bt709_defaults():
+    # width=16, not the synthetic-minimum 4, because 4x720 hits the same
+    # libswscale heap corruption documented on _yuv_frame above; height=720
+    # is load-bearing for the height >= 720 "HD" branch under test.
     frame = _yuv_frame(
-        81, 90, 240, matrix=2, color_range=0, width=4, height=720
+        81, 90, 240, matrix=2, color_range=0, width=16, height=720
     )
     stream = _color_stream(matrix=2, transfer=2, primaries=2)
     profile = _color_profile(stream, frame)
@@ -930,7 +990,7 @@ def test_untagged_hd_yuv_assumes_bt709_defaults():
         "matrix": 1,
         "range": 1,
     }
-    assert _normalized_image(frame, stream, frame).size == (4, 720)
+    assert _normalized_image(frame, stream, frame).size == (16, 720)
 
 
 def test_untagged_sd_yuv_assumes_bt601_matrix():

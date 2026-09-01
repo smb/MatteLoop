@@ -9,7 +9,7 @@ _SOURCE_ERROR_MESSAGES = {
     ErrorCode.SOURCE_CORRUPT: "Open another video file; this one appears damaged.",
     ErrorCode.SOURCE_ZERO_DURATION: "Open a video with a positive duration.",
     ErrorCode.SOURCE_HDR_UNSUPPORTED: "Convert to 8-bit SDR and try again.",
-    ErrorCode.SOURCE_DIMENSIONS_UNSUPPORTED: "Resize to 3840×2160 or smaller.",
+    ErrorCode.SOURCE_DIMENSIONS_UNSUPPORTED: "Resize to between 8×8 and 3840×2160.",
     ErrorCode.SOURCE_FPS_UNSUPPORTED: "Convert the video to 60 fps or less.",
     ErrorCode.SOURCE_DURATION_UNSUPPORTED: "Open a video under 10 minutes.",
     ErrorCode.SOURCE_FORMAT_UNSUPPORTED: "Open an MP4, MOV, WebM, or MKV video.",

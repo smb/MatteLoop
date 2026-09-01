@@ -60,7 +60,7 @@ def _fixture_result(path: Path) -> SourceLoadResult:
 def test_dropped_video_loads_metadata_and_displays_first_frame(tmp_path, qtbot) -> None:
     path = make_video(
         tmp_path / "source.mp4",
-        [Image.new("RGB", (4, 2), "red"), Image.new("RGB", (4, 2), "green")],
+        [Image.new("RGB", (16, 8), "red"), Image.new("RGB", (16, 8), "green")],
         Fraction(2),
     )
     adapter = FakeSourceAdapter({path: _fixture_result(path)})
@@ -76,7 +76,7 @@ def test_dropped_video_loads_metadata_and_displays_first_frame(tmp_path, qtbot) 
     qtbot.waitUntil(lambda: controller.active_load_count == 0, timeout=5000)
     metadata = store.state.source_value
     assert metadata is not None
-    assert window.source_dimensions.text() == "4 × 2"
+    assert window.source_dimensions.text() == "16 × 8"
     assert window.source_duration.text() == "0:01.000"
     assert window.source_frame_rate.text() == "2 fps"
     assert window.source_file_size.text() == format_source_file_size(metadata.file_size)

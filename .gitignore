@@ -20,3 +20,5 @@ nuitka-crash-report.xml
 .matteloop-local-media/
 .worktrees/
 onnxruntime_profile__*.json
+core
+qemu_*.core

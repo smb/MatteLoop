@@ -26,6 +26,13 @@ from matteloop.core.specs import is_local_path_syntax
 
 MAX_SOURCE_WIDTH = 3840
 MAX_SOURCE_HEIGHT = 2160
+# libswscale corrupts the heap reformatting some very small yuv420p frames on
+# some platforms/SIMD paths (reproduced down to width=4 and width=height=6/8;
+# 8x720 and 16x8 did not reproduce it). No real video is this small; reject it
+# here rather than let a decode crash later. This bound is an empirical floor
+# from observed crashes, not a proof no smaller-but-untested combination is
+# also affected.
+MIN_SOURCE_DIMENSION = 8
 MAX_SOURCE_FPS = Fraction(60)
 MAX_SOURCE_DURATION = Fraction(10 * 60)
 MAX_TIMELINE_DECODED_FRAMES = 36_002
@@ -934,6 +941,14 @@ def _source_info(
             ErrorCode.SOURCE_DIMENSIONS_UNSUPPORTED,
             "source.probe.too-large",
             "oriented square-pixel dimensions exceed 3840×2160",
+            "resize-source",
+        )
+    if min(width, height) < MIN_SOURCE_DIMENSION:
+        raise _source_error(
+            ErrorCode.SOURCE_DIMENSIONS_UNSUPPORTED,
+            "source.probe.too-small",
+            f"oriented square-pixel dimensions are below {MIN_SOURCE_DIMENSION}"
+            f"×{MIN_SOURCE_DIMENSION}",
             "resize-source",
         )
 
