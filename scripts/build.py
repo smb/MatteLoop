@@ -244,24 +244,32 @@ def prepare_temporary_spec(
     marker = "\t--nofollow-import-to=av\n"
     if marker not in content:
         raise ValueError("packaging spec must contain the PyAV nofollow marker")
+    # delvewheel puts the FFmpeg DLLs in a sibling av.libs/ directory (and
+    # av/__init__.py's injected patch does os.add_dll_directory on it), while
+    # delocate keeps them inside av/.dylibs/. Bundling only av/ left the
+    # Windows build with "DLL load failed while importing _core".
+    directories = [av_directory]
+    libs_directory = av_directory.with_name(f"{av_directory.name}.libs")
+    if libs_directory.is_dir():
+        directories.append(libs_directory)
     wheel_file_args = "\n".join(
-        f"\t--include-data-files={native_file.as_posix()}=av/"
-        f"{native_file.relative_to(av_directory).as_posix()}"
+        f"\t--include-data-files={native_file.as_posix()}="
+        f"{directory.name}/{native_file.relative_to(directory).as_posix()}"
+        for directory in directories
         for native_file in sorted(
             path
-            for path in av_directory.rglob("*")
+            for path in directory.rglob("*")
             if path.is_file()
             and path.suffix in {".dll", ".dylib", ".pyd", ".py", ".so"}
         )
     )
     if not wheel_file_args:
         raise ValueError(f"no PyAV wheel files found in {av_directory}")
-    content = content.replace(
-        marker,
-        f"{marker}\t--include-data-dir={av_directory.as_posix()}=av\n"
-        f"{wheel_file_args}\n",
-        1,
+    data_dir_args = "".join(
+        f"\t--include-data-dir={directory.as_posix()}={directory.name}\n"
+        for directory in directories
     )
+    content = content.replace(marker, f"{marker}{data_dir_args}{wheel_file_args}\n", 1)
     destination_spec.write_text(content, encoding="utf-8")
 
 

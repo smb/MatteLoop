@@ -1012,6 +1012,33 @@ def test_failure_diagnostics_are_a_noop_without_a_staging_directory(
     assert not (root / "build-failure-diagnostics").exists()
 
 
+def test_native_build_bundles_the_delvewheel_sibling_dll_directory(
+    tmp_path: Path,
+) -> None:
+    # delvewheel stores the FFmpeg DLLs in a sibling av.libs/ directory, not
+    # inside av/ the way delocate does; leaving it out gave the Windows
+    # bundle "DLL load failed while importing _core" at smoke time.
+    source = tmp_path / "source.spec"
+    destination = tmp_path / "temporary.spec"
+    source.write_text("extra_args =\n\t--nofollow-import-to=av\n", encoding="utf-8")
+    av_directory = tmp_path / "extracted" / "av"
+    av_directory.mkdir(parents=True)
+    (av_directory / "__init__.py").write_text("", encoding="utf-8")
+    libs = tmp_path / "extracted" / "av.libs"
+    libs.mkdir()
+    dll = libs / "avcodec-62-abcdef.dll"
+    dll.write_bytes(b"dll")
+    (libs / ".load-order-av-16.1.0").write_text("avcodec\n", encoding="utf-8")
+
+    prepare_temporary_spec(source, destination, av_directory, os_name="win32")
+
+    temporary = destination.read_text(encoding="utf-8")
+    assert f"--include-data-dir={libs.as_posix()}=av.libs" in temporary
+    assert (
+        f"--include-data-files={dll.as_posix()}=av.libs/avcodec-62-abcdef.dll"
+    ) in temporary
+
+
 def test_deploy_command_keeps_deployment_files_for_recovery() -> None:
     # Without --keep-deployment-files, pyside6-deploy deletes
     # packaging/deployment/ itself right after building, before
