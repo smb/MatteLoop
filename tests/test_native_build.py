@@ -328,19 +328,45 @@ def test_native_build_adds_raw_pyav_wheel_only_to_temporary_spec(
 
     prepare_temporary_spec(source, destination, av_directory, os_name="darwin")
 
-    assert f"--include-data-dir={av_directory}=av" in destination.read_text(
+    # Nuitka's --include-data-files/--include-data-dir source is matched as a
+    # glob-style pattern, and on Windows a raw backslash-separated path is
+    # silently mangled there (each backslash is consumed as an escape
+    # character) -- reproduced on the real Windows runner as a "does not
+    # match any files" FATAL error citing a garbled path. Forward slashes
+    # via as_posix() are required on every platform, not just Windows.
+    assert f"--include-data-dir={av_directory.as_posix()}=av" in destination.read_text(
         encoding="utf-8"
     )
-    assert f"--include-data-files={extension}=av/audio/frame.cpython-313-darwin.so" in (
+    assert (
+        f"--include-data-files={extension.as_posix()}"
+        "=av/audio/frame.cpython-313-darwin.so"
+    ) in destination.read_text(encoding="utf-8")
+    assert f"--include-data-files={dylib.as_posix()}=av/.dylibs/libavutil.dylib" in (
         destination.read_text(encoding="utf-8")
     )
-    assert f"--include-data-files={dylib}=av/.dylibs/libavutil.dylib" in (
-        destination.read_text(encoding="utf-8")
-    )
-    assert f"--include-data-files={module}=av/__init__.py" in destination.read_text(
-        encoding="utf-8"
-    )
+    assert (
+        f"--include-data-files={module.as_posix()}=av/__init__.py"
+    ) in destination.read_text(encoding="utf-8")
     assert "--include-data-dir" not in source.read_text(encoding="utf-8")
+
+
+def test_native_build_pyav_spec_paths_never_contain_backslashes(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.spec"
+    destination = tmp_path / "temporary.spec"
+    source.write_text("extra_args =\n\t--nofollow-import-to=av\n", encoding="utf-8")
+    av_directory = tmp_path / "site-packages" / "av"
+    av_directory.mkdir(parents=True)
+    (av_directory / "__init__.py").write_text("", encoding="utf-8")
+    (av_directory / "filter").mkdir()
+    (av_directory / "filter" / "link.cpython-313-win_amd64.pyd").write_bytes(b"ext")
+
+    prepare_temporary_spec(source, destination, av_directory, os_name="win32")
+
+    for line in destination.read_text(encoding="utf-8").splitlines():
+        if line.startswith("\t--include-data-"):
+            assert "\\" not in line, line
 
 
 def test_native_build_selects_the_windows_icon_in_temporary_spec(

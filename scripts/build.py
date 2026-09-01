@@ -241,7 +241,7 @@ def prepare_temporary_spec(
     if marker not in content:
         raise ValueError("packaging spec must contain the PyAV nofollow marker")
     wheel_file_args = "\n".join(
-        f"\t--include-data-files={native_file}=av/"
+        f"\t--include-data-files={native_file.as_posix()}=av/"
         f"{native_file.relative_to(av_directory).as_posix()}"
         for native_file in sorted(
             path
@@ -254,7 +254,7 @@ def prepare_temporary_spec(
         raise ValueError(f"no PyAV wheel files found in {av_directory}")
     content = content.replace(
         marker,
-        f"{marker}\t--include-data-dir={av_directory}=av\n"
+        f"{marker}\t--include-data-dir={av_directory.as_posix()}=av\n"
         f"{wheel_file_args}\n",
         1,
     )
