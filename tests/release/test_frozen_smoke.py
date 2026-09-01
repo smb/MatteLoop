@@ -493,6 +493,10 @@ def test_pyside_deploy_spec_parses_to_required_native_bundle_contract() -> None:
     } <= args
     assert "--include-package=rembg.sessions" not in args
     assert "--include-package=onnxruntime" in args
+    # onnxruntime.backend implements ONNX's conformance-test API and is never
+    # imported by rembg or matteloop itself; it pulls in unittest, which
+    # Nuitka's anti-bloat plugin flags as slowing down compilation.
+    assert "--nofollow-import-to=onnxruntime.backend" in args
     assert "--nofollow-import-to=av" in args
     assert "--nofollow-import-to=pymatting" in args
     assert "--nofollow-import-to=numba" in args

@@ -60,6 +60,7 @@ extra_args =
 	--nofollow-import-to=scipy
 	--nofollow-import-to=skimage
 	--nofollow-import-to=av
+	--nofollow-import-to=onnxruntime.backend
 	--noinclude-dlls=*libqpdf*
 	--noinclude-dlls=*QtPdf*
 	--noinclude-dlls=*libqsvg*
