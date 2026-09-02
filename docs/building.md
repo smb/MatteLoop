@@ -209,6 +209,32 @@ pkg-config --version
 uv sync --frozen --all-groups
 ```
 
+Three prerequisites the hosted runner supplies implicitly, and a local machine
+does not:
+
+- **`msys2.cmd` on `PATH`.** `scripts/media_stack/platforms.py` invokes the
+  FFmpeg configure and make steps through it, but that wrapper is created by
+  the `msys2/setup-msys2` action, not by the MSYS2 installer. Provide one
+  matching the workflow's `msystem: MSYS` and `path-type: inherit`:
+
+  ```bat
+  @echo off
+  setlocal
+  set MSYSTEM=MSYS
+  set MSYS2_PATH_TYPE=inherit
+  set CHERE_INVOKING=1
+  "C:\msys64\usr\bin\bash.exe" -leo pipefail %*
+  ```
+
+- **`SSL_CERT_FILE` pointing at a certificate bundle**, for example
+  `.venv\Lib\site-packages\certifi\cacert.pem`. A uv-managed CPython carries no
+  certificate store of its own, and of the source hosts only `download.qt.io`
+  fails to verify without one.
+
+- **NASM on `PATH`.** Its installer adds no `PATH` entry, and `winget list`
+  does not report the package afterwards; the binary lands in
+  `%LOCALAPPDATA%\bin\NASM`.
+
 Build the x64 bundle:
 
 ```powershell
