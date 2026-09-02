@@ -12,7 +12,7 @@
     "long_functions": 5
   },
   "src/matteloop/jobs/models/cache_fs.py": {
-    "lines": 1576,
+    "lines": 1578,
     "long_functions": 4
   },
   "src/matteloop/jobs/models/download.py": {
