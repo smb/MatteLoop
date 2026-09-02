@@ -1348,3 +1348,35 @@ def test_bound_lstat_matches_os_fstat_identity(tmp_path: Path) -> None:
         f"os.fstat {from_os.st_mtime_ns}"
     )
     assert from_api.st_size == from_os.st_size
+
+
+@pytest.mark.skipif(os.name != "nt", reason="binds against a real Windows ACL")
+def test_binding_a_directory_needs_no_more_than_the_rights_it_uses(
+    tmp_path: Path,
+) -> None:
+    """A writable target must not require every right GENERIC_WRITE implies.
+
+    The final component is opened with GENERIC_WRITE, which also demands
+    FILE_WRITE_EA and FILE_WRITE_ATTRIBUTES. A directory that grants
+    everything the binding actually does -- listing, traversing, creating
+    and deleting entries -- but withholds those two is refused outright,
+    which is how "C:\\Temp" came back as "cache entry access denied".
+    """
+    import getpass
+    import subprocess
+
+    target = tmp_path / "restricted"
+    target.mkdir()
+    denied = subprocess.run(
+        ["icacls", str(target), "/deny", f"{getpass.getuser()}:(WEA,WA)"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if denied.returncode != 0:
+        pytest.skip(f"could not restrict the directory: {denied.stderr.strip()}")
+
+    bound = BoundModelDirectory.bind(target, "2.0.72", "u2netp", create=True)
+
+    assert bound is not None
+    bound.close()
