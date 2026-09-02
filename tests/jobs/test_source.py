@@ -1365,7 +1365,8 @@ def test_revision_drops_the_ctime_windows_reports_inconsistently(
     target.write_bytes(b"data")
     info = target.lstat()
 
-    assert source_module._revision_from_stat(info).ctime_ns == info.st_ctime_ns
+    if os.name != "nt":
+        assert source_module._revision_from_stat(info).ctime_ns == info.st_ctime_ns
 
     monkeypatch.setattr(source_module.os, "name", "nt")
     windows = source_module._revision_from_stat(info)

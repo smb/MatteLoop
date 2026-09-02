@@ -1795,6 +1795,12 @@ def test_candidate_validation_uses_the_held_file_not_a_swappable_helper_path(
             os.fstat(descriptor)
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="stages a race by replacing a file that is held open, which "
+    "Windows refuses outright -- the very displacement this guards "
+    "against cannot happen there",
+)
 def test_replace_rolls_back_if_validated_candidate_is_swapped_at_commit(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1833,6 +1839,12 @@ def test_replace_rolls_back_if_validated_candidate_is_swapped_at_commit(
     assert target.read_bytes() == b"old-output"
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="stages a race by replacing a file that is held open, which "
+    "Windows refuses outright -- the very displacement this guards "
+    "against cannot happen there",
+)
 def test_replace_rejects_a_destination_swap_during_held_sha_verification(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1885,6 +1897,12 @@ def test_replace_rejects_a_destination_swap_during_held_sha_verification(
     assert target.read_bytes() == old_bytes
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="stages a race by replacing a file that is held open, which "
+    "Windows refuses outright -- the very displacement this guards "
+    "against cannot happen there",
+)
 def test_replace_without_previous_output_never_unlinks_a_foreign_commit_mismatch(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2030,6 +2048,12 @@ def test_recovery_preparation_failure_aborts_before_destructive_replace(
     assert target.read_bytes() == old_bytes
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="stages a race by replacing a file that is held open, which "
+    "Windows refuses outright -- the very displacement this guards "
+    "against cannot happen there",
+)
 def test_hard_linked_recovery_file_is_fsynced_before_destructive_replace(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2114,6 +2138,12 @@ def test_recovery_directory_fsync_failure_leaves_no_pending_after_next_success(
     assert not tuple(recovery_directory.glob("*.recovery-pending"))
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="stages a race by replacing a file that is held open, which "
+    "Windows refuses outright -- the very displacement this guards "
+    "against cannot happen there",
+)
 def test_recovery_namespace_swap_never_modifies_the_foreign_replacement(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2156,6 +2186,12 @@ def test_recovery_namespace_swap_never_modifies_the_foreign_replacement(
     assert (recovery_directory / "sentinel").read_bytes() == sentinel_bytes
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="stages a race by replacing a file that is held open, which "
+    "Windows refuses outright -- the very displacement this guards "
+    "against cannot happen there",
+)
 def test_replace_parent_swap_restores_original_and_never_modifies_foreign_parent(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2206,6 +2242,12 @@ def test_replace_parent_swap_restores_original_and_never_modifies_foreign_parent
     assert (moved_parent / target.name).read_bytes() == old_bytes
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="stages a race by replacing a file that is held open, which "
+    "Windows refuses outright -- the very displacement this guards "
+    "against cannot happen there",
+)
 def test_no_clobber_parent_swap_never_consumes_foreign_stage_or_creates_output(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2268,6 +2310,11 @@ def test_no_clobber_parent_swap_never_consumes_foreign_stage_or_creates_output(
     ).read_bytes() == foreign_stage_bytes
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="checks a POSIX permission-bit rejection; Windows has no "
+    "equivalent mode to reject",
+)
 def test_unsafe_recovery_namespace_is_reported_as_an_output_error(tmp_path) -> None:
     target = tmp_path / "output.webp"
     old_bytes = b"old-output"
@@ -2378,6 +2425,12 @@ def test_current_recovery_slot_is_reused_without_a_pending_hardlink(
     assert not tuple(recovery_directory.glob("*.recovery-pending"))
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="stages a race by replacing a file that is held open, which "
+    "Windows refuses outright -- the very displacement this guards "
+    "against cannot happen there",
+)
 def test_replace_retries_when_restored_output_is_swapped_during_held_sha(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2438,6 +2491,12 @@ def test_replace_retries_when_restored_output_is_swapped_during_held_sha(
     assert target.read_bytes() == old_bytes
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="stages a race by replacing a file that is held open, which "
+    "Windows refuses outright -- the very displacement this guards "
+    "against cannot happen there",
+)
 def test_rollback_reports_when_recovery_path_is_swapped_during_held_sha(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2521,6 +2580,12 @@ def test_rollback_reports_when_recovery_path_is_swapped_during_held_sha(
     assert str(recovery_shadow) in exc.value.technical_detail
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="stages a race by replacing a file that is held open, which "
+    "Windows refuses outright -- the very displacement this guards "
+    "against cannot happen there",
+)
 @pytest.mark.parametrize("rollback_swaps", [1, 2])
 def test_replace_recreates_rollback_from_held_old_output_after_temp_swaps(
     tmp_path,
@@ -2604,6 +2669,12 @@ def test_replace_recreates_rollback_from_held_old_output_after_temp_swaps(
         candidate.close()
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="stages a race by replacing a file that is held open, which "
+    "Windows refuses outright -- the very displacement this guards "
+    "against cannot happen there",
+)
 def test_no_clobber_publishes_held_copy_when_candidate_path_is_swapped(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2660,6 +2731,12 @@ def test_no_clobber_publishes_held_copy_when_candidate_path_is_swapped(
     assert not tuple((tmp_path / ".matteloop-publish").glob("*.publish"))
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="stages a race by replacing a file that is held open, which "
+    "Windows refuses outright -- the very displacement this guards "
+    "against cannot happen there",
+)
 def test_no_clobber_never_unlinks_a_concurrent_output_after_reservation(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2716,6 +2793,12 @@ def test_no_clobber_never_unlinks_a_concurrent_output_after_reservation(
     assert not tuple((tmp_path / ".matteloop-publish").glob("*.publish"))
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="stages a race by replacing a file that is held open, which "
+    "Windows refuses outright -- the very displacement this guards "
+    "against cannot happen there",
+)
 def test_no_clobber_rejects_a_destination_swap_during_held_sha_verification(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

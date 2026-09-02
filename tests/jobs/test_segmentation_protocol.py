@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import multiprocessing
 import sys
 import threading
@@ -298,6 +299,20 @@ def test_alpha_matting_falls_back_to_standard_when_pymatting_is_unavailable(
         b'{"type":"shutdown","protocol_version":999,"job_id":"__control__"}',
         b'{"type":"cancel_request","protocol_version":1,"job_id":"j1","job_id":"j2"}',
         b"{" + b" " * MAX_PROTOCOL_MESSAGE_BYTES + b"}",
+    ],
+    # Short ids on purpose: pytest puts the full test name in
+    # PYTEST_CURRENT_TEST, and the oversized payload blows past Windows'
+    # 32767-character environment-variable limit.
+    ids=[
+        "non-utf8",
+        "not-json",
+        "version-not-int",
+        "extra-field",
+        "missing-job-id",
+        "unknown-type",
+        "wrong-version",
+        "duplicate-key",
+        "oversized",
     ],
 )
 def test_byte_codec_rejects_malformed_noncanonical_or_oversized_messages(
@@ -1633,9 +1648,12 @@ def test_production_loop_acks_queued_cancel_before_queued_shutdown() -> None:
         ) == CancelAck(PROTOCOL_VERSION, "j1")
         thread.join(timeout=1)
         assert not thread.is_alive()
-        if parent.poll():
-            with pytest.raises(EOFError):
-                parent.recv_bytes(MAX_PROTOCOL_MESSAGE_BYTES)
+        # Windows raises BrokenPipeError from poll() itself once the child
+        # end is gone, where POSIX reports readable-then-EOF.
+        with contextlib.suppress(BrokenPipeError):
+            if parent.poll():
+                with pytest.raises((EOFError, BrokenPipeError)):
+                    parent.recv_bytes(MAX_PROTOCOL_MESSAGE_BYTES)
     finally:
         parent.close()
         slot.close()
