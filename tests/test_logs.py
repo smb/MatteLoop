@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -54,3 +56,30 @@ def test_an_unwritable_destination_never_stops_the_application(
 def test_log_file_lives_beside_the_products_other_user_data() -> None:
     assert log_file().name == "matteloop.log"
     assert "matteloop" in str(log_file()).casefold()
+
+
+def test_a_native_crash_leaves_thread_stacks_behind(tmp_path: Path) -> None:
+    # A segmentation fault kills the interpreter before logging runs, so the
+    # log file stays empty and a packaged build leaves the user nothing to
+    # report. Crash a real subprocess rather than trusting the wiring.
+    target = tmp_path / "logs" / "matteloop.log"
+    script = (
+        "import faulthandler, sys;"
+        "sys.path.insert(0, 'src');"
+        "from matteloop.logs import configure_logging;"
+        f"configure_logging(__import__('pathlib').Path({str(target)!r}));"
+        "faulthandler._sigsegv()"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode != 0
+    report = target.with_suffix(".fault")
+    assert report.is_file(), "no crash report was written"
+    written = report.read_text(encoding="utf-8")
+    assert "Current thread" in written
+    assert "faulthandler._sigsegv" in written or "<module>" in written
