@@ -60,6 +60,21 @@ Verification for every change:
 uv run ruff check . && uv run mypy src && QT_QPA_PLATFORM=offscreen uv run pytest -q
 ```
 
+## Working on issues (REQUIRED)
+
+Work that answers a GitHub issue goes onto its own branch and into a pull
+request that references the issue. Never push it to `main` directly.
+
+- Reference the issue in the pull request: `Closes #N` when the change fully
+  resolves it, `Refs #N` otherwise.
+- **Never merge a branch and never close a pull request.** Whether the work
+  is done, and whether it lands, is the maintainer's call — not something to
+  infer from green CI.
+- `main` is protected; a direct push is rejected, and that is intentional.
+
+The repository is public and takes reports from other people, so the trail
+from a report to the change answering it has to stay visible and reviewable.
+
 ## Delegation
 
 Implementation is delegated to `codex exec -m gpt-5.6-luna -c model_reasoning_effort="xhigh"`.
