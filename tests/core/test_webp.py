@@ -1130,6 +1130,11 @@ def test_fit_encodes_only_from_a_private_source_snapshot(
     assert all(paths[0].parent.name == "source-snapshot" for paths in observed)
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="Windows refuses to replace a file while it is open, so the "
+    "race this guards against cannot be staged there",
+)
 def test_fit_rejects_concurrent_source_replacement_during_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
