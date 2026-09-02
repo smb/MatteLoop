@@ -21,7 +21,11 @@ _FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 _WINDOWS_DIRECTORY_ACCESS = 0x80000000
 _WINDOWS_WRITABLE_DIRECTORY_ACCESS = 0xC0000000
-_WINDOWS_DIRECTORY_SHARE = 0x00000001
+# FILE_SHARE_READ | FILE_SHARE_WRITE. Windows checks sharing symmetrically,
+# so binding one directory kept us from binding it again ourselves, which
+# every nested lookup does. FILE_SHARE_DELETE stays out: a bound directory
+# still cannot be renamed or deleted under its handle.
+_WINDOWS_DIRECTORY_SHARE = 0x00000001 | 0x00000002
 # Every relative open asks for FILE_SYNCHRONOUS_IO_NONALERT, which
 # NtCreateFile rejects with STATUS_INVALID_PARAMETER unless the access mask
 # also carries SYNCHRONIZE. CreateFileW adds it implicitly; NtCreateFile does

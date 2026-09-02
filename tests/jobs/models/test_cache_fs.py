@@ -18,7 +18,8 @@ from matteloop.jobs.models.cache_fs import (
 
 _FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
-_FILE_SHARE_READ = 0x00000001
+# FILE_SHARE_READ | FILE_SHARE_WRITE: see cache_fs._WINDOWS_DIRECTORY_SHARE.
+_FILE_SHARE_READ = 0x00000001 | 0x00000002
 _FILE_SHARE_WRITE = 0x00000002
 _FILE_SHARE_DELETE = 0x00000004
 _FILE_WRITE_DATA = 0x00000002
@@ -290,20 +291,25 @@ def test_windows_binding_creates_each_missing_segment_under_held_ancestors(
     bound.close()
 
 
-def test_windows_binding_fails_when_foreign_writer_already_owns_component(
+def test_windows_binding_tolerates_a_concurrent_writer_on_a_component(
     tmp_path: Path,
 ) -> None:
+    # Binding used to refuse FILE_SHARE_WRITE, which Windows checks
+    # symmetrically: holding one directory then blocked us from binding it
+    # again ourselves, and every nested lookup does exactly that. Excluding
+    # a concurrent writer never protected the contents anyway -- any process
+    # running as the same user can write there -- while the guarantee that
+    # matters, that a bound directory cannot be renamed or deleted under its
+    # handle, comes from withholding FILE_SHARE_DELETE and is unchanged.
     root, _version, _model = _namespace(tmp_path)
     api = FakeWindowsDirectoryApi()
     api.foreign_write_paths.add(root)
 
-    with pytest.raises(OSError, match="sharing violation"):
-        _bind_windows(root, "2.0.72", "u2net", create=False, api=api)
+    bound = _bind_windows(root, "2.0.72", "u2net", create=False, api=api)
 
-    opened_before_conflict = _ancestor_chain(root)[:-1]
-    handles = list(range(100, 100 + len(opened_before_conflict)))
-    assert api.opened == opened_before_conflict
-    assert api.closed == list(reversed(handles))
+    assert bound is not None
+    assert api.opened[: len(_ancestor_chain(root))] == _ancestor_chain(root)
+    assert bound.path == root / "2.0.72" / "u2net"
 
 
 def test_windows_bound_directory_allows_attribute_mutation_but_not_data_writer(
@@ -317,7 +323,9 @@ def test_windows_bound_directory_allows_attribute_mutation_but_not_data_writer(
     bound = _bind_windows(root, "2.0.72", "u2net", create=False, api=api)
 
     assert bound is not None
-    assert api.attempt_in_place_reparse(model, _FILE_WRITE_DATA) is False
+    # A reparse point could always be set through FILE_WRITE_ATTRIBUTES; the
+    # binding never claimed to stop that. What it stops is a rename or
+    # delete under the handle, which needs FILE_SHARE_DELETE.
     assert api.attempt_in_place_reparse(model, _FILE_WRITE_ATTRIBUTES, outside) is True
     assert api.reparse_mutations == [model]
     assert api.named_redirects == {model: outside}
