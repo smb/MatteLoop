@@ -24,9 +24,11 @@ __all__ = (
     "_SystemAdvisoryFileLock",
 )
 
-# Far beyond any payload byte, so the mandatory Windows lock never covers
-# content another handle has to read.
-_WINDOWS_LOCK_OFFSET = 1 << 62
+# Past any payload byte, so the mandatory Windows lock never covers content
+# another handle has to read, while staying a valid seek target on the
+# filesystems the POSIX tests exercise. A terabyte is far above the 4 GiB
+# ceiling a WebP output can reach.
+_WINDOWS_LOCK_OFFSET = 1 << 40
 
 
 class _SystemAdvisoryFileLock:
