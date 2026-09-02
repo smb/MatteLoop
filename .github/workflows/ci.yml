@@ -83,4 +83,4 @@ jobs:
       # directories, and tests/ui/test_render_controller crashes the
       # interpreter with an access violation raised while a worker thread
       # closes the PyAV container in jobs/source.py.
-      - run: uv run pytest -q tests/jobs/models tests/core tests/test_resources.py
+      - run: uv run pytest -q tests/jobs tests/core tests/test_resources.py

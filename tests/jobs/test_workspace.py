@@ -3980,3 +3980,23 @@ def test_native_initial_journal_failure_cleans_stage_and_keeps_primary_error(
     )
     assert not stage.path.exists()
     assert validate_cut_set(old).to_json_bytes() == before
+
+
+def test_frame_copy_timestamps_are_set_through_the_descriptor(tmp_path: Path) -> None:
+    # os.utime takes a descriptor only where os.supports_fd allows it, which
+    # excludes Windows: the frozen build failed there with "utime: path
+    # should be string, bytes or os.PathLike, not int" while promoting a
+    # render, so no output was ever written.
+    from matteloop.jobs.workspace._fs_helpers import _set_times_fd
+
+    target = tmp_path / "frame-000000.png"
+    target.write_bytes(b"frame")
+    descriptor = os.open(target, os.O_RDWR)
+    try:
+        _set_times_fd(descriptor, 1_500_000_000_000_000_000, 1_400_000_000_500_000_000)
+    finally:
+        os.close(descriptor)
+
+    written = target.stat().st_mtime_ns
+    # Windows stores 100-nanosecond ticks, so allow that much rounding.
+    assert abs(written - 1_400_000_000_500_000_000) < 1_000
