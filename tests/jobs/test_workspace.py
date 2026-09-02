@@ -198,7 +198,12 @@ def _rewrite_frame(path: Path, color: tuple[int, int, int, int]) -> None:
 
 
 def _open_handle_count(process) -> int:  # type: ignore[no-untyped-def]
-    """Count what the platform exposes: fds on POSIX, handles on Windows."""
+    """Count what the platform exposes: fds on POSIX, handles on Windows.
+
+    Collects first so a descriptor waiting on a finalizer is not counted as
+    a leak, which made this measurement flake in full-suite runs.
+    """
+    gc.collect()
     if hasattr(process, "num_fds"):
         return int(process.num_fds())
     return int(process.num_handles())

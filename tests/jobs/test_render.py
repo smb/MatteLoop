@@ -10,7 +10,7 @@ from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 
-import psutil
+import av
 import pytest
 from PIL import Image
 
@@ -1203,7 +1203,18 @@ def test_render_encodes_and_validates_a_real_lossless_webp(tmp_path) -> None:
 
 
 def test_render_keeps_decode_working_set_bounded_across_60_frames(tmp_path) -> None:
-    """A 60-frame 256x256 render must grow less than 4 MiB after frame 10."""
+    """No decoded frame may outlive the frame that produced it.
+
+    Counting live av.VideoFrame objects measures that directly. The
+    regression this guards against was found exactly that way -- the frames
+    accumulated from 18 to 60 -- and it moved RSS by only 5.5 MiB against
+    1.6 MiB when healthy. That signal is smaller than the allocator noise on
+    at least one platform, so RSS could neither prove nor rule out the leak
+    there, while the object count is exact everywhere.
+
+    A purely native leak holding no Python object would escape this; RSS was
+    never a dependable guard for that either.
+    """
     frames = [
         Image.new("RGB", (256, 256), (index % 256, 40, 90))
         for index in range(60)
@@ -1219,12 +1230,14 @@ def test_render_keeps_decode_working_set_bounded_across_60_frames(tmp_path) -> N
         sampling=SamplingSpec(Fraction(0), Fraction(2), 30),
         crop=CropSpec(0, 0, 256, 256),
     )
-    rss: dict[int, int] = {}
-    process = psutil.Process()
+    live: dict[int, int] = {}
 
     def progress(event: ProgressEvent) -> None:
         if event.stage == "render-cut" and event.completed in {10, 60}:
-            rss[event.completed] = process.memory_info().rss
+            live[event.completed] = sum(
+                isinstance(candidate, av.VideoFrame)
+                for candidate in gc.get_objects()
+            )
 
     artifact = render_service(
         source=LocalSourcePort(),
@@ -1241,10 +1254,8 @@ def test_render_keeps_decode_working_set_bounded_across_60_frames(tmp_path) -> N
         ),
     )
 
-    growth = rss[60] - rss[10]
-    assert growth < 4 * 1024 * 1024, (
-        f"decode working set grew by {growth / 1024 / 1024:.2f} MiB"
-    )
+    assert live[60] <= live[10], f"decoded frames accumulated: {live}"
+    assert artifact.ownership_peak <= 3
     assert artifact.manifest.frame_count == 60
     assert artifact.output_path.exists()
 
