@@ -1650,7 +1650,7 @@ def _persist_framed_png(path: Path, image: Image.Image) -> None:
         os.close(descriptor)
         temporary = Path(raw)
         image.save(temporary, format="PNG")
-        with temporary.open("rb") as encoded:
+        with temporary.open("rb+") as encoded:  # Windows _commit needs write
             os.fsync(encoded.fileno())
         os.replace(temporary, path)
         temporary = None

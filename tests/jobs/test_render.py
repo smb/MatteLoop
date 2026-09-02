@@ -2915,3 +2915,26 @@ def _only_durable_workspace(output_directory: Path):
     return FilesystemWorkspacePort().open_promoted(
         output_directory, durable_paths[0].name
     )
+
+
+def test_no_flush_reads_a_file_it_cannot_commit() -> None:
+    # Windows' os.fsync maps to _commit(), which needs a writable descriptor
+    # and fails with EBADF on a read-only one. A read-only handle cost every
+    # Windows render its output with "cannot persist framed PNG: OSError:
+    # [Errno 9] Bad file descriptor", and the same defect had already cost
+    # every WebP encode its own flush.
+    import re
+
+    read_only = re.compile(r"""\.open\(\s*["']rb["']\s*\)\s+as\s+(\w+)""")
+    flushed = re.compile(r"os\.fsync\(\s*(\w+)\.fileno\(\)")
+    offenders: list[str] = []
+    for source in Path("src/matteloop").rglob("*.py"):
+        lines = source.read_text(encoding="utf-8").splitlines()
+        for index, line in enumerate(lines):
+            match = flushed.search(line)
+            if match is None:
+                continue
+            window = "\n".join(lines[max(0, index - 8) : index])
+            if match.group(1) in read_only.findall(window):
+                offenders.append(f"{source}:{index + 1}")
+    assert offenders == []
