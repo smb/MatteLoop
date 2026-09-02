@@ -77,4 +77,4 @@ jobs:
         # whole suite here also surfaces a crash in the Qt render worker and a
         # long tail of POSIX assumptions in the tests themselves; widen this
         # once those are addressed rather than leaving the job permanently red.
-      - run: uv run pytest -q tests/jobs/models tests/core tests/test_resources.py
+      - run: uv run pytest -q tests/jobs tests/core tests/test_resources.py
