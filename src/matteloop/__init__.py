@@ -2,7 +2,7 @@
 
 from PIL import Image
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 # Pillow warns above this value and errors above twice this value. Align the
 # warning boundary with the largest legal MatteLoop canvas without disabling the
