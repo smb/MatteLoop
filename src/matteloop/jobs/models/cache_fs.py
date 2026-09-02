@@ -41,7 +41,9 @@ _WINDOWS_PUBLICATION_DIRECTORY_ACCESS = (
     | 0x00000002  # FILE_ADD_FILE
     | 0x00000004  # FILE_ADD_SUBDIRECTORY
     | 0x00000020  # FILE_TRAVERSE
-    | 0x00000040  # FILE_DELETE_CHILD
+    # No FILE_DELETE_CHILD: it sits outside Modify, which is what an
+    # ordinary output folder grants, and entries are removed through a child
+    # handle opened with DELETE rather than through the parent.
     | 0x00000080  # FILE_READ_ATTRIBUTES
     | 0x00100000  # SYNCHRONIZE
 )

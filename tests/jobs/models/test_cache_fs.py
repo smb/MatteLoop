@@ -1351,6 +1351,44 @@ def test_bound_lstat_matches_os_fstat_identity(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(os.name != "nt", reason="binds against a real Windows ACL")
+def test_publication_binds_a_directory_granting_only_modify(tmp_path: Path) -> None:
+    """Modify is what an ordinary output folder grants; Full is not.
+
+    FILE_DELETE_CHILD sits outside Modify (0x1301BF) and only inside Full
+    Control, and asking for it refused a plain "C:\\Temp" outright. Nothing
+    needs it: entries are removed through a child handle opened with DELETE.
+    """
+    import getpass
+    import subprocess
+
+    from matteloop.jobs.workspace._filesystem import _BoundDirectory
+
+    target = tmp_path / "output"
+    target.mkdir()
+    granted = subprocess.run(
+        [
+            "icacls",
+            str(target),
+            "/inheritance:r",
+            "/grant",
+            f"{getpass.getuser()}:(OI)(CI)(M)",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if granted.returncode != 0:
+        pytest.skip(f"could not restrict the directory: {granted.stderr.strip()}")
+
+    bound = _BoundDirectory._open_windows_publication(target)
+
+    try:
+        assert bound.path == target
+    finally:
+        bound.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="binds against a real Windows ACL")
 def test_binding_a_directory_needs_no_more_than_the_rights_it_uses(
     tmp_path: Path,
 ) -> None:
