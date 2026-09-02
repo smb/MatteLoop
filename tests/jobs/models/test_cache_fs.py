@@ -1333,3 +1333,10 @@ def test_bound_lstat_matches_os_fstat_identity(tmp_path: Path) -> None:
         f"bound.lstat dev/ino {from_api.st_dev}/{from_api.st_ino} != "
         f"os.fstat {from_os.st_dev}/{from_os.st_ino}"
     )
+    # Workspace frame checks compare st_mtime_ns across the same two
+    # sources, so a value rounded through float seconds fails them.
+    assert from_api.st_mtime_ns == from_os.st_mtime_ns, (
+        f"bound.lstat mtime_ns {from_api.st_mtime_ns} != "
+        f"os.fstat {from_os.st_mtime_ns}"
+    )
+    assert from_api.st_size == from_os.st_size

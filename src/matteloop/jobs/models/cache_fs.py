@@ -1422,6 +1422,12 @@ class _CtypesWindowsDirectoryApi:
             file_type = stat.S_IFREG
         size = (int(info.FileSizeHigh) << 32) | int(info.FileSizeLow)
         inode = (int(info.FileIndexHigh) << 32) | int(info.FileIndexLow)
+        access_ns = self._filetime_ns(info.LastAccessTime)
+        write_ns = self._filetime_ns(info.LastWriteTime)
+        creation_ns = self._filetime_ns(info.CreationTime)
+        # The nanosecond fields have to be supplied directly: deriving them
+        # from the float seconds loses precision, and identity checks compare
+        # st_mtime_ns against os.fstat's exact value for the same file.
         return os.stat_result(
             (
                 file_type | 0o600,
@@ -1431,10 +1437,15 @@ class _CtypesWindowsDirectoryApi:
                 0,
                 0,
                 size,
-                self._filetime_seconds(info.LastAccessTime),
-                self._filetime_seconds(info.LastWriteTime),
-                self._filetime_seconds(info.CreationTime),
-            )
+                access_ns // 1_000_000_000,
+                write_ns // 1_000_000_000,
+                creation_ns // 1_000_000_000,
+            ),
+            {
+                "st_atime_ns": access_ns,
+                "st_mtime_ns": write_ns,
+                "st_ctime_ns": creation_ns,
+            },
         )
 
     def _volume_identifier(self, handle: int, fallback: int) -> int:
@@ -1461,10 +1472,10 @@ class _CtypesWindowsDirectoryApi:
         return int(identity.VolumeSerialNumber)
 
     @staticmethod
-    def _filetime_seconds(value: object) -> float:
+    def _filetime_ns(value: object) -> int:
         low = int(getattr(value, "Low"))
         high = int(getattr(value, "High"))
-        return (((high << 32) | low) - 116_444_736_000_000_000) / 10_000_000
+        return (((high << 32) | low) - 116_444_736_000_000_000) * 100
 
     def _require_regular_file_handle(self, handle: int) -> None:
         attributes = self.file_attributes(handle)
