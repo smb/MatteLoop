@@ -25,6 +25,10 @@ jobs:
       - run: uv run mypy src
 
   test:
+    # Named from the matrix entry alone: the generated name would include
+    # every value, so it changes whenever a test path moves and any required
+    # status check referring to it silently stops being satisfied.
+    name: test (${{ matrix.name }})
     runs-on: ubuntu-22.04
     env:
       QT_QPA_PLATFORM: offscreen
