@@ -44,7 +44,7 @@
     "long_functions": 1
   },
   "src/matteloop/jobs/workspace/_filesystem.py": {
-    "lines": 686,
+    "lines": 700,
     "long_functions": 1
   },
   "src/matteloop/jobs/workspace/_manifest.py": {

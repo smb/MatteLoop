@@ -152,11 +152,14 @@ class RenderWorker(QObject):
 
 def _render_error(error: BaseException, job_id: str) -> AppError:
     if isinstance(error, AppError):
+        # exc_info: the message alone says what failed, the traceback says
+        # where, which is what a report from a frozen build needs.
         _LOGGER.error(
             "render job %s failed: %s: %s",
             job_id,
             error.code.value,
             error.technical_detail,
+            exc_info=error,
         )
         return error
     _LOGGER.exception("render job %s raised %s", job_id, type(error).__name__)

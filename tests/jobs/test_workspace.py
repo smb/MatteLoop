@@ -4073,3 +4073,34 @@ def test_windows_lock_never_covers_a_byte_a_reader_needs(tmp_path: Path) -> None
         assert os.lseek(descriptor, 0, os.SEEK_CUR) == 3
     finally:
         os.close(descriptor)
+
+
+def test_bind_failure_names_the_directory_not_only_its_component(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The native layer raises with the component it asked for, so a refusal
+    # read as "cache entry access denied: 'Temp'" -- which cannot be told
+    # apart from a Temp inside a profile, and left a real report unusable.
+    target = (tmp_path / "output").absolute()
+
+    class RefusingApi:
+        def open_anchor(self, _path: Path, **_kwargs: int) -> int:
+            return 41
+
+        def open_child_directory(
+            self, _parent: int, name: str, **_kwargs: int | bool
+        ) -> int:
+            raise PermissionError(5, "cache entry access denied", name)
+
+        def close_handle(self, _handle: int) -> None:
+            return None
+
+    from matteloop.jobs.models import cache_fs
+
+    monkeypatch.setattr(cache_fs, "_CtypesWindowsDirectoryApi", RefusingApi)
+
+    with pytest.raises(PermissionError) as raised:
+        workspace_module._BoundDirectory._open_windows(target)
+
+    assert raised.value.filename == str(target)
+    assert "cache entry access denied" in str(raised.value)
