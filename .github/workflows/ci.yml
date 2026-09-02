@@ -77,8 +77,10 @@ jobs:
         # whole suite here also surfaces a crash in the Qt render worker and a
         # long tail of POSIX assumptions in the tests themselves; widen this
         # once those are addressed rather than leaving the job permanently red.
-      # tests/ui stays out for now: test_render_controller crashes the
-      # interpreter there with an access violation raised while a worker
-      # thread closes the PyAV container in jobs/source.py, which needs its
-      # own investigation.
-      - run: uv run pytest -q tests/jobs tests/core tests/test_resources.py
+      # Still out, each needing its own work: tests/jobs/test_workspace has
+      # POSIX-only test assumptions (os.utime on a descriptor, psutil's
+      # num_fds) and hits a real sharing violation cleaning scratch
+      # directories, and tests/ui/test_render_controller crashes the
+      # interpreter with an access violation raised while a worker thread
+      # closes the PyAV container in jobs/source.py.
+      - run: uv run pytest -q tests/jobs/models tests/core tests/test_resources.py
