@@ -4000,3 +4000,37 @@ def test_frame_copy_timestamps_are_set_through_the_descriptor(tmp_path: Path) ->
     written = target.stat().st_mtime_ns
     # Windows stores 100-nanosecond ticks, so allow that much rounding.
     assert abs(written - 1_400_000_000_500_000_000) < 1_000
+
+
+def test_windows_lock_never_covers_a_byte_a_reader_needs(tmp_path: Path) -> None:
+    # Windows byte-range locks are mandatory: a lock on byte 0 makes every
+    # other handle fail reading the file with ERROR_LOCK_VIOLATION, which
+    # surfaced as "output location is not writable" on 37 Windows tests and
+    # as a render that produced no file.
+    class FakeMsvcrt:
+        LK_NBLCK = 3
+
+        def __init__(self) -> None:
+            self.locked_offsets: list[int] = []
+
+        def locking(self, descriptor: int, operation: int, size: int) -> None:
+            self.locked_offsets.append(os.lseek(descriptor, 0, os.SEEK_CUR))
+
+    lock_path = tmp_path / "output.transaction.lock"
+    lock_path.write_bytes(b"payload")
+    descriptor = os.open(lock_path, os.O_RDWR)
+    windows = FakeMsvcrt()
+    adapter = workspace_module._SystemAdvisoryFileLock(
+        platform="windows", windows_module=windows
+    )
+    try:
+        os.lseek(descriptor, 3, os.SEEK_SET)
+
+        assert adapter.acquire_nonblocking(descriptor) is True
+
+        assert windows.locked_offsets == [workspace_module._WINDOWS_LOCK_OFFSET]
+        assert min(windows.locked_offsets) > lock_path.stat().st_size
+        # Callers write from where they left off, so the position must survive.
+        assert os.lseek(descriptor, 0, os.SEEK_CUR) == 3
+    finally:
+        os.close(descriptor)
