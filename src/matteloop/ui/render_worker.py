@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 from typing import Protocol
@@ -19,6 +20,8 @@ from matteloop.core.state import (
 from matteloop.jobs.context import JobContext, JobTerminalState, ProgressEvent
 from matteloop.jobs.render import RenderArtifact
 from matteloop.jobs.workspace import CutWorkspace
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class RenderRuntime(Protocol):
@@ -149,7 +152,14 @@ class RenderWorker(QObject):
 
 def _render_error(error: BaseException, job_id: str) -> AppError:
     if isinstance(error, AppError):
+        _LOGGER.error(
+            "render job %s failed: %s: %s",
+            job_id,
+            error.code.value,
+            error.technical_detail,
+        )
         return error
+    _LOGGER.exception("render job %s raised %s", job_id, type(error).__name__)
     return AppError(
         ErrorCode.INVALID_RENDER_REQUEST,
         "render",
