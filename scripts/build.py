@@ -7,6 +7,7 @@ import argparse
 import configparser
 import contextlib
 import importlib.metadata
+import importlib.util
 import platform as platform_module
 import shlex
 import shutil
@@ -236,8 +237,9 @@ def prepare_temporary_spec(
     av_directory: Path,
     *,
     os_name: str = sys.platform,
+    onnxruntime_package_directory: Path | None = None,
 ) -> None:
-    """Select the platform icon and add raw PyAV files to a temporary spec."""
+    """Select the platform icon and add native wheel files to a temporary spec."""
     try:
         icon = _PLATFORM_ICONS[os_name]
     except KeyError as error:
@@ -269,11 +271,30 @@ def prepare_temporary_spec(
     )
     if not wheel_file_args:
         raise ValueError(f"no PyAV wheel files found in {av_directory}")
+    directml_file_args = ""
+    if os_name == "win32":
+        package_directory = (
+            onnxruntime_package_directory or _onnxruntime_package_directory()
+        )
+        directml = (package_directory / "capi" / "DirectML.dll").resolve()
+        if not directml.is_file():
+            raise ValueError(
+                "Windows packaging requires onnxruntime/capi/DirectML.dll; "
+                f"file not found at {directml}"
+            )
+        directml_file_args = (
+            f"\t--include-data-files={directml.as_posix()}"
+            "=onnxruntime/capi/DirectML.dll\n"
+        )
     data_dir_args = "".join(
         f"\t--include-data-dir={directory.as_posix()}={directory.name}\n"
         for directory in directories
     )
-    content = content.replace(marker, f"{marker}{data_dir_args}{wheel_file_args}\n", 1)
+    content = content.replace(
+        marker,
+        f"{marker}{data_dir_args}{wheel_file_args}\n{directml_file_args}",
+        1,
+    )
     destination_spec.write_text(content, encoding="utf-8")
 
 
@@ -683,6 +704,24 @@ def _pinned_distributions(os_name: str) -> dict[str, str]:
 def _onnxruntime_capi_directory() -> Path:
     distribution = importlib.metadata.distribution("onnxruntime")
     return Path(distribution.locate_file("onnxruntime/capi"))
+
+
+def _onnxruntime_package_directory() -> Path:
+    package_spec = importlib.util.find_spec("onnxruntime")
+    if package_spec is not None and package_spec.submodule_search_locations:
+        return Path(next(iter(package_spec.submodule_search_locations)))
+
+    for distribution_name in ("onnxruntime-directml", "onnxruntime"):
+        try:
+            distribution = importlib.metadata.distribution(distribution_name)
+        except importlib.metadata.PackageNotFoundError:
+            continue
+        return Path(distribution.locate_file("onnxruntime"))
+
+    raise ValueError(
+        "could not locate the installed onnxruntime package required for "
+        "Windows DirectML packaging"
+    )
 
 
 def _create_onnxruntime_dylib_alias(directory: Path) -> Path | None:

@@ -74,6 +74,14 @@ def _wheel(path: Path, *, nested_av: bool = False, native: bool = True) -> Path:
     return path
 
 
+def _fake_onnxruntime_package(tmp_path: Path) -> Path:
+    package = tmp_path / "site-packages" / "onnxruntime"
+    directml = package / "capi" / "DirectML.dll"
+    directml.parent.mkdir(parents=True)
+    directml.write_bytes(b"directml")
+    return package
+
+
 def _artifacts(root: Path, *, identity: str = "identity") -> MediaStackArtifacts:
     wheel = _wheel(root / "av-16.1.0.whl")
     provenance = wheel.with_name(f"{wheel.name}.provenance.json")
@@ -378,6 +386,69 @@ def test_native_build_adds_raw_pyav_wheel_only_to_temporary_spec(
     assert "--include-data-dir" not in source.read_text(encoding="utf-8")
 
 
+def test_native_build_includes_directml_only_in_windows_temporary_spec(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.spec"
+    windows_destination = tmp_path / "windows.spec"
+    macos_destination = tmp_path / "macos.spec"
+    source.write_text("extra_args =\n\t--nofollow-import-to=av\n", encoding="utf-8")
+    av_directory = tmp_path / "av"
+    av_directory.mkdir()
+    (av_directory / "__init__.py").write_text("", encoding="utf-8")
+    onnxruntime_directory = tmp_path / "site-packages" / "onnxruntime"
+    directml = onnxruntime_directory / "capi" / "DirectML.dll"
+    directml.parent.mkdir(parents=True)
+    directml.write_bytes(b"directml")
+
+    prepare_temporary_spec(
+        source,
+        windows_destination,
+        av_directory,
+        os_name="win32",
+        onnxruntime_package_directory=onnxruntime_directory,
+    )
+    prepare_temporary_spec(
+        source,
+        macos_destination,
+        av_directory,
+        os_name="darwin",
+        onnxruntime_package_directory=onnxruntime_directory,
+    )
+
+    windows_args = windows_destination.read_text(encoding="utf-8")
+    macos_args = macos_destination.read_text(encoding="utf-8")
+    expected = (
+        f"--include-data-files={directml.as_posix()}=onnxruntime/capi/DirectML.dll"
+    )
+    assert expected in windows_args
+    assert expected not in macos_args
+
+
+def test_native_build_reports_missing_windows_directml_file(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.spec"
+    destination = tmp_path / "temporary.spec"
+    source.write_text("extra_args =\n\t--nofollow-import-to=av\n", encoding="utf-8")
+    av_directory = tmp_path / "av"
+    av_directory.mkdir()
+    (av_directory / "__init__.py").write_text("", encoding="utf-8")
+    onnxruntime_directory = tmp_path / "onnxruntime"
+
+    with pytest.raises(
+        ValueError,
+        match="Windows packaging requires onnxruntime/capi/DirectML.dll",
+    ):
+        prepare_temporary_spec(
+            source,
+            destination,
+            av_directory,
+            os_name="win32",
+            onnxruntime_package_directory=onnxruntime_directory,
+        )
+
+
 def test_native_build_pyav_spec_paths_never_contain_backslashes(
     tmp_path: Path,
 ) -> None:
@@ -390,7 +461,13 @@ def test_native_build_pyav_spec_paths_never_contain_backslashes(
     (av_directory / "filter").mkdir()
     (av_directory / "filter" / "link.cpython-313-win_amd64.pyd").write_bytes(b"ext")
 
-    prepare_temporary_spec(source, destination, av_directory, os_name="win32")
+    prepare_temporary_spec(
+        source,
+        destination,
+        av_directory,
+        os_name="win32",
+        onnxruntime_package_directory=_fake_onnxruntime_package(tmp_path),
+    )
 
     for line in destination.read_text(encoding="utf-8").splitlines():
         if line.startswith("\t--include-data-"):
@@ -411,7 +488,13 @@ def test_native_build_selects_the_windows_icon_in_temporary_spec(
     av_directory.mkdir()
     (av_directory / "__init__.py").write_text("", encoding="utf-8")
 
-    prepare_temporary_spec(source, destination, av_directory, os_name="win32")
+    prepare_temporary_spec(
+        source,
+        destination,
+        av_directory,
+        os_name="win32",
+        onnxruntime_package_directory=_fake_onnxruntime_package(tmp_path),
+    )
 
     temporary = destination.read_text(encoding="utf-8")
     assert "icon = assets/branding/matteloop/derived/matteloop.ico" in temporary
@@ -1051,7 +1134,13 @@ def test_native_build_bundles_the_delvewheel_sibling_dll_directory(
     dll.write_bytes(b"dll")
     (libs / ".load-order-av-16.1.0").write_text("avcodec\n", encoding="utf-8")
 
-    prepare_temporary_spec(source, destination, av_directory, os_name="win32")
+    prepare_temporary_spec(
+        source,
+        destination,
+        av_directory,
+        os_name="win32",
+        onnxruntime_package_directory=_fake_onnxruntime_package(tmp_path),
+    )
 
     temporary = destination.read_text(encoding="utf-8")
     assert f"--include-data-dir={libs.as_posix()}=av.libs" in temporary
