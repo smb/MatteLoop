@@ -1391,6 +1391,59 @@ def _pixel_format_is_high_depth(name: str) -> bool:
     return any(token in lowered for token in ("p9", "p10", "p12", "p14", "p16"))
 
 
+# libswscale converts a whole SIMD block at a time and writes the tail of the
+# last block past the end of the rgba destination PyAV allocates for it, which
+# ends exactly with the final row. Widening the source so the destination width
+# is block-aligned removes the tail entirely; 64 is comfortably above any block
+# width in current builds, and a frame already that wide is left alone.
+_SWSCALE_WIDTH_ALIGNMENT = 64
+
+
+def _width_padded_yuv_frame(frame: Any) -> tuple[Any, bool]:
+    """Copy a YUV frame into one whose width is block-aligned for libswscale.
+
+    Valgrind on x86-64 reports the write landing 0 bytes after the block
+    av_image_alloc returned. Padding the height cannot help: the allocation
+    ends with the last row whatever the height is, so extra rows move that end
+    rather than padding it. Width is the lever -- a 448-wide clip is clean
+    where 18, 40, 200 and 440 all overrun -- and the caller crops the added
+    columns off again.
+
+    Returns the original frame unpadded when the copy cannot be made exactly,
+    which trades the guard away rather than failing a decode the user cannot
+    otherwise complete.
+    """
+    if frame.width % _SWSCALE_WIDTH_ALIGNMENT == 0:
+        return frame, False
+    blocks = -(-frame.width // _SWSCALE_WIDTH_ALIGNMENT)
+    padded_width = blocks * _SWSCALE_WIDTH_ALIGNMENT
+    try:
+        padded = av.VideoFrame(padded_width, frame.height, frame.format.name)
+        if len(padded.planes) != len(frame.planes):
+            return frame, False
+        for destination, source in zip(padded.planes, frame.planes):
+            if not source.line_size or not destination.line_size:
+                return frame, False
+            rows = source.buffer_size // source.line_size
+            if rows * destination.line_size > destination.buffer_size:
+                return frame, False
+            # Copy row contents, not whole source rows: a decoder pads its
+            # stride well past the width, and on x86-64 that padding is wider
+            # than the destination row. Requiring the strides to match instead
+            # silently skipped the padding on exactly the frames that need it.
+            span = min(source.line_size, destination.line_size)
+            source_bytes = bytes(source)
+            buffer = bytearray(destination.buffer_size)
+            for row in range(rows):
+                read = row * source.line_size
+                write = row * destination.line_size
+                buffer[write : write + span] = source_bytes[read : read + span]
+            destination.update(bytes(buffer))
+    except Exception:
+        return frame, False
+    return padded, True
+
+
 def _normalized_image(
     frame: Any,
     stream: Any,
@@ -1405,6 +1458,7 @@ def _normalized_image(
     try:
         profile = _color_profile(stream, frame)
         _validate_frame_color(stream, frame)
+        padded = False
         if profile.rgb_input:
             converted = (
                 frame.reformat(format="rgba") if hasattr(frame, "reformat") else frame
@@ -1415,8 +1469,9 @@ def _normalized_image(
                 5: Colorspace.ITU601,
                 6: Colorspace.ITU601,
             }[profile.matrix]
+            reformat_frame, padded = _width_padded_yuv_frame(frame)
             converted = VideoReformatter().reformat(
-                frame,
+                reformat_frame,
                 format="rgba",
                 src_colorspace=colorspace,
                 dst_colorspace=Colorspace.ITU709,
@@ -1430,6 +1485,10 @@ def _normalized_image(
             converted_owner = rgba_ownership_tracker.track_nonweak(converted)
             converted = converted_owner.value
         pillow_intermediate = converted.to_image()
+        if padded:
+            cropped = pillow_intermediate.crop((0, 0, frame.width, frame.height))
+            pillow_intermediate.close()
+            pillow_intermediate = cropped
         if rgba_ownership_tracker is not None:
             rgba_ownership_tracker.register(
                 pillow_intermediate,
