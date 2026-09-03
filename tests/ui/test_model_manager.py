@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from threading import get_ident
 
@@ -32,10 +33,14 @@ class FakeModelRemovalService:
         self.removed: list[str] = []
         self.fetched: list[str] = []
         self.thread_ids: list[int] = []
+        self.obsolete_roots: tuple[Path, ...] = ()
+        self.obsolete_calls = 0
+        self.operations: list[str] = []
 
     def fetch(self, model_id: str, progress=None) -> Path:
         self.thread_ids.append(get_ident())
         self.fetched.append(model_id)
+        self.operations.append(f"fetch:{model_id}")
         if progress is not None:
             progress(2_000_000, 8_000_000)
         target = self.targets.get(model_id)
@@ -43,6 +48,17 @@ class FakeModelRemovalService:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(b"downloaded-weight")
         return target
+
+    def remove_obsolete_versions(self) -> int:
+        self.thread_ids.append(get_ident())
+        self.obsolete_calls += 1
+        self.operations.append("remove-obsolete")
+        removed = 0
+        for root in self.obsolete_roots:
+            if root.is_dir():
+                shutil.rmtree(root)
+                removed += 1
+        return removed
 
     def remove(self, model_id: str) -> bool:
         self.thread_ids.append(get_ident())
@@ -58,6 +74,15 @@ def _model_path(root: Path, model_id: str) -> Path:
     artifact = catalog.get(model_id).artifact
     assert artifact is not None
     return root / catalog.rembg_version / model_id / artifact.runtime_filename
+
+
+def _outdated_model_path(root: Path, model_id: str) -> Path:
+    catalog = ModelCatalog.load_resource()
+    artifact = catalog.get(model_id).artifact
+    assert artifact is not None
+    return (
+        root / catalog.obsolete_rembg_versions[0] / model_id / artifact.runtime_filename
+    )
 
 
 def test_model_manager_lists_cache_metadata_with_shared_aligned_rows(
@@ -135,19 +160,19 @@ def test_model_manager_removes_only_confirmed_selected_weight_in_background(
     qtbot.waitUntil(lambda: manager.removed == ["u2netp"], timeout=5000)
     assert manager.thread_ids and manager.thread_ids[0] != get_ident()
     qtbot.waitUntil(
-        lambda: controller.dialog.entries[
-            next(
-                index
-                for index, entry in enumerate(controller.dialog.entries)
-                if entry.model_id == "u2netp"
-            )
-        ].cached
-        is False,
+        lambda: (
+            controller.dialog.entries[
+                next(
+                    index
+                    for index, entry in enumerate(controller.dialog.entries)
+                    if entry.model_id == "u2netp"
+                )
+            ].cached
+            is False
+        ),
         timeout=5000,
     )
-    assert reported == [
-        "Removed U²-Net P's downloaded weight.\nFreed 13.0 B."
-    ]
+    assert reported == ["Removed U²-Net P's downloaded weight.\nFreed 13.0 B."]
     assert not target.exists()
     assert controller._store.state.model_available is True
     controller.close()
@@ -317,8 +342,10 @@ def test_model_manager_downloads_a_missing_weight_in_the_background(
     # Waits for the worker thread to clear the dialog's busy state too, which
     # is what re-enables the buttons.
     qtbot.waitUntil(
-        lambda: controller.dialog.entries[index].cached
-        and controller.dialog.remove_button.isEnabled(),
+        lambda: (
+            controller.dialog.entries[index].cached
+            and controller.dialog.remove_button.isEnabled()
+        ),
         timeout=5000,
     )
     assert not controller.dialog.download_button.isEnabled()
@@ -363,5 +390,153 @@ def test_model_manager_refuses_to_download_while_a_job_runs(
 
     controller.dialog.download_button.click()
 
+    assert manager.fetched == []
+    controller.close()
+
+
+def test_model_manager_lists_an_outdated_weight_with_size_and_rembg_version(
+    tmp_path: Path, qtbot
+) -> None:
+    target = _outdated_model_path(tmp_path, "u2netp")
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"old-weight")
+    dialog = ModelManagerDialog(
+        ModelCatalog.load_resource(),
+        tmp_path,
+        active_model=lambda: "u2netp",
+    )
+    qtbot.addWidget(dialog)
+
+    dialog.refresh()
+
+    index = next(
+        index
+        for index, entry in enumerate(dialog.entries)
+        if entry.model_id == "u2netp"
+    )
+    entry = dialog.entries[index]
+    row = dialog.model_list.item(index).data(ROW_DATA_ROLE)
+    assert entry.cached is False
+    assert entry.outdated_size_bytes == len(b"old-weight")
+    assert row.glyph == "⟳"
+    assert row.columns[2].text == "outdated weight"
+    assert "rembg 2.0.72" in row.accessible_description
+    assert dialog.outdated_notice_label.text() == (
+        "1 outdated weight(s) from rembg 2.0.72 use 10.0 B on disk and cannot "
+        "be used by this version."
+    )
+    assert dialog.redownload_outdated_button.isHidden() is False
+    assert dialog.delete_outdated_button.isHidden() is False
+
+
+def test_model_manager_deletes_outdated_directory_without_touching_other_cache(
+    tmp_path: Path, monkeypatch, qtbot
+) -> None:
+    outdated = _outdated_model_path(tmp_path, "u2netp")
+    outdated.parent.mkdir(parents=True)
+    outdated.write_bytes(b"old-weight")
+    unrelated = tmp_path / "not-obsolete" / "keep.txt"
+    unrelated.parent.mkdir()
+    unrelated.write_bytes(b"keep")
+    manager = FakeModelRemovalService()
+    manager.obsolete_roots = (tmp_path / "2.0.72",)
+    controller = ModelManagerController(
+        ReducerStore(AppState()),
+        catalog=ModelCatalog.load_resource(),
+        cache_root=tmp_path,
+        manager=manager,
+    )
+    qtbot.addWidget(controller.dialog)
+    controller.open()
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+    )
+
+    controller.dialog.delete_outdated_button.click()
+
+    qtbot.waitUntil(lambda: manager.obsolete_calls == 1, timeout=5000)
+    qtbot.waitUntil(lambda: controller._remove_thread is None, timeout=5000)
+    assert not outdated.exists()
+    assert unrelated.read_bytes() == b"keep"
+    controller.close()
+
+
+def test_model_manager_redownloads_outdated_models_in_catalog_order(
+    tmp_path: Path, qtbot
+) -> None:
+    outdated_roots = (tmp_path / "2.0.72",)
+    outdated_ids = ("u2net", "u2netp")
+    for model_id in outdated_ids:
+        target = _outdated_model_path(tmp_path, model_id)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"old-weight")
+    manager = FakeModelRemovalService(
+        targets={model_id: _model_path(tmp_path, model_id) for model_id in outdated_ids}
+    )
+    manager.obsolete_roots = outdated_roots
+    controller = ModelManagerController(
+        ReducerStore(AppState()),
+        catalog=ModelCatalog.load_resource(),
+        cache_root=tmp_path,
+        manager=manager,
+    )
+    qtbot.addWidget(controller.dialog)
+    controller.open()
+
+    controller.dialog.redownload_outdated_button.click()
+
+    qtbot.waitUntil(lambda: manager.fetched == list(outdated_ids), timeout=5000)
+    qtbot.waitUntil(lambda: controller._remove_thread is None, timeout=5000)
+    assert manager.operations == [
+        "remove-obsolete",
+        "fetch:u2net",
+        "fetch:u2netp",
+    ]
+    assert not outdated_roots[0].exists()
+    controller.close()
+
+
+def test_model_manager_refuses_both_outdated_actions_while_a_job_runs(
+    tmp_path: Path, qtbot
+) -> None:
+    target = _outdated_model_path(tmp_path, "u2netp")
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"old-weight")
+    manager = FakeModelRemovalService()
+    running = ReducerStore(
+        AppState(
+            source=SourceState.READY,
+            source_id="source-id",
+            source_value=object(),
+            job_request_id="request-id",
+            job=ActiveJob(
+                "job-id",
+                JobKind.RENDER,
+                JobState.RENDERING,
+                "Encode",
+                FocusTarget.NONE,
+            ),
+        )
+    )
+    controller = ModelManagerController(
+        running,
+        catalog=ModelCatalog.load_resource(),
+        cache_root=tmp_path,
+        manager=manager,
+    )
+    qtbot.addWidget(controller.dialog)
+    controller.open()
+
+    controller.dialog.delete_outdated_button.click()
+    assert controller.dialog._message.text() == (
+        "Cannot remove a model while a job is running."
+    )
+    controller.dialog.redownload_outdated_button.click()
+    assert controller.dialog._message.text() == (
+        "Cannot download a model while a job is running."
+    )
+    assert manager.obsolete_calls == 0
     assert manager.fetched == []
     controller.close()

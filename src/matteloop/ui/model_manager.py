@@ -49,6 +49,8 @@ class ModelRemovalService(Protocol):
 
     def remove(self, model_id: str) -> bool: ...
 
+    def remove_obsolete_versions(self) -> int: ...
+
     def fetch(self, model_id: str, progress: object = None) -> object: ...
 
 
@@ -62,6 +64,8 @@ class ModelEntry:
     artifact_path: Path
     disk_size_bytes: int | None
     active: bool
+    outdated_size_bytes: int | None = None
+    outdated_rembg_version: str | None = None
 
     @property
     def cached(self) -> bool:
@@ -70,11 +74,25 @@ class ModelEntry:
 
 def present_model(entry: ModelEntry) -> AlignedRow:
     """Present one model with aligned metadata and spoken status words."""
-    cache_status = "cached locally" if entry.cached else "not cached"
+    if entry.cached:
+        cache_status = "cached locally"
+        cache_detail = cache_status
+        glyph = "◆" if entry.active else "✓"
+    elif entry.outdated_size_bytes is not None:
+        cache_status = "outdated weight"
+        version = entry.outdated_rembg_version or "obsolete rembg"
+        cache_detail = (
+            f"{cache_status} from rembg {version}; "
+            f"{format_source_file_size(entry.outdated_size_bytes)} on disk"
+        )
+        glyph = "⟳"
+    else:
+        cache_status = "not cached"
+        cache_detail = cache_status
+        glyph = "◆" if entry.active else "↓"
     active_status = "active model" if entry.active else "not active"
     size = format_source_file_size(entry.download_size_bytes)
-    detail = f"{entry.display_name}; {size}; {cache_status}; {active_status}"
-    glyph = "◆" if entry.active else ("✓" if entry.cached else "↓")
+    detail = f"{entry.display_name}; {size}; {cache_detail}; {active_status}"
     return AlignedRow(
         glyph,
         "cached" if entry.cached else "uncached",
@@ -93,6 +111,8 @@ class ModelManagerDialog(QDialog):
 
     download_requested = Signal(object)
     remove_requested = Signal(object)
+    redownload_outdated_requested = Signal()
+    delete_outdated_requested = Signal()
     show_cache_requested = Signal()
 
     def __init__(
@@ -150,6 +170,18 @@ class ModelManagerDialog(QDialog):
         self.remove_button = QPushButton("Remove downloaded weight")
         self.remove_button.setObjectName("remove_model")
         self.remove_button.setAccessibleName("Remove selected model weight")
+        self.outdated_notice_label = QLabel()
+        self.outdated_notice_label.setObjectName("outdated_model_notice")
+        self.outdated_notice_label.setWordWrap(True)
+        self.outdated_notice_label.setVisible(False)
+        self.redownload_outdated_button = QPushButton("Re-download outdated")
+        self.redownload_outdated_button.setObjectName("redownload_outdated")
+        self.redownload_outdated_button.setAccessibleName(
+            "Re-download outdated model weights"
+        )
+        self.delete_outdated_button = QPushButton("Delete outdated")
+        self.delete_outdated_button.setObjectName("delete_outdated")
+        self.delete_outdated_button.setAccessibleName("Delete outdated model weights")
         self.show_cache_button = QPushButton("Show cache location")
         self.show_cache_button.setObjectName("show_model_cache")
         self.show_cache_button.setAccessibleName("Show model cache location")
@@ -163,9 +195,12 @@ class ModelManagerDialog(QDialog):
         layout.addWidget(self.total_size_label)
         layout.addWidget(self.cache_location_label)
         layout.addWidget(self.model_list, 1)
+        layout.addWidget(self.outdated_notice_label)
         actions = QHBoxLayout()
         actions.addWidget(self.download_button)
         actions.addWidget(self.remove_button)
+        actions.addWidget(self.redownload_outdated_button)
+        actions.addWidget(self.delete_outdated_button)
         actions.addWidget(self.show_cache_button)
         actions.addStretch(1)
         actions.addWidget(self.close_button)
@@ -177,6 +212,10 @@ class ModelManagerDialog(QDialog):
         )
         self.download_button.clicked.connect(self._download_selected)
         self.remove_button.clicked.connect(self._remove_selected)
+        self.redownload_outdated_button.clicked.connect(
+            self.redownload_outdated_requested.emit
+        )
+        self.delete_outdated_button.clicked.connect(self.delete_outdated_requested.emit)
         self.show_cache_button.clicked.connect(self.show_cache_requested.emit)
         self.close_button.clicked.connect(self.close)
 
@@ -189,6 +228,12 @@ class ModelManagerDialog(QDialog):
         return self._entries
 
     @property
+    def outdated_entries(self) -> tuple[ModelEntry, ...]:
+        return tuple(
+            entry for entry in self._entries if entry.outdated_size_bytes is not None
+        )
+
+    @property
     def selected_entry(self) -> ModelEntry | None:
         item = self.model_list.currentItem()
         if item is None:
@@ -196,9 +241,7 @@ class ModelManagerDialog(QDialog):
         value = item.data(MODEL_ENTRY_ROLE)
         return value if isinstance(value, ModelEntry) else None
 
-    def set_removal_guard(
-        self, guard: Callable[[ModelEntry], str | None]
-    ) -> None:
+    def set_removal_guard(self, guard: Callable[[ModelEntry], str | None]) -> None:
         self._removal_guard = guard
         self._update_actions()
 
@@ -250,7 +293,9 @@ class ModelManagerDialog(QDialog):
         if self.model_list.currentItem() is None and self.model_list.count():
             self.model_list.setCurrentRow(0)
         total = sum(
-            entry.disk_size_bytes or 0
+            entry.disk_size_bytes
+            if entry.disk_size_bytes is not None
+            else entry.outdated_size_bytes or 0
             for entry in self._entries
         )
         self.total_size_label.setText(
@@ -259,19 +304,35 @@ class ModelManagerDialog(QDialog):
         self.total_size_label.setAccessibleDescription(
             f"Total on disk: {format_source_file_size(total)}"
         )
-        self.set_message(
-            f"{len(self._entries)} V1 model(s); cache: {self._cache_root}"
-        )
+        self.set_message(f"{len(self._entries)} V1 model(s); cache: {self._cache_root}")
+        self._update_outdated_notice(self.outdated_entries)
         self._update_actions()
+
+    def _update_outdated_notice(self, outdated: tuple[ModelEntry, ...]) -> None:
+        if not outdated:
+            self.outdated_notice_label.clear()
+            self.outdated_notice_label.setVisible(False)
+            return
+        total = sum(entry.outdated_size_bytes or 0 for entry in outdated)
+        versions = ", ".join(
+            dict.fromkeys(
+                entry.outdated_rembg_version
+                for entry in outdated
+                if entry.outdated_rembg_version is not None
+            )
+        )
+        self.outdated_notice_label.setText(
+            f"{len(outdated)} outdated weight(s) from rembg {versions} use "
+            f"{format_source_file_size(total)} on disk and cannot be used by "
+            "this version."
+        )
+        self.outdated_notice_label.setVisible(True)
 
     def _update_actions(self) -> None:
         entry = self.selected_entry
         blocked = self._removal_guard(entry) if entry is not None else None
         enabled = (
-            not self._busy
-            and entry is not None
-            and entry.cached
-            and blocked is None
+            not self._busy and entry is not None and entry.cached and blocked is None
         )
         self.remove_button.setEnabled(enabled)
         if blocked is not None:
@@ -288,6 +349,11 @@ class ModelManagerDialog(QDialog):
         self.download_button.setToolTip(
             "Download the selected weight now instead of waiting for a preview."
         )
+        has_outdated = bool(self.outdated_entries)
+        self.redownload_outdated_button.setVisible(has_outdated)
+        self.delete_outdated_button.setVisible(has_outdated)
+        self.redownload_outdated_button.setEnabled(not self._busy and has_outdated)
+        self.delete_outdated_button.setEnabled(not self._busy and has_outdated)
 
     def _download_selected(self) -> None:
         entry = self.selected_entry
@@ -346,6 +412,25 @@ class _ModelDownloadWorker(QObject):
         self.progressed.emit(completed, total)
 
 
+class _ObsoleteRemovalWorker(QObject):
+    removed = Signal(int)
+    failed = Signal(object)
+    finished = Signal()
+
+    def __init__(self, manager: ModelRemovalService) -> None:
+        super().__init__()
+        self._manager = manager
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self.removed.emit(self._manager.remove_obsolete_versions())
+        except Exception as error:
+            self.failed.emit(error)
+        finally:
+            self.finished.emit()
+
+
 class ModelManagerController(QObject):
     """Own model-manager actions while keeping widgets on the GUI thread."""
 
@@ -362,9 +447,7 @@ class ModelManagerController(QObject):
         self._store = store
         self._manager = manager
         active_model = (
-            manager_active_id
-            if manager is None
-            else lambda: manager.active_id
+            manager_active_id if manager is None else lambda: manager.active_id
         )
         self.dialog = ModelManagerDialog(
             catalog,
@@ -375,10 +458,20 @@ class ModelManagerController(QObject):
         self.dialog.set_removal_guard(self._removal_block_reason)
         self.dialog.download_requested.connect(self._download_requested)
         self.dialog.remove_requested.connect(self._remove_requested)
+        self.dialog.redownload_outdated_requested.connect(
+            self._redownload_outdated_requested
+        )
+        self.dialog.delete_outdated_requested.connect(self._delete_outdated_requested)
         self.dialog.show_cache_requested.connect(self._show_cache)
         self._remove_thread: QThread | None = None
-        self._remove_worker: _ModelRemovalWorker | _ModelDownloadWorker | None = None
+        self._remove_worker: (
+            _ModelRemovalWorker | _ModelDownloadWorker | _ObsoleteRemovalWorker | None
+        ) = None
         self._removal_entry: ModelEntry | None = None
+        self._pending_outdated_ids: list[str] = []
+        self._outdated_entries: dict[str, ModelEntry] = {}
+        self._outdated_action: str | None = None
+        self._start_outdated_after_thread = False
 
     def set_dialog_parent(self, parent: QWidget) -> None:
         self.dialog.setParent(parent, Qt.WindowType.Dialog)
@@ -388,12 +481,19 @@ class ModelManagerController(QObject):
         self.dialog.open()
 
     def close(self) -> None:
+        self._clear_outdated_state()
         thread = self._remove_thread
         if thread is not None:
             thread.quit()
             thread.wait(5000)
             self._remove_thread = None
         self.dialog.close()
+
+    def _clear_outdated_state(self) -> None:
+        self._pending_outdated_ids.clear()
+        self._outdated_entries.clear()
+        self._outdated_action = None
+        self._start_outdated_after_thread = False
 
     def _removal_block_reason(self, entry: ModelEntry) -> str | None:
         if self._store.state.job.phase is not JobState.IDLE:
@@ -432,6 +532,65 @@ class ModelManagerController(QObject):
         thread.started.connect(worker.run)
         thread.start()
 
+    def _delete_outdated_requested(self) -> None:
+        manager = self._manager
+        entries = self.dialog.outdated_entries
+        if not entries:
+            return
+        if self._store.state.job.phase is not JobState.IDLE:
+            self.dialog.set_message("Cannot remove a model while a job is running.")
+            return
+        if manager is None:
+            self.dialog.set_message("Model removal is unavailable in this runtime.")
+            return
+        total = sum(entry.outdated_size_bytes or 0 for entry in entries)
+        answer = QMessageBox.question(
+            self.dialog,
+            "Delete outdated model weights?",
+            f"Delete {len(entries)} outdated model weight(s)?\n"
+            f"This frees {format_source_file_size(total)}.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer is not QMessageBox.StandardButton.Yes:
+            return
+        self._outdated_action = "delete"
+        self._start_obsolete_removal(manager)
+
+    def _redownload_outdated_requested(self) -> None:
+        manager = self._manager
+        entries = self.dialog.outdated_entries
+        if not entries:
+            return
+        if self._store.state.job.phase is not JobState.IDLE:
+            self.dialog.set_message("Cannot download a model while a job is running.")
+            return
+        if manager is None:
+            self.dialog.set_message("Model removal is unavailable in this runtime.")
+            return
+        self._outdated_action = "redownload"
+        self._pending_outdated_ids = [entry.model_id for entry in entries]
+        self._outdated_entries = {entry.model_id: entry for entry in entries}
+        self._start_obsolete_removal(manager)
+
+    def _start_obsolete_removal(self, manager: ModelRemovalService) -> None:
+        worker = _ObsoleteRemovalWorker(manager)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        worker.removed.connect(self._obsolete_removal_succeeded)
+        worker.failed.connect(self._obsolete_removal_failed)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._removal_thread_finished)
+        thread.finished.connect(thread.deleteLater)
+        self._remove_thread = thread
+        self._remove_worker = worker
+        self._removal_entry = None
+        self.dialog.set_busy(True)
+        self.dialog.set_message("Removing outdated model weights…")
+        thread.started.connect(worker.run)
+        thread.start()
+
     @Slot(int, int)
     def _download_progressed(self, completed: int, total: int) -> None:
         entry = self._removal_entry
@@ -439,9 +598,7 @@ class ModelManagerController(QObject):
             return
         speed = self._download_rate.update(completed, time.monotonic())
         self.dialog.set_message(
-            format_model_download_detail(
-                entry.display_name, completed, total, speed
-            )
+            format_model_download_detail(entry.display_name, completed, total, speed)
         )
 
     @Slot(str)
@@ -453,14 +610,52 @@ class ModelManagerController(QObject):
         self.dialog.set_message(f"Downloaded {entry.display_name}.")
         if self._store.state.parameters.model_id == model_id:
             self._store.dispatch(ModelAvailabilityChanged(True))
+        if self._outdated_action == "redownload":
+            if self._pending_outdated_ids[:1] == [model_id]:
+                self._pending_outdated_ids.pop(0)
+            self._start_outdated_after_thread = bool(self._pending_outdated_ids)
+            if not self._pending_outdated_ids:
+                self._outdated_action = None
 
     @Slot(str, object)
     def _download_failed(self, model_id: str, error: object) -> None:
         entry = self._removal_entry
         if entry is None or entry.model_id != model_id:
             return
+        self._clear_outdated_state()
         self.dialog.set_message(f"Could not download the weight: {error}")
         QMessageBox.warning(self.dialog, "Could not download model", str(error))
+
+    @Slot(int)
+    def _obsolete_removal_succeeded(self, removed: int) -> None:
+        action = self._outdated_action
+        if action is None:
+            return
+        self.dialog.refresh()
+        if action == "redownload":
+            self.dialog.set_message(
+                f"Removed {removed} outdated model version(s); re-downloading…"
+            )
+            self._start_outdated_after_thread = True
+            return
+        self._clear_outdated_state()
+        self.dialog.set_message(
+            f"Removed {removed} outdated model version(s) from the cache."
+        )
+
+    @Slot(object)
+    def _obsolete_removal_failed(self, error: object) -> None:
+        self._clear_outdated_state()
+        self.dialog.set_message(f"Could not remove outdated weights: {error}")
+        QMessageBox.warning(self.dialog, "Could not remove outdated models", str(error))
+
+    def _start_next_outdated_download(self) -> None:
+        if not self._pending_outdated_ids:
+            self._outdated_action = None
+            return
+        entry = self._outdated_entries.get(self._pending_outdated_ids[0])
+        if entry is not None:
+            self._download_requested(entry)
 
     def _remove_requested(self, value: object) -> None:
         if not isinstance(value, ModelEntry) or not value.cached:
@@ -535,9 +730,13 @@ class ModelManagerController(QObject):
 
     @Slot()
     def _removal_thread_finished(self) -> None:
+        start_outdated = self._start_outdated_after_thread
+        self._start_outdated_after_thread = False
         self.dialog.set_busy(False)
         self._remove_worker = None
         self._remove_thread = None
+        if start_outdated:
+            self._start_next_outdated_download()
 
     @Slot()
     def _show_cache(self) -> None:
@@ -569,18 +768,27 @@ def _model_entry(
     if artifact is None:
         raise ValueError(f"V1 model {model_id!r} has no artifact")
     artifact_path = (
-        cache_root
-        / catalog.rembg_version
-        / model_id
-        / artifact.runtime_filename
+        cache_root / catalog.rembg_version / model_id / artifact.runtime_filename
     )
+    disk_size_bytes = _regular_file_size(artifact_path)
+    outdated_size_bytes: int | None = None
+    outdated_rembg_version: str | None = None
+    if disk_size_bytes is None:
+        for version in catalog.obsolete_rembg_versions:
+            outdated_path = cache_root / version / model_id / artifact.runtime_filename
+            outdated_size_bytes = _regular_file_size(outdated_path)
+            if outdated_size_bytes is not None:
+                outdated_rembg_version = version
+                break
     return ModelEntry(
-        model_id,
-        spec.display_name,
-        artifact.size_bytes,
-        artifact_path,
-        _regular_file_size(artifact_path),
-        model_id == active_id,
+        model_id=model_id,
+        display_name=spec.display_name,
+        download_size_bytes=artifact.size_bytes,
+        artifact_path=artifact_path,
+        disk_size_bytes=disk_size_bytes,
+        active=model_id == active_id,
+        outdated_size_bytes=outdated_size_bytes,
+        outdated_rembg_version=outdated_rembg_version,
     )
 
 
