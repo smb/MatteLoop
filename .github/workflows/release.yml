@@ -16,8 +16,13 @@
       }
     },
     "push": {
-      "tags": [
-        "v*"
+      "tags": ["v*"],
+      "branches": ["main"],
+      "paths": [
+        "packaging/media-stack/manifest.toml",
+        "scripts/media_stack/**",
+        "scripts/build_media_stack.py",
+        "scripts/verify_media_stack.py"
       ]
     }
   },
