@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import FrozenInstanceError
 from decimal import Decimal
 from fractions import Fraction
@@ -63,6 +64,44 @@ def test_media_transform_honors_pixel_aspect_zoom_pan_and_clamping() -> None:
     assert zoomed.clamp_source_rect(RectF(-10, 40, 30, 20)) == RectF(0, 30, 30, 20)
 
 
+def test_media_transform_insets_content_rect_on_both_axes() -> None:
+    transform = MediaTransform(
+        source_size=SizeF(100, 100),
+        viewport=SizeF(200, 200),
+        inset=16,
+    )
+
+    assert transform.content_rect == RectF(16, 16, 168, 168)
+
+
+@pytest.mark.parametrize("viewport", [SizeF(1, 1), SizeF(400, 1), SizeF(1, 400)])
+def test_media_transform_clamps_inset_against_both_viewport_axes(
+    viewport: SizeF,
+) -> None:
+    transform = MediaTransform(source_size=SizeF(100, 100), viewport=viewport, inset=16)
+    expected = math.floor(min(16, viewport.width / 4, viewport.height / 4))
+
+    assert transform.inset == expected
+    assert transform.scale > 0
+    geometry = build_crop_geometry(
+        state=CropGeometryState(
+            source_size=SizeF(100, 100),
+            crop=RectF(0, 0, 100, 100),
+            inset=16,
+        ),
+        viewport=viewport,
+        dpr=1,
+    )
+    assert isinstance(geometry.transform, MediaTransform)
+    assert geometry.transform.inset == expected
+
+
+def test_media_transform_defaults_to_zero_inset() -> None:
+    transform = MediaTransform(SizeF(100, 100), SizeF(100, 100))
+
+    assert transform.inset == 0.0
+
+
 def test_crop_geometry_shares_transform_across_every_consumer() -> None:
     state = CropGeometryState(
         source_size=SizeF(100, 50),
@@ -80,14 +119,15 @@ def test_crop_geometry_shares_transform_across_every_consumer() -> None:
     assert geometry.visual["north_west"] == RectF(16, 16, 8, 8)
     assert geometry.visual["east"] == RectF(76, 36, 8, 8)
     assert geometry.visual["south"] == RectF(46, 56, 8, 8)
-    assert geometry.visual["north_west"].center() == geometry.focus[
-        "north_west"
-    ].center()
-    assert geometry.pointer_hit["north_west"].contains(
-        geometry.visual["north_west"]
+    assert (
+        geometry.visual["north_west"].center() == geometry.focus["north_west"].center()
     )
+    assert geometry.pointer_hit["north_west"].contains(geometry.visual["north_west"])
     assert geometry.touch_hit["north_west"] == RectF(0, 0, 44, 44)
     assert geometry.accessible_screen["north_west"] == RectF(150, 75, 66, 66)
+    assert geometry.accessible_screen["crop"] == (
+        geometry.transform.widget_rect_to_screen(RectF(20, 18, 60, 44))
+    )
     assert geometry.screen_to_source(PointF(180, 105)) == PointF(10, 10)
 
 
@@ -177,6 +217,123 @@ def test_overlap_priority_is_dragged_then_focused_then_handles_then_region() -> 
     assert geometry.hit_test(PointF(50, 50)) == "crop"
 
 
+@pytest.mark.parametrize("gutter", [8, 16, 24])
+def test_crop_edge_handles_reach_into_each_media_gutter(gutter: float) -> None:
+    geometry = build_crop_geometry(
+        state=CropGeometryState(
+            source_size=SizeF(100, 100),
+            crop=RectF(0, 0, 100, 100),
+            inset=gutter,
+        ),
+        viewport=SizeF(200, 200),
+        dpr=1,
+    )
+    assert isinstance(geometry.transform, MediaTransform)
+    point = PointF(
+        geometry.transform.content_rect.left - gutter / 2,
+        geometry.transform.content_rect.center().y,
+    )
+
+    assert geometry.hit_test(point) == "west"
+
+
+def test_crop_edge_band_covers_the_middle_of_both_sides_of_the_left_edge() -> None:
+    geometry = build_crop_geometry(
+        state=CropGeometryState(
+            source_size=SizeF(100, 100),
+            crop=RectF(20, 20, 60, 60),
+        ),
+        viewport=SizeF(100, 100),
+        dpr=1,
+    )
+    y = geometry.visual["west"].center().y
+
+    assert geometry.hit_test(PointF(geometry.visual["west"].left - 6, y)) == "west"
+    assert geometry.hit_test(PointF(geometry.visual["west"].right + 6, y)) == "west"
+
+
+@pytest.mark.parametrize(
+    ("corner", "points"),
+    [
+        (
+            "north_west",
+            (PointF(26, 20), PointF(20, 26)),
+        ),
+        (
+            "north_east",
+            (PointF(74, 20), PointF(80, 26)),
+        ),
+        (
+            "south_east",
+            (PointF(74, 80), PointF(80, 74)),
+        ),
+        (
+            "south_west",
+            (PointF(26, 80), PointF(20, 74)),
+        ),
+    ],
+)
+def test_crop_corner_priority_wins_along_both_adjacent_edges(
+    corner: str, points: tuple[PointF, PointF]
+) -> None:
+    geometry = build_crop_geometry(
+        state=CropGeometryState(
+            source_size=SizeF(100, 100),
+            crop=RectF(20, 20, 60, 60),
+        ),
+        viewport=SizeF(100, 100),
+        dpr=1,
+    )
+
+    assert [geometry.hit_test(point) for point in points] == [corner, corner]
+
+
+def test_focused_crop_region_does_not_hide_its_edge_band() -> None:
+    geometry = build_crop_geometry(
+        state=CropGeometryState(
+            source_size=SizeF(100, 100),
+            crop=RectF(20, 20, 60, 60),
+            focused="crop",
+        ),
+        viewport=SizeF(100, 100),
+        dpr=1,
+    )
+
+    assert geometry.hit_test(PointF(26, 50)) == "west"
+    assert geometry.hit_test(PointF(40, 50)) == "crop"
+
+
+def test_thin_crop_keeps_its_interior_move_target() -> None:
+    geometry = build_crop_geometry(
+        state=CropGeometryState(
+            source_size=SizeF(100, 100),
+            crop=RectF(20, 20, 60, 30),
+        ),
+        viewport=SizeF(100, 100),
+        dpr=1,
+    )
+
+    centre = geometry.visual["crop"].center()
+    east_marker = geometry.visual["east"].center()
+
+    assert geometry.hit_test(centre) == "crop"
+    assert geometry.hit_test(east_marker) == "east"
+    assert geometry.hit_test(PointF(50, 14)) == "north"
+
+    focused = build_crop_geometry(
+        state=CropGeometryState(
+            source_size=SizeF(100, 100),
+            crop=RectF(20, 20, 60, 30),
+            focused="crop",
+        ),
+        viewport=SizeF(100, 100),
+        dpr=1,
+    )
+
+    assert focused.hit_test(centre) == "crop"
+    assert focused.hit_test(east_marker) == "east"
+
+
 def test_timeline_geometry_maps_range_and_playhead_and_resolves_overlap() -> None:
     state = TimelineGeometryState(
         duration=Decimal("10"),
@@ -221,9 +378,7 @@ def test_timeline_range_retains_rational_values_and_one_frame_minimum() -> None:
         fps=30,
     )
 
-    geometry = build_timeline_geometry(
-        state=state, viewport=SizeF(940, 80), dpr=1
-    )
+    geometry = build_timeline_geometry(state=state, viewport=SizeF(940, 80), dpr=1)
 
     assert geometry.visual["start_handle"].center().x == pytest.approx(320)
     assert geometry.visual["end_handle"].center().x == pytest.approx(350)
@@ -383,6 +538,8 @@ def test_interaction_geometry_rejects_mutable_media_transform_subclass() -> None
         ({"pixel_aspect": 0.0}, "pixel_aspect"),
         ({"zoom": float("nan")}, "zoom"),
         ({"dpr": float("inf")}, "dpr"),
+        ({"inset": -1.0}, "inset"),
+        ({"inset": float("nan")}, "inset"),
     ],
 )
 def test_media_transform_rejects_invalid_finite_geometry(

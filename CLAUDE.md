@@ -81,3 +81,23 @@ Implementation is delegated to `codex exec -m gpt-5.6-luna -c model_reasoning_ef
 Second review on complex changes uses `-m gpt-5.6-sol`. Short model aliases
 (`luna`, `sol`) are unavailable with a ChatGPT login and fail silently with
 exit 137 — always use the full model name.
+
+## Skill routing
+
+When the user's request matches an available skill, invoke it via the Skill tool. When in doubt, invoke the skill.
+
+Key routing rules:
+
+- Product ideas/brainstorming → invoke /office-hours
+- Strategy/scope → invoke /plan-ceo-review
+- Architecture → invoke /plan-eng-review
+- Design system/plan review → invoke /design-consultation or /plan-design-review
+- Full review pipeline → invoke /autoplan
+- Bugs/errors → invoke /investigate
+- QA/testing site behavior → invoke /qa or /qa-only
+- Code review/diff check → invoke /review; complex changes additionally get a Codex pass with gpt-5.6-sol (see Delegation)
+- Visual polish → invoke /design-review
+- Ship/PR → invoke /ship (not /land-and-deploy: merging is the maintainer's call, see Working on issues)
+- Save progress → invoke /context-save
+- Resume context → invoke /context-restore
+- Author a backlog-ready spec/issue → invoke /spec
