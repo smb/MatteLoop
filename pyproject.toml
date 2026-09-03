@@ -16,7 +16,7 @@ dependencies = [
   "av>=16,<17",
   "Pillow>=12.1,<13",
   "numpy>=2.3,<3",
-  "rembg[cpu]==2.0.72",
+  "rembg[cpu]==2.0.75",
   "platformdirs>=4.3,<5",
 ]
 

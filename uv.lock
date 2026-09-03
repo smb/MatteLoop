@@ -306,7 +306,7 @@ requires-dist = [
     { name = "pillow", specifier = ">=12.1,<13" },
     { name = "platformdirs", specifier = ">=4.3,<5" },
     { name = "pyside6", specifier = "~=6.10.1" },
-    { name = "rembg", extras = ["cpu"], specifier = "==2.0.72" },
+    { name = "rembg", extras = ["cpu"], specifier = "==2.0.75" },
 ]
 
 [package.metadata.requires-dev]
@@ -704,7 +704,7 @@ wheels = [
 
 [[package]]
 name = "rembg"
-version = "2.0.72"
+version = "2.0.75"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jsonschema" },
@@ -716,9 +716,9 @@ dependencies = [
     { name = "scipy" },
     { name = "tqdm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a6/e6/5a2bf3a26def88f9b92fc6f523dd02d5546a5a65192c9561e3fc4691c837/rembg-2.0.72.tar.gz", hash = "sha256:51c761a8767773403ad3242141b3ee3d686728d00ba4fe75304edc8c48a73ce2", size = 28531, upload-time = "2026-01-03T14:12:44.777Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/21/1c/4d9a81d452d44d914e8ab3e964809ff2388f6919324f005513aa61e1c378/rembg-2.0.75.tar.gz", hash = "sha256:e2143fb5838c8b2238fa45d765ce18d0710801d5aef73f2c4ac9377991d1f526", size = 30148, upload-time = "2026-04-08T11:45:15.42Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/03/e1/03390393417a5272b4cf96a6f59bad4e399f1098f9fe6b12d50490ab4d25/rembg-2.0.72-py3-none-any.whl", hash = "sha256:cb0bd5d1c553aed358caa775f456f5db6fd5c70802aff43867c10b8dca648810", size = 43673, upload-time = "2026-01-03T14:12:43.813Z" },
+    { url = "https://files.pythonhosted.org/packages/f4/09/60b6d1e6b07520a133ec4522cf7c1a6d684301b64bc7a7b96aad6baa1e21/rembg-2.0.75-py3-none-any.whl", hash = "sha256:536cc7aec597e6e17d805992f9014e6082b5bef76b1b68034d746e0690af3a94", size = 45011, upload-time = "2026-04-08T11:45:16.533Z" },
 ]
 
 [package.optional-dependencies]
