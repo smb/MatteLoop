@@ -1,6 +1,6 @@
 {
   "src/matteloop/core/geometry.py": {
-    "lines": 1057,
+    "lines": 1141,
     "long_functions": 1
   },
   "src/matteloop/core/state.py": {

@@ -47,7 +47,7 @@ def test_crop_canvas_drag_emits_oriented_crop_changes_from_shared_geometry(
     qtbot.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=QPoint(80, 90))
 
     assert isinstance(events[-1], CropChanged)
-    assert events[-1].crop == CropSpec(20, 15, 40, 20)
+    assert events[-1].crop == CropSpec(22, 16, 40, 20)
 
 
 def test_crop_canvas_keyboard_moves_overlay_by_one_source_pixel(qtbot) -> None:
@@ -128,7 +128,7 @@ def test_crop_canvas_fits_source_corners_inside_the_painted_pixmap(qtbot) -> Non
         assert 0 <= mapped.x <= canvas.width()
         assert 0 <= mapped.y <= canvas.height()
 
-    assert transform.scale == pytest.approx(478 / 1280)
+    assert transform.scale == pytest.approx(446 / 1280)
     assert transform.content_rect.width == pytest.approx(
         canvas.pixmap().width(), abs=0.01
     )
@@ -154,14 +154,62 @@ def test_crop_canvas_drag_uses_the_fitted_frame_scale(qtbot) -> None:
     qtbot.mousePress(
         canvas,
         Qt.MouseButton.LeftButton,
-        pos=QPoint(80, 200),
+        pos=QPoint(80, 230),
     )
-    qtbot.mouseMove(canvas, QPoint(160, 200))
+    qtbot.mouseMove(canvas, QPoint(160, 230))
     qtbot.mouseRelease(
         canvas,
         Qt.MouseButton.LeftButton,
-        pos=QPoint(160, 200),
+        pos=QPoint(160, 230),
     )
 
     assert isinstance(events[-1], CropChanged)
-    assert events[-1].crop == CropSpec(314, 100, 400, 200)
+    assert events[-1].crop == CropSpec(330, 100, 400, 200)
+
+
+def test_crop_canvas_drag_from_the_media_gutter_emits_crop_changed(qtbot) -> None:
+    _stage, canvas = _large_source_canvas(qtbot, CropSpec(0, 0, 1280, 720))
+    events: list[object] = []
+    canvas.command_requested.connect(events.append)
+
+    qtbot.mousePress(
+        canvas,
+        Qt.MouseButton.LeftButton,
+        pos=QPoint(8, 287),
+    )
+    qtbot.mouseMove(canvas, QPoint(20, 287))
+    qtbot.mouseRelease(
+        canvas,
+        Qt.MouseButton.LeftButton,
+        pos=QPoint(20, 287),
+    )
+
+    assert any(isinstance(event, CropChanged) for event in events)
+
+
+def test_crop_canvas_uses_the_clamped_inset_for_a_tiny_canvas(qtbot) -> None:
+    canvas = CropCanvas()
+    qtbot.addWidget(canvas)
+    canvas.setMinimumSize(0, 0)
+    canvas.resize(20, 10)
+    canvas.set_frame(QImage(100, 50, QImage.Format.Format_RGBA8888))
+    canvas.apply_presentation(_presentation(), active=True, editable=True)
+    canvas.show()
+    qtbot.wait(10)
+
+    assert canvas._geometry is not None
+    transform = canvas._geometry.transform
+    assert isinstance(transform, MediaTransform)
+    assert transform.inset == pytest.approx(2.0)
+    assert transform.content_rect.width == pytest.approx(
+        canvas.pixmap().width(), abs=0.01
+    )
+    assert transform.content_rect.height == pytest.approx(
+        canvas.pixmap().height(), abs=1.0
+    )
+    assert transform.content_rect.x == pytest.approx(
+        (canvas.width() - canvas.pixmap().width()) / 2, abs=0.5
+    )
+    assert transform.content_rect.y == pytest.approx(
+        (canvas.height() - canvas.pixmap().height()) / 2, abs=0.5
+    )
