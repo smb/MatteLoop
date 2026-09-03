@@ -95,9 +95,9 @@ Key routing rules:
 - Full review pipeline → invoke /autoplan
 - Bugs/errors → invoke /investigate
 - QA/testing site behavior → invoke /qa or /qa-only
-- Code review/diff check → invoke /review
+- Code review/diff check → invoke /review; complex changes additionally get a Codex pass with gpt-5.6-sol (see Delegation)
 - Visual polish → invoke /design-review
-- Ship/deploy/PR → invoke /ship or /land-and-deploy
+- Ship/PR → invoke /ship (not /land-and-deploy: merging is the maintainer's call, see Working on issues)
 - Save progress → invoke /context-save
 - Resume context → invoke /context-restore
 - Author a backlog-ready spec/issue → invoke /spec
