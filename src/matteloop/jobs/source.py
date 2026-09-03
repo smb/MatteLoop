@@ -1422,19 +1422,22 @@ def _width_padded_yuv_frame(frame: Any) -> tuple[Any, bool]:
         if len(padded.planes) != len(frame.planes):
             return frame, False
         for destination, source in zip(padded.planes, frame.planes):
-            if destination.line_size < source.line_size or not source.line_size:
+            if not source.line_size or not destination.line_size:
                 return frame, False
             rows = source.buffer_size // source.line_size
             if rows * destination.line_size > destination.buffer_size:
                 return frame, False
+            # Copy row contents, not whole source rows: a decoder pads its
+            # stride well past the width, and on x86-64 that padding is wider
+            # than the destination row. Requiring the strides to match instead
+            # silently skipped the padding on exactly the frames that need it.
+            span = min(source.line_size, destination.line_size)
             source_bytes = bytes(source)
             buffer = bytearray(destination.buffer_size)
             for row in range(rows):
                 read = row * source.line_size
                 write = row * destination.line_size
-                buffer[write : write + source.line_size] = source_bytes[
-                    read : read + source.line_size
-                ]
+                buffer[write : write + span] = source_bytes[read : read + span]
             destination.update(bytes(buffer))
     except Exception:
         return frame, False
