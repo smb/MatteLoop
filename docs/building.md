@@ -34,7 +34,7 @@ You need:
 The native prerequisite gate requires PySide6, PySide6_Essentials,
 PySide6_Addons, and shiboken6 to be installed at exactly 6.10.3. The locked
 build also includes Nuitka 2.8.10, PyAV 16.1.0, Pillow 12.3.0, NumPy 2.5.2,
-`rembg` 2.0.72, and CPU `onnxruntime` 1.29.0. Do not install a second Python
+`rembg` 2.0.75, and CPU `onnxruntime` 1.29.0. Do not install a second Python
 environment for the build; run the commands below from the repository root.
 
 ## Licensing gate
