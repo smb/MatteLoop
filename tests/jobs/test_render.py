@@ -15,6 +15,7 @@ import pytest
 from PIL import Image
 
 import matteloop.jobs.render as render_module
+import matteloop.jobs.transform_stage as transform_stage_module
 import matteloop.jobs.workspace as workspace_module
 from matteloop.core.errors import AppError, ErrorCode
 from matteloop.core.specs import (
@@ -1545,13 +1546,15 @@ def test_cancel_after_promotion_keeps_valid_cuts_and_old_output(
             return summary
 
     if boundary == "framing":
-        actual_persist = render_module._persist_framed_png
+        actual_persist = transform_stage_module._persist_framed_png
 
         def persist_then_cancel(path, image):
             actual_persist(path, image)
             context.request_cancel()
 
-        monkeypatch.setattr(render_module, "_persist_framed_png", persist_then_cancel)
+        monkeypatch.setattr(
+            transform_stage_module, "_persist_framed_png", persist_then_cancel
+        )
 
     render_request = request(tmp_path)
     render_request.output.path.write_bytes(b"old-output")
@@ -2963,7 +2966,7 @@ def test_framed_png_cleanup_failure_is_not_primary(
 
     with Image.new("RGBA", (128, 128)) as image:
         with pytest.raises(AppError) as exc:
-            render_module._persist_framed_png(output, image)
+            transform_stage_module._persist_framed_png(output, image)
 
     assert exc.value.retry_action == "free-disk-space"
     assert exc.value.__notes__ == [
