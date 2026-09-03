@@ -1363,7 +1363,7 @@ class RenderService:
         published = False
         publish_error: BaseException | None = None
         try:
-            frame_count = manifest.frame_count
+            frame_count = len(framed_paths)
             overall = context.overall_progress or (0, frame_count)
             stage = "Auto-fit" if request.output.max_bytes is not None else "Encode"
             overall_for_encode = (
@@ -1428,7 +1428,7 @@ class RenderService:
             artifact_fingerprint,
             durable,
             manifest,
-            manifest.frame_count,
+            len(framed_paths),
             summary.width,
             summary.height,
             summary.file_size,

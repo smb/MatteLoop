@@ -2,13 +2,23 @@ from __future__ import annotations
 
 from dataclasses import replace
 from decimal import Decimal
+from fractions import Fraction
 
 import pytest
 from PIL import Image
 
-from matteloop.core.errors import AppError, ErrorCode
-from matteloop.core.specs import FramingSpec
+from matteloop.core.errors import AppError, ErrorCode, ValidationError
+from matteloop.core.specs import (
+    CropSpec,
+    FramingSpec,
+    MismatchMode,
+    ResizeSpec,
+    SamplingSpec,
+    TransformSpec,
+)
 from matteloop.core.state import JobKind
+from matteloop.core.timebase import webp_delays
+from matteloop.core.webp import validate_webp
 from matteloop.jobs.render import (
     AtomicOutputPublisher,
     FilesystemWorkspacePort,
@@ -22,11 +32,21 @@ from tests.jobs.render_support import (
     FakeEncoder,
     FakeSegmenter,
     FakeSource,
+    FakeSourceInfo,
     binding,
     job,
     render_service,
     request,
 )
+
+
+class _LongerSource(FakeSource):
+    """A source whose probed duration covers an 8-frame, 3 fps sampling grid."""
+
+    def probe(self, path, context):
+        del path, context
+        self.probe_calls += 1
+        return FakeSourceInfo(duration=Fraction(3))
 
 
 def test_rebuild_never_probes_hashes_decodes_or_segments_source(tmp_path) -> None:
@@ -369,3 +389,244 @@ def test_cross_output_rebuild_failure_cleans_snapshot_and_preserves_state(
     assert not (
         rebuilt_output / ".matteloop-work" / "scratch" / "cross-output-failure"
     ).exists()
+
+
+def _rebuild_service(workspace: FilesystemWorkspacePort, encoder) -> RenderService:
+    return RenderService(
+        source=ExplodingSource(),
+        segmentation=binding(FakeSegmenter()),
+        workspace=workspace,
+        encoder=encoder,
+        disk_probe=FakeDiskProbe(),
+        clock=FakeClock(),
+        output_publisher=AtomicOutputPublisher(),
+    )
+
+
+def test_identity_transform_rebuild_is_byte_identical(tmp_path) -> None:
+    """AC 1: an explicit identity ``TransformSpec`` and the ``RenderRequest``
+    default must reach the encoder with the same paths and delays and produce
+    a byte-identical WebP."""
+    workspace = FilesystemWorkspacePort()
+    seed_request = request(tmp_path)
+    original = render_service(workspace=workspace).render(
+        seed_request, job(tmp_path, "seed-identity", JobKind.RENDER)
+    )
+
+    explicit_encoder = FakeEncoder()
+    _rebuild_service(workspace, explicit_encoder).rebuild(
+        replace(
+            seed_request,
+            rebuild=True,
+            transform=TransformSpec(),
+            output=replace(seed_request.output, filename="explicit.webp"),
+        ),
+        original.cut_workspace,
+        job(tmp_path, "rebuild-explicit", JobKind.REBUILD),
+    )
+
+    default_encoder = FakeEncoder()
+    _rebuild_service(workspace, default_encoder).rebuild(
+        replace(
+            seed_request,
+            rebuild=True,
+            output=replace(seed_request.output, filename="default.webp"),
+        ),
+        original.cut_workspace,
+        job(tmp_path, "rebuild-default", JobKind.REBUILD),
+    )
+
+    explicit_bytes = (tmp_path / "explicit.webp").read_bytes()
+    default_bytes = (tmp_path / "default.webp").read_bytes()
+    assert explicit_bytes == default_bytes
+
+    explicit_paths, explicit_delays, _ = explicit_encoder.calls[0]
+    default_paths, default_delays, _ = default_encoder.calls[0]
+    assert [path.name for path in explicit_paths] == [
+        path.name for path in default_paths
+    ]
+    assert explicit_delays == default_delays
+
+
+def test_trim_keeps_exactly_the_selected_frames_and_their_delays(tmp_path) -> None:
+    """AC 2 / E2 / T7: the kept delays are a *slice* of the full non-uniform
+    grid, not a recomputation over the kept count."""
+    workspace = FilesystemWorkspacePort()
+    seed_request = request(
+        tmp_path, sampling=SamplingSpec(Fraction(0), Fraction(8, 3), 3)
+    )
+    original = render_service(source=_LongerSource(), workspace=workspace).render(
+        seed_request, job(tmp_path, "seed-trim", JobKind.RENDER)
+    )
+    full_delays = webp_delays(8, 3)
+    expected = full_delays[2:6]
+    # The regression this test guards against: a recomputed grid over just
+    # the kept count would sum to the same total but not match term-by-term.
+    assert expected != webp_delays(4, 3)
+    assert sum(expected) == sum(webp_delays(4, 3))
+
+    rebuild_encoder = FakeEncoder()
+    artifact = _rebuild_service(workspace, rebuild_encoder).rebuild(
+        replace(
+            seed_request,
+            rebuild=True,
+            transform=TransformSpec(first_frame=2, last_frame=5),
+            output=replace(seed_request.output, filename="trimmed.webp"),
+        ),
+        original.cut_workspace,
+        job(tmp_path, "rebuild-trim", JobKind.REBUILD),
+    )
+
+    assert artifact.frame_count == 4
+    assert artifact.delays_ms == expected
+    assert rebuild_encoder.calls[0][1] == expected
+    info = validate_webp(
+        artifact.output_path, expected_frames=4, expected_duration_ms=sum(expected)
+    )
+    assert info.frames == 4
+    assert info.delays_ms == expected
+
+
+@pytest.mark.parametrize(
+    ("transform", "fragment"),
+    [
+        (TransformSpec(first_frame=8), "first_frame 8 exceeds last_frame 7"),
+        (
+            TransformSpec(last_frame=9),
+            "last_frame 9 exceeds the last stored frame 7",
+        ),
+    ],
+    ids=["fewer-than-one-frame", "last-frame-beyond-cut"],
+)
+def test_trim_outside_the_cut_is_rejected_before_any_file_is_written(
+    tmp_path, transform: TransformSpec, fragment: str
+) -> None:
+    """AC 3 / E3: an out-of-bounds trim raises INVALID_TRANSFORM before the
+    framed-inputs directory is created, and the old output is untouched."""
+    workspace = FilesystemWorkspacePort()
+    seed_request = request(
+        tmp_path, sampling=SamplingSpec(Fraction(0), Fraction(8, 3), 3)
+    )
+    original = render_service(source=_LongerSource(), workspace=workspace).render(
+        seed_request, job(tmp_path, "seed-bad-trim", JobKind.RENDER)
+    )
+    before = original.output_path.read_bytes()
+
+    with pytest.raises(ValidationError) as exc:
+        _rebuild_service(workspace, FakeEncoder()).rebuild(
+            replace(seed_request, rebuild=True, transform=transform),
+            original.cut_workspace,
+            job(
+                tmp_path,
+                f"rebuild-bad-trim-{transform.first_frame}-{transform.last_frame}",
+                JobKind.REBUILD,
+            ),
+        )
+
+    assert exc.value.code is ErrorCode.INVALID_TRANSFORM
+    assert fragment in str(exc.value)
+    assert original.output_path.read_bytes() == before
+    assert not list(tmp_path.rglob("framed-inputs"))
+
+
+def test_crop_and_resize_change_output_dimensions(tmp_path) -> None:
+    """Crop then resize (stretch) produces the resolved final canvas size."""
+    workspace = FilesystemWorkspacePort()
+    seed_request = request(tmp_path)
+    original = render_service(workspace=workspace).render(
+        seed_request, job(tmp_path, "seed-crop-resize", JobKind.RENDER)
+    )
+
+    artifact = _rebuild_service(workspace, FakeEncoder()).rebuild(
+        replace(
+            seed_request,
+            rebuild=True,
+            transform=TransformSpec(
+                crop=CropSpec(0, 0, 64, 64),
+                resize=ResizeSpec(width=256, height=128, mismatch=MismatchMode.STRETCH),
+            ),
+        ),
+        original.cut_workspace,
+        job(tmp_path, "rebuild-crop-resize", JobKind.REBUILD),
+    )
+
+    assert (artifact.width, artifact.height) == (256, 128)
+    info = validate_webp(
+        artifact.output_path,
+        expected_frames=artifact.frame_count,
+        expected_duration_ms=sum(artifact.delays_ms),
+    )
+    assert (info.width, info.height) == (256, 128)
+
+
+def test_transform_trim_does_not_affect_the_framed_size(tmp_path) -> None:
+    """E15: the framed size (and the union it is derived from) is computed
+    over every stored frame, independent of the transform's trim."""
+    workspace = FilesystemWorkspacePort()
+    seed_request = replace(
+        request(tmp_path),
+        framing=FramingSpec(True, Decimal("2"), 64, Decimal("1")),
+    )
+    original = render_service(workspace=workspace).render(
+        seed_request, job(tmp_path, "seed-trim-union", JobKind.RENDER)
+    )
+
+    full_range = _rebuild_service(workspace, FakeEncoder()).rebuild(
+        replace(
+            seed_request,
+            rebuild=True,
+            output=replace(seed_request.output, filename="full.webp"),
+        ),
+        original.cut_workspace,
+        job(tmp_path, "rebuild-full-range", JobKind.REBUILD),
+    )
+    trimmed = _rebuild_service(workspace, FakeEncoder()).rebuild(
+        replace(
+            seed_request,
+            rebuild=True,
+            transform=TransformSpec(first_frame=0, last_frame=0),
+            output=replace(seed_request.output, filename="trimmed.webp"),
+        ),
+        original.cut_workspace,
+        job(tmp_path, "rebuild-trimmed-range", JobKind.REBUILD),
+    )
+
+    assert (trimmed.width, trimmed.height) == (full_range.width, full_range.height)
+
+
+def test_transforms_never_touch_stored_cut_frames(tmp_path) -> None:
+    """AC 7 / E10: any number of transforms and rebuilds leave the stored
+    cut PNGs' sha256 (per the manifest) unchanged."""
+    workspace = FilesystemWorkspacePort()
+    seed_request = request(tmp_path)
+    original = render_service(workspace=workspace).render(
+        seed_request, job(tmp_path, "seed-sha", JobKind.RENDER)
+    )
+    before_hashes = tuple(
+        frame.sha256 for frame in workspace.validate(original.cut_workspace).frames
+    )
+
+    transforms = (
+        TransformSpec(),
+        TransformSpec(first_frame=1),
+        TransformSpec(
+            crop=CropSpec(0, 0, 64, 64),
+            resize=ResizeSpec(width=200, height=150, mismatch=MismatchMode.PAD),
+        ),
+    )
+    for index, transform in enumerate(transforms):
+        _rebuild_service(workspace, FakeEncoder()).rebuild(
+            replace(
+                seed_request,
+                rebuild=True,
+                transform=transform,
+                output=replace(seed_request.output, filename=f"out-{index}.webp"),
+            ),
+            original.cut_workspace,
+            job(tmp_path, f"rebuild-sha-{index}", JobKind.REBUILD),
+        )
+
+    after_hashes = tuple(
+        frame.sha256 for frame in workspace.validate(original.cut_workspace).frames
+    )
+    assert after_hashes == before_hashes

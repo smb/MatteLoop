@@ -1,12 +1,15 @@
 """Frame a cut and hand it to the encoder — the shared stage the result player
 also calls (design decision D2), so encoder and preview stay pixel-identical.
 
-``stage_encoder_frames`` accepts a ``TransformSpec`` for contract compliance
-(``docs/superpowers/plans/2026-09-04-issue-25-transform-stage.md`` section
-4.3), but this module (task A4) only implements the identity path: the loop
-still enumerates every stored frame and returns the delays unchanged. Slicing
-to the transform's kept range and calling ``core.transform.apply_transform``
-is task A5.
+``stage_encoder_frames`` validates and applies the request's ``TransformSpec``
+(task A5): ``validate_for`` runs before the framed directory is created, only
+the frames in ``transform.kept_range`` are staged, and the encoder's delays
+are *sliced* from the full grid rather than recomputed — ``webp_delays``
+(``core/timebase.py``) distributes rounding non-uniformly, so a recomputed
+grid over the kept count would not equal the kept slice of the full grid.
+``core.transform.apply_transform`` runs on each frame after ``apply_framing``;
+for an identity spec it returns the same object, so an unmodified frame is
+never re-saved with different bytes than before this stage existed.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from matteloop.core.errors import ErrorCode, ValidationError
 from matteloop.core.geometry import FramingPlan, PixelBounds, apply_framing
 from matteloop.core.rgba import RgbaOwnershipTracker
 from matteloop.core.specs import FramingSpec, TransformSpec
+from matteloop.core.transform import apply_transform
 from matteloop.jobs.context import JobContext
 from matteloop.jobs.encoding import _map_output_os_error, _output_error
 
@@ -54,36 +58,41 @@ def stage_encoder_frames(
     tracker: RgbaOwnershipTracker,
     context: JobContext,
 ) -> tuple[tuple[Path, ...], tuple[int, ...]]:
-    """Frame every stored cut frame and persist it for the encoder.
+    """Frame, crop, and resize the kept cut frames and persist them.
 
-    Task A4 moves the loop verbatim; ``transform`` is accepted but not yet
-    applied (task A5), so the kept range is always the full cut and the
-    delays returned are the ones passed in, unchanged.
+    Validates *transform* against the cut before any file is created. Only
+    the frames in ``transform.kept_range(frame_count)`` are staged; the
+    returned delays are ``transform.select_kept(delays)`` — a slice of the
+    full grid, never a recomputation.
     """
+    final_size = transform.validate_for(frame_count, plan.output_size)
+    tracker.include_size(final_size)
     try:
         framed_directory.mkdir(exist_ok=False)
     except OSError as error:
         raise _map_output_os_error(
             error, "cannot create framed input directory"
         ) from error
+    kept = transform.kept_range(frame_count)
+    kept_count = len(kept)
     framed_paths: list[Path] = []
-    for index in range(frame_count):
+    for position, index in enumerate(kept):
         context.set_frame_context(
-            index + 1, frame_count, overall=context.overall_progress
+            position + 1, kept_count, overall=context.overall_progress
         )
         context.checkpoint("framing")
         framed_paths.append(
             _stage_frame(
-                read_cut, index, index, plan, transform, framed_directory, tracker
+                read_cut, index, position, plan, transform, framed_directory, tracker
             )
         )
         context.progress(
             "Framing",
-            index + 1,
-            total=frame_count,
-            detail=f"Frame {index + 1} of {frame_count}",
+            position + 1,
+            total=kept_count,
+            detail=f"Frame {position + 1} of {kept_count}",
         )
-    return tuple(framed_paths), delays
+    return tuple(framed_paths), transform.select_kept(delays)
 
 
 def _stage_frame(
@@ -95,7 +104,6 @@ def _stage_frame(
     framed_directory: Path,
     tracker: RgbaOwnershipTracker,
 ) -> Path:
-    del transform  # applied starting in task A5
     cut = read_cut(index, tracker)
     try:
         framed = apply_framing(cut, plan)
@@ -104,9 +112,17 @@ def _stage_frame(
         cut.close()
         del cut
     try:
-        path = framed_directory / f"frame-{position:06d}.png"
-        _persist_framed_png(path, framed)
-        return path
+        transformed = apply_transform(framed, transform)
+        if transformed is not framed:
+            tracker.register(transformed)
+        try:
+            path = framed_directory / f"frame-{position:06d}.png"
+            _persist_framed_png(path, transformed)
+            return path
+        finally:
+            if transformed is not framed:
+                transformed.close()
+                del transformed
     finally:
         framed.close()
         del framed
