@@ -484,7 +484,6 @@ def test_child_crash_invalidates_slot_and_restarts_only_on_explicit_start() -> N
         "wrong-shape",
         "wrong-dtype",
         "wrong-byte-length",
-        "late-response",
         "malformed-error",
         "unsolicited-ack",
         "invalid-utf8",
@@ -498,6 +497,25 @@ def test_untrusted_response_invalidates_process_and_slot(mode: str) -> None:
         segmentation.segment(red_frame(), request())
     assert exc.value.code is ErrorCode.SEGMENTATION_PROTOCOL_MISMATCH
     assert exc.value.job_id == "j1"
+    assert not segmentation.is_running
+    assert segmentation.shared_memory_name is None
+
+
+def test_late_response_invalidates_process_at_the_latest_on_the_next_request() -> None:
+    """The duplicate response is caught either on arrival (segmentation_host.py
+    ~498) or, if it lands in the pipe just after that poll, on the next request
+    (segmentation_host.py ~642) — both are legitimate detection points."""
+    segmentation = client("late-response")
+    segmentation.start()
+    try:
+        segmentation.segment(red_frame(), request())
+    except AppError as exc:
+        assert exc.code is ErrorCode.SEGMENTATION_PROTOCOL_MISMATCH
+        assert exc.job_id == "j1"
+    else:
+        with pytest.raises(AppError) as exc2:
+            segmentation.segment(red_frame(), request())
+        assert exc2.value.code is ErrorCode.SEGMENTATION_PROTOCOL_MISMATCH
     assert not segmentation.is_running
     assert segmentation.shared_memory_name is None
 
