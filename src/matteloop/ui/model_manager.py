@@ -41,6 +41,7 @@ from matteloop.ui.source_presentation import (
 )
 
 MODEL_ENTRY_ROLE = ROW_DATA_ROLE + 11
+_DOWNLOAD_BLOCKED_MESSAGE = "Cannot download a model while a job is running."
 
 
 class ModelRemovalService(Protocol):
@@ -77,6 +78,8 @@ def present_model(entry: ModelEntry) -> AlignedRow:
     if entry.cached:
         cache_status = "cached locally"
         cache_detail = cache_status
+        if entry.outdated_rembg_version is not None:
+            cache_detail += "; outdated copy from rembg " + entry.outdated_rembg_version
         glyph = "◆" if entry.active else "✓"
     elif entry.outdated_size_bytes is not None:
         cache_status = "outdated weight"
@@ -293,9 +296,7 @@ class ModelManagerDialog(QDialog):
         if self.model_list.currentItem() is None and self.model_list.count():
             self.model_list.setCurrentRow(0)
         total = sum(
-            entry.disk_size_bytes
-            if entry.disk_size_bytes is not None
-            else entry.outdated_size_bytes or 0
+            (entry.disk_size_bytes or 0) + (entry.outdated_size_bytes or 0)
             for entry in self._entries
         )
         self.total_size_label.setText(
@@ -508,10 +509,10 @@ class ModelManagerController(QObject):
         manager = self._manager
         if not isinstance(value, ModelEntry) or value.cached or manager is None:
             return
-        if self._remove_thread is not None:
-            return
-        if self._store.state.job.phase is not JobState.IDLE:
-            self.dialog.set_message("Cannot download a model while a job is running.")
+        if self._remove_thread or self._store.state.job.phase is not JobState.IDLE:
+            self._clear_outdated_state()
+            if self._remove_thread is None:
+                self.dialog.set_message(_DOWNLOAD_BLOCKED_MESSAGE)
             return
         worker = _ModelDownloadWorker(manager, value.model_id)
         thread = QThread(self)
@@ -563,13 +564,13 @@ class ModelManagerController(QObject):
         if not entries:
             return
         if self._store.state.job.phase is not JobState.IDLE:
-            self.dialog.set_message("Cannot download a model while a job is running.")
+            self.dialog.set_message(_DOWNLOAD_BLOCKED_MESSAGE)
             return
         if manager is None:
             self.dialog.set_message("Model removal is unavailable in this runtime.")
             return
         self._outdated_action = "redownload"
-        self._pending_outdated_ids = [entry.model_id for entry in entries]
+        self._pending_outdated_ids = [e.model_id for e in entries if not e.cached]
         self._outdated_entries = {entry.model_id: entry for entry in entries}
         self._start_obsolete_removal(manager)
 
@@ -773,13 +774,12 @@ def _model_entry(
     disk_size_bytes = _regular_file_size(artifact_path)
     outdated_size_bytes: int | None = None
     outdated_rembg_version: str | None = None
-    if disk_size_bytes is None:
-        for version in catalog.obsolete_rembg_versions:
-            outdated_path = cache_root / version / model_id / artifact.runtime_filename
-            outdated_size_bytes = _regular_file_size(outdated_path)
-            if outdated_size_bytes is not None:
-                outdated_rembg_version = version
-                break
+    for version in catalog.obsolete_rembg_versions:
+        outdated_path = cache_root / version / model_id / artifact.runtime_filename
+        outdated_size_bytes = _regular_file_size(outdated_path)
+        if outdated_size_bytes is not None:
+            outdated_rembg_version = version
+            break
     return ModelEntry(
         model_id=model_id,
         display_name=spec.display_name,

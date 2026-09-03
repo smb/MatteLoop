@@ -429,6 +429,56 @@ def test_model_manager_lists_an_outdated_weight_with_size_and_rembg_version(
     assert dialog.delete_outdated_button.isHidden() is False
 
 
+def test_model_manager_reports_and_deletes_outdated_copy_alongside_current_weight(
+    tmp_path: Path, monkeypatch, qtbot
+) -> None:
+    current = _model_path(tmp_path, "u2netp")
+    outdated = _outdated_model_path(tmp_path, "u2netp")
+    current.parent.mkdir(parents=True)
+    current.write_bytes(b"current-weight")
+    outdated.parent.mkdir(parents=True)
+    outdated.write_bytes(b"old-weight")
+    manager = FakeModelRemovalService()
+    manager.obsolete_roots = (tmp_path / "2.0.72",)
+    controller = ModelManagerController(
+        ReducerStore(AppState()),
+        catalog=ModelCatalog.load_resource(),
+        cache_root=tmp_path,
+        manager=manager,
+    )
+    qtbot.addWidget(controller.dialog)
+    controller.open()
+
+    index = next(
+        index
+        for index, entry in enumerate(controller.dialog.entries)
+        if entry.model_id == "u2netp"
+    )
+    entry = controller.dialog.entries[index]
+    assert entry.cached is True
+    assert entry.outdated_size_bytes == len(b"old-weight")
+    assert entry in controller.dialog.outdated_entries
+    assert controller.dialog.redownload_outdated_button.isVisible()
+    assert controller.dialog.delete_outdated_button.isVisible()
+    assert controller.dialog.total_size_label.text() == "Total on disk: 24.0 B"
+    assert "outdated copy from rembg 2.0.72" in controller.dialog.model_list.item(
+        index
+    ).toolTip()
+
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+    )
+    controller.dialog.delete_outdated_button.click()
+
+    qtbot.waitUntil(lambda: manager.obsolete_calls == 1, timeout=5000)
+    qtbot.waitUntil(lambda: controller._remove_thread is None, timeout=5000)
+    assert not manager.obsolete_roots[0].exists()
+    assert current.exists()
+    controller.close()
+
+
 def test_model_manager_deletes_outdated_directory_without_touching_other_cache(
     tmp_path: Path, monkeypatch, qtbot
 ) -> None:
