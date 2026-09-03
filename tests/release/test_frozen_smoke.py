@@ -756,6 +756,14 @@ def test_release_workflow_builds_on_dispatch_tags_and_media_stack_changes() -> N
         step for step in steps if step["name"] == "Build native standalone bundle"
     )
     assert build["run"] == "uv run --frozen --no-sync python scripts/build.py"
+    cache_stats = next(
+        step for step in steps if step["name"] == "Report compile cache statistics"
+    )
+    assert cache_stats["if"] == "always()"
+    assert cache_stats["shell"] == "bash"
+    assert "du -sh" in cache_stats["run"]
+    assert "ccache -s" in cache_stats["run"]
+    assert steps.index(cache_stats) == build_index + 1
 
     upload = next(step for step in steps if step.get("id") == "upload")
     assert upload["with"]["name"] == "MatteLoop-unsigned-${{ matrix.target }}"
