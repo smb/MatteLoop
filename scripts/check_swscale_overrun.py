@@ -20,10 +20,11 @@ from pathlib import Path
 
 import av
 
-# Widths that are not a multiple of 16 are the suspect case; 448 is the
-# control. The small sizes probe whether the fix holds near the floor
-# MIN_SOURCE_DIMENSION allows.
-_CLIPS = ((18, 8), (40, 24), (200, 116), (440, 444), (448, 448))
+# 448, 464 and 640 are controls that need no padding under different
+# alignments (448 and 640 are multiples of 64, 464 only of 16), so a build
+# whose SIMD block is wider than assumed shows up here rather than in a
+# user's crash. The small sizes probe near the MIN_SOURCE_DIMENSION floor.
+_CLIPS = ((18, 8), (40, 24), (200, 116), (440, 444), (448, 448), (464, 464), (640, 360))
 _FRAME_COUNT = 3
 _FRAME_RATE = 2
 _TIME_BASE = Fraction(1, _FRAME_RATE)

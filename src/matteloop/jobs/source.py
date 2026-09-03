@@ -1391,34 +1391,51 @@ def _pixel_format_is_high_depth(name: str) -> bool:
     return any(token in lowered for token in ("p9", "p10", "p12", "p14", "p16"))
 
 
-def _padded_yuv_frame(frame: Any) -> tuple[Any, bool]:
-    """Copy a YUV frame into one with two spare bottom rows.
+# libswscale converts a whole SIMD block at a time and writes the tail of the
+# last block past the end of the rgba destination PyAV allocates for it, which
+# ends exactly with the final row. Widening the source so the destination width
+# is block-aligned removes the tail entirely; 64 is comfortably above any block
+# width in current builds, and a frame already that wide is left alone.
+_SWSCALE_WIDTH_ALIGNMENT = 64
 
-    libswscale writes past the end of the rgba destination PyAV allocates for
-    it; Valgrind on x86-64 reports the write landing 0 bytes after the block
-    av_image_alloc returned, and only the last output row escapes the
-    allocation. Two spare rows give that write somewhere legal to land, and
-    the caller crops them off again.
 
-    Every YUV frame is padded, not just the ones whose width looks unaligned:
-    a 440-wide clip reproduces and a 448-wide one does not, but the SIMD block
-    width that separates them is not something this repository has measured,
-    and a predicate guessed wrong reintroduces silent heap corruption.
+def _width_padded_yuv_frame(frame: Any) -> tuple[Any, bool]:
+    """Copy a YUV frame into one whose width is block-aligned for libswscale.
+
+    Valgrind on x86-64 reports the write landing 0 bytes after the block
+    av_image_alloc returned. Padding the height cannot help: the allocation
+    ends with the last row whatever the height is, so extra rows move that end
+    rather than padding it. Width is the lever -- a 448-wide clip is clean
+    where 18, 40, 200 and 440 all overrun -- and the caller crops the added
+    columns off again.
 
     Returns the original frame unpadded when the copy cannot be made exactly,
     which trades the guard away rather than failing a decode the user cannot
     otherwise complete.
     """
+    if frame.width % _SWSCALE_WIDTH_ALIGNMENT == 0:
+        return frame, False
+    blocks = -(-frame.width // _SWSCALE_WIDTH_ALIGNMENT)
+    padded_width = blocks * _SWSCALE_WIDTH_ALIGNMENT
     try:
-        padded = av.VideoFrame(frame.width, frame.height + 2, frame.format.name)
+        padded = av.VideoFrame(padded_width, frame.height, frame.format.name)
         if len(padded.planes) != len(frame.planes):
             return frame, False
         for destination, source in zip(padded.planes, frame.planes):
-            source_bytes = bytes(source)
-            spare = destination.buffer_size - len(source_bytes)
-            if destination.line_size != source.line_size or spare < 0:
+            if destination.line_size < source.line_size or not source.line_size:
                 return frame, False
-            destination.update(source_bytes + bytes(spare))
+            rows = source.buffer_size // source.line_size
+            if rows * destination.line_size > destination.buffer_size:
+                return frame, False
+            source_bytes = bytes(source)
+            buffer = bytearray(destination.buffer_size)
+            for row in range(rows):
+                read = row * source.line_size
+                write = row * destination.line_size
+                buffer[write : write + source.line_size] = source_bytes[
+                    read : read + source.line_size
+                ]
+            destination.update(bytes(buffer))
     except Exception:
         return frame, False
     return padded, True
@@ -1449,7 +1466,7 @@ def _normalized_image(
                 5: Colorspace.ITU601,
                 6: Colorspace.ITU601,
             }[profile.matrix]
-            reformat_frame, padded = _padded_yuv_frame(frame)
+            reformat_frame, padded = _width_padded_yuv_frame(frame)
             converted = VideoReformatter().reformat(
                 reformat_frame,
                 format="rgba",

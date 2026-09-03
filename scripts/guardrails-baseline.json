@@ -32,7 +32,7 @@
     "long_functions": 8
   },
   "src/matteloop/jobs/source.py": {
-    "lines": 1690,
+    "lines": 1707,
     "long_functions": 5
   },
   "src/matteloop/jobs/thumbnails.py": {
