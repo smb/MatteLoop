@@ -153,7 +153,8 @@
           "with": {
             "name": "MatteLoop-unsigned-${{ matrix.target }}",
             "path": "dist",
-            "if-no-files-found": "error"
+            "if-no-files-found": "error",
+            "include-hidden-files": true
           }
         }
       ]

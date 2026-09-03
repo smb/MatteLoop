@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import faulthandler
+import io
 import logging
 import os
 from logging.handlers import RotatingFileHandler
@@ -13,6 +15,7 @@ from matteloop.paths import NEW_CACHE_NAME
 
 _MAX_BYTES = 1 << 20
 _BACKUPS = 2
+_fault_report: object | None = None
 
 
 def log_file() -> Path:
@@ -47,4 +50,25 @@ def configure_logging(destination: Path | None = None) -> Path | None:
     root = logging.getLogger()
     root.setLevel(level)
     root.addHandler(handler)
+    _enable_fault_reports(target.with_suffix(".fault"))
     return target
+
+
+def _enable_fault_reports(target: Path) -> None:
+    """Write thread stacks when the process dies in native code.
+
+    A native fault kills the interpreter before logging runs, so the log
+    file stays empty and a packaged build, having no console, leaves the
+    user nothing to report. faulthandler writes from the signal handler
+    itself, which is why it gets its own file rather than the rotating
+    handler's.
+    """
+    global _fault_report
+    try:
+        report = target.open("a", buffering=1, encoding="utf-8")
+    except OSError:
+        return
+    faulthandler.enable(file=report, all_threads=True)
+    if isinstance(_fault_report, io.TextIOBase):
+        _fault_report.close()
+    _fault_report = report

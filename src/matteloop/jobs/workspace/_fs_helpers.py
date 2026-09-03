@@ -69,6 +69,42 @@ def _write_all(descriptor: int, data: bytes) -> None:
         offset += written
 
 
+def _set_times_fd(descriptor: int, atime_ns: int, mtime_ns: int) -> None:
+    """Copy a frame's timestamps onto the descriptor holding its copy.
+
+    os.utime accepts a descriptor only where os.utime is in os.supports_fd,
+    which excludes Windows; going through the pathname there would give up
+    the descriptor binding this copy depends on, so the handle behind the
+    descriptor is timestamped directly instead.
+    """
+    if os.utime in os.supports_fd:
+        os.utime(descriptor, ns=(atime_ns, mtime_ns))
+        return
+    import ctypes.wintypes
+    import msvcrt
+
+    def _filetime(value: int) -> ctypes.wintypes.FILETIME:
+        ticks = value // 100 + 116_444_736_000_000_000
+        return ctypes.wintypes.FILETIME(ticks & 0xFFFFFFFF, ticks >> 32)
+
+    set_file_time = getattr(ctypes, "windll").kernel32.SetFileTime
+    set_file_time.argtypes = (
+        ctypes.wintypes.HANDLE,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    )
+    accessed = _filetime(atime_ns)
+    written = _filetime(mtime_ns)
+    handle = msvcrt.get_osfhandle(descriptor)  # type: ignore[attr-defined]
+    if not set_file_time(
+        handle, None, ctypes.byref(accessed), ctypes.byref(written)
+    ):
+        raise OSError(
+            getattr(ctypes, "get_last_error")(), "could not set frame timestamps"
+        )
+
+
 def _stat_identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
     return (
         info.st_dev,

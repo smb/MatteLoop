@@ -1,6 +1,6 @@
 {
   "src/matteloop/core/geometry.py": {
-    "lines": 1057,
+    "lines": 1141,
     "long_functions": 1
   },
   "src/matteloop/core/state.py": {
@@ -12,7 +12,7 @@
     "long_functions": 5
   },
   "src/matteloop/jobs/models/cache_fs.py": {
-    "lines": 1530,
+    "lines": 1578,
     "long_functions": 4
   },
   "src/matteloop/jobs/models/download.py": {
@@ -32,7 +32,7 @@
     "long_functions": 8
   },
   "src/matteloop/jobs/source.py": {
-    "lines": 1651,
+    "lines": 1710,
     "long_functions": 5
   },
   "src/matteloop/jobs/thumbnails.py": {
@@ -44,7 +44,7 @@
     "long_functions": 1
   },
   "src/matteloop/jobs/workspace/_filesystem.py": {
-    "lines": 686,
+    "lines": 700,
     "long_functions": 1
   },
   "src/matteloop/jobs/workspace/_manifest.py": {

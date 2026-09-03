@@ -10,7 +10,7 @@ from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 
-import psutil
+import av
 import pytest
 from PIL import Image
 
@@ -1203,7 +1203,18 @@ def test_render_encodes_and_validates_a_real_lossless_webp(tmp_path) -> None:
 
 
 def test_render_keeps_decode_working_set_bounded_across_60_frames(tmp_path) -> None:
-    """A 60-frame 256x256 render must grow less than 4 MiB after frame 10."""
+    """No decoded frame may outlive the frame that produced it.
+
+    Counting live av.VideoFrame objects measures that directly. The
+    regression this guards against was found exactly that way -- the frames
+    accumulated from 18 to 60 -- and it moved RSS by only 5.5 MiB against
+    1.6 MiB when healthy. That signal is smaller than the allocator noise on
+    at least one platform, so RSS could neither prove nor rule out the leak
+    there, while the object count is exact everywhere.
+
+    A purely native leak holding no Python object would escape this; RSS was
+    never a dependable guard for that either.
+    """
     frames = [
         Image.new("RGB", (256, 256), (index % 256, 40, 90))
         for index in range(60)
@@ -1219,12 +1230,14 @@ def test_render_keeps_decode_working_set_bounded_across_60_frames(tmp_path) -> N
         sampling=SamplingSpec(Fraction(0), Fraction(2), 30),
         crop=CropSpec(0, 0, 256, 256),
     )
-    rss: dict[int, int] = {}
-    process = psutil.Process()
+    live: dict[int, int] = {}
 
     def progress(event: ProgressEvent) -> None:
         if event.stage == "render-cut" and event.completed in {10, 60}:
-            rss[event.completed] = process.memory_info().rss
+            live[event.completed] = sum(
+                isinstance(candidate, av.VideoFrame)
+                for candidate in gc.get_objects()
+            )
 
     artifact = render_service(
         source=LocalSourcePort(),
@@ -1241,10 +1254,8 @@ def test_render_keeps_decode_working_set_bounded_across_60_frames(tmp_path) -> N
         ),
     )
 
-    growth = rss[60] - rss[10]
-    assert growth < 4 * 1024 * 1024, (
-        f"decode working set grew by {growth / 1024 / 1024:.2f} MiB"
-    )
+    assert live[60] <= live[10], f"decoded frames accumulated: {live}"
+    assert artifact.ownership_peak <= 3
     assert artifact.manifest.frame_count == 60
     assert artifact.output_path.exists()
 
@@ -1795,6 +1806,12 @@ def test_candidate_validation_uses_the_held_file_not_a_swappable_helper_path(
             os.fstat(descriptor)
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="stages a race by replacing a file that is held open, which "
+    "Windows refuses outright -- the very displacement this guards "
+    "against cannot happen there",
+)
 def test_replace_rolls_back_if_validated_candidate_is_swapped_at_commit(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1833,6 +1850,12 @@ def test_replace_rolls_back_if_validated_candidate_is_swapped_at_commit(
     assert target.read_bytes() == b"old-output"
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="stages a race by replacing a file that is held open, which "
+    "Windows refuses outright -- the very displacement this guards "
+    "against cannot happen there",
+)
 def test_replace_rejects_a_destination_swap_during_held_sha_verification(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1885,6 +1908,12 @@ def test_replace_rejects_a_destination_swap_during_held_sha_verification(
     assert target.read_bytes() == old_bytes
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="stages a race by replacing a file that is held open, which "
+    "Windows refuses outright -- the very displacement this guards "
+    "against cannot happen there",
+)
 def test_replace_without_previous_output_never_unlinks_a_foreign_commit_mismatch(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2030,6 +2059,12 @@ def test_recovery_preparation_failure_aborts_before_destructive_replace(
     assert target.read_bytes() == old_bytes
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="stages a race by replacing a file that is held open, which "
+    "Windows refuses outright -- the very displacement this guards "
+    "against cannot happen there",
+)
 def test_hard_linked_recovery_file_is_fsynced_before_destructive_replace(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2114,6 +2149,12 @@ def test_recovery_directory_fsync_failure_leaves_no_pending_after_next_success(
     assert not tuple(recovery_directory.glob("*.recovery-pending"))
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="stages a race by replacing a file that is held open, which "
+    "Windows refuses outright -- the very displacement this guards "
+    "against cannot happen there",
+)
 def test_recovery_namespace_swap_never_modifies_the_foreign_replacement(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2156,6 +2197,12 @@ def test_recovery_namespace_swap_never_modifies_the_foreign_replacement(
     assert (recovery_directory / "sentinel").read_bytes() == sentinel_bytes
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="stages a race by replacing a file that is held open, which "
+    "Windows refuses outright -- the very displacement this guards "
+    "against cannot happen there",
+)
 def test_replace_parent_swap_restores_original_and_never_modifies_foreign_parent(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2206,6 +2253,12 @@ def test_replace_parent_swap_restores_original_and_never_modifies_foreign_parent
     assert (moved_parent / target.name).read_bytes() == old_bytes
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="stages a race by replacing a file that is held open, which "
+    "Windows refuses outright -- the very displacement this guards "
+    "against cannot happen there",
+)
 def test_no_clobber_parent_swap_never_consumes_foreign_stage_or_creates_output(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2268,6 +2321,11 @@ def test_no_clobber_parent_swap_never_consumes_foreign_stage_or_creates_output(
     ).read_bytes() == foreign_stage_bytes
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="checks a POSIX permission-bit rejection; Windows has no "
+    "equivalent mode to reject",
+)
 def test_unsafe_recovery_namespace_is_reported_as_an_output_error(tmp_path) -> None:
     target = tmp_path / "output.webp"
     old_bytes = b"old-output"
@@ -2378,6 +2436,12 @@ def test_current_recovery_slot_is_reused_without_a_pending_hardlink(
     assert not tuple(recovery_directory.glob("*.recovery-pending"))
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="stages a race by replacing a file that is held open, which "
+    "Windows refuses outright -- the very displacement this guards "
+    "against cannot happen there",
+)
 def test_replace_retries_when_restored_output_is_swapped_during_held_sha(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2438,6 +2502,12 @@ def test_replace_retries_when_restored_output_is_swapped_during_held_sha(
     assert target.read_bytes() == old_bytes
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="stages a race by replacing a file that is held open, which "
+    "Windows refuses outright -- the very displacement this guards "
+    "against cannot happen there",
+)
 def test_rollback_reports_when_recovery_path_is_swapped_during_held_sha(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2521,6 +2591,12 @@ def test_rollback_reports_when_recovery_path_is_swapped_during_held_sha(
     assert str(recovery_shadow) in exc.value.technical_detail
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="stages a race by replacing a file that is held open, which "
+    "Windows refuses outright -- the very displacement this guards "
+    "against cannot happen there",
+)
 @pytest.mark.parametrize("rollback_swaps", [1, 2])
 def test_replace_recreates_rollback_from_held_old_output_after_temp_swaps(
     tmp_path,
@@ -2604,6 +2680,12 @@ def test_replace_recreates_rollback_from_held_old_output_after_temp_swaps(
         candidate.close()
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="stages a race by replacing a file that is held open, which "
+    "Windows refuses outright -- the very displacement this guards "
+    "against cannot happen there",
+)
 def test_no_clobber_publishes_held_copy_when_candidate_path_is_swapped(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2660,6 +2742,12 @@ def test_no_clobber_publishes_held_copy_when_candidate_path_is_swapped(
     assert not tuple((tmp_path / ".matteloop-publish").glob("*.publish"))
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="stages a race by replacing a file that is held open, which "
+    "Windows refuses outright -- the very displacement this guards "
+    "against cannot happen there",
+)
 def test_no_clobber_never_unlinks_a_concurrent_output_after_reservation(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2716,6 +2804,12 @@ def test_no_clobber_never_unlinks_a_concurrent_output_after_reservation(
     assert not tuple((tmp_path / ".matteloop-publish").glob("*.publish"))
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="stages a race by replacing a file that is held open, which "
+    "Windows refuses outright -- the very displacement this guards "
+    "against cannot happen there",
+)
 def test_no_clobber_rejects_a_destination_swap_during_held_sha_verification(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2915,3 +3009,26 @@ def _only_durable_workspace(output_directory: Path):
     return FilesystemWorkspacePort().open_promoted(
         output_directory, durable_paths[0].name
     )
+
+
+def test_no_flush_reads_a_file_it_cannot_commit() -> None:
+    # Windows' os.fsync maps to _commit(), which needs a writable descriptor
+    # and fails with EBADF on a read-only one. A read-only handle cost every
+    # Windows render its output with "cannot persist framed PNG: OSError:
+    # [Errno 9] Bad file descriptor", and the same defect had already cost
+    # every WebP encode its own flush.
+    import re
+
+    read_only = re.compile(r"""\.open\(\s*["']rb["']\s*\)\s+as\s+(\w+)""")
+    flushed = re.compile(r"os\.fsync\(\s*(\w+)\.fileno\(\)")
+    offenders: list[str] = []
+    for source in Path("src/matteloop").rglob("*.py"):
+        lines = source.read_text(encoding="utf-8").splitlines()
+        for index, line in enumerate(lines):
+            match = flushed.search(line)
+            if match is None:
+                continue
+            window = "\n".join(lines[max(0, index - 8) : index])
+            if match.group(1) in read_only.findall(window):
+                offenders.append(f"{source}:{index + 1}")
+    assert offenders == []

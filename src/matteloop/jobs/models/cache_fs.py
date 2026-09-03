@@ -21,7 +21,17 @@ _FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 _WINDOWS_DIRECTORY_ACCESS = 0x80000000
 _WINDOWS_WRITABLE_DIRECTORY_ACCESS = 0xC0000000
-_WINDOWS_DIRECTORY_SHARE = 0x00000001
+# FILE_SHARE_READ | FILE_SHARE_WRITE. Windows checks sharing symmetrically,
+# so binding one directory kept us from binding it again ourselves, which
+# every nested lookup does. FILE_SHARE_DELETE stays out: a bound directory
+# still cannot be renamed or deleted under its handle.
+_WINDOWS_DIRECTORY_SHARE = 0x00000001 | 0x00000002
+# Every relative open asks for FILE_SYNCHRONOUS_IO_NONALERT, which
+# NtCreateFile rejects with STATUS_INVALID_PARAMETER unless the access mask
+# also carries SYNCHRONIZE. CreateFileW adds it implicitly; NtCreateFile does
+# not, which is why only the relative opens failed.
+_WINDOWS_SYNCHRONIZE = 0x00100000
+_FILE_ID_INFO_CLASS = 18
 _WINDOWS_PUBLICATION_SHARE = 0x00000001 | 0x00000002 | 0x00000004
 # A publication parent is deliberately distinct from the restrictive model-cache
 # namespace.  It must create/remove children, serve as a relative rename target,
@@ -31,7 +41,9 @@ _WINDOWS_PUBLICATION_DIRECTORY_ACCESS = (
     | 0x00000002  # FILE_ADD_FILE
     | 0x00000004  # FILE_ADD_SUBDIRECTORY
     | 0x00000020  # FILE_TRAVERSE
-    | 0x00000040  # FILE_DELETE_CHILD
+    # No FILE_DELETE_CHILD: it sits outside Modify, which is what an
+    # ordinary output folder grants, and entries are removed through a child
+    # handle opened with DELETE rather than through the parent.
     | 0x00000080  # FILE_READ_ATTRIBUTES
     | 0x00100000  # SYNCHRONIZE
 )
@@ -1366,7 +1378,7 @@ class _CtypesWindowsDirectoryApi:
         status = int(
             self._nt_create_file(
                 ctypes.byref(handle),
-                desired_access,
+                desired_access | _WINDOWS_SYNCHRONIZE,
                 ctypes.byref(attributes),
                 ctypes.byref(io_status),
                 None,
@@ -1416,26 +1428,60 @@ class _CtypesWindowsDirectoryApi:
             file_type = stat.S_IFREG
         size = (int(info.FileSizeHigh) << 32) | int(info.FileSizeLow)
         inode = (int(info.FileIndexHigh) << 32) | int(info.FileIndexLow)
+        access_ns = self._filetime_ns(info.LastAccessTime)
+        write_ns = self._filetime_ns(info.LastWriteTime)
+        creation_ns = self._filetime_ns(info.CreationTime)
+        # The nanosecond fields have to be supplied directly: deriving them
+        # from the float seconds loses precision, and identity checks compare
+        # st_mtime_ns against os.fstat's exact value for the same file.
         return os.stat_result(
             (
                 file_type | 0o600,
                 inode,
-                int(info.VolumeSerialNumber),
+                self._volume_identifier(handle, int(info.VolumeSerialNumber)),
                 int(info.NumberOfLinks),
                 0,
                 0,
                 size,
-                self._filetime_seconds(info.LastAccessTime),
-                self._filetime_seconds(info.LastWriteTime),
-                self._filetime_seconds(info.CreationTime),
-            )
+                access_ns // 1_000_000_000,
+                write_ns // 1_000_000_000,
+                creation_ns // 1_000_000_000,
+            ),
+            {
+                "st_atime_ns": access_ns,
+                "st_mtime_ns": write_ns,
+                "st_ctime_ns": creation_ns,
+            },
         )
 
+    def _volume_identifier(self, handle: int, fallback: int) -> int:
+        """Return the volume id os.fstat reports for the same handle.
+
+        GetFileInformationByHandle yields a 32-bit serial, while CPython's
+        stat reads FILE_ID_INFO's 64-bit one. Identity checks that compare
+        this against os.fstat see two different volumes for one file and
+        reject it, so the wider value has to come from the same source.
+        """
+        import ctypes
+
+        class FileIdInfo(ctypes.Structure):
+            _fields_ = (
+                ("VolumeSerialNumber", ctypes.c_uint64),
+                ("FileId", ctypes.c_ubyte * 16),
+            )
+
+        identity = FileIdInfo()
+        if not self._get_information(
+            handle, _FILE_ID_INFO_CLASS, ctypes.byref(identity), ctypes.sizeof(identity)
+        ):
+            return fallback
+        return int(identity.VolumeSerialNumber)
+
     @staticmethod
-    def _filetime_seconds(value: object) -> float:
+    def _filetime_ns(value: object) -> int:
         low = int(getattr(value, "Low"))
         high = int(getattr(value, "High"))
-        return (((high << 32) | low) - 116_444_736_000_000_000) / 10_000_000
+        return (((high << 32) | low) - 116_444_736_000_000_000) * 100
 
     def _require_regular_file_handle(self, handle: int) -> None:
         attributes = self.file_attributes(handle)
@@ -1459,7 +1505,9 @@ class _CtypesWindowsDirectoryApi:
             raise FileExistsError(code, "cache entry already exists", name)
         if code == 5:
             raise PermissionError(code, "cache entry access denied", name)
-        raise OSError(code, "relative cache operation failed", name)
+        raise OSError(
+            code, f"relative cache operation failed (NTSTATUS {status:#010x})", name
+        )
 
     @staticmethod
     def _require_hardened_open(

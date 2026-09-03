@@ -1086,7 +1086,7 @@ class RenderService:
                 finally:
                     cut.close()
                     del cut
-                    gc.collect()
+                    gc.collect(0)
                 context.checkpoint("cut-stage")
                 context.progress(
                     "render-cut", index + 1, total=len(timestamps),
@@ -1650,7 +1650,7 @@ def _persist_framed_png(path: Path, image: Image.Image) -> None:
         os.close(descriptor)
         temporary = Path(raw)
         image.save(temporary, format="PNG")
-        with temporary.open("rb") as encoded:
+        with temporary.open("rb+") as encoded:  # Windows _commit needs write
             os.fsync(encoded.fileno())
         os.replace(temporary, path)
         temporary = None

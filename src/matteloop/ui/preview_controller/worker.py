@@ -166,6 +166,7 @@ def _preview_error(error: BaseException, job_id: str) -> AppError:
             job_id,
             error.code.value,
             error.technical_detail,
+            exc_info=error,
         )
         return error
     _LOGGER.exception("preview job %s raised %s", job_id, type(error).__name__)

@@ -10,11 +10,16 @@ from types import SimpleNamespace
 import pytest
 
 import matteloop.jobs.models.cache_fs as cache_fs
-from matteloop.jobs.models.cache_fs import UnsafeCacheError, _bind_windows
+from matteloop.jobs.models.cache_fs import (
+    BoundModelDirectory,
+    UnsafeCacheError,
+    _bind_windows,
+)
 
 _FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
-_FILE_SHARE_READ = 0x00000001
+# FILE_SHARE_READ | FILE_SHARE_WRITE: see cache_fs._WINDOWS_DIRECTORY_SHARE.
+_FILE_SHARE_READ = 0x00000001 | 0x00000002
 _FILE_SHARE_WRITE = 0x00000002
 _FILE_SHARE_DELETE = 0x00000004
 _FILE_WRITE_DATA = 0x00000002
@@ -286,20 +291,25 @@ def test_windows_binding_creates_each_missing_segment_under_held_ancestors(
     bound.close()
 
 
-def test_windows_binding_fails_when_foreign_writer_already_owns_component(
+def test_windows_binding_tolerates_a_concurrent_writer_on_a_component(
     tmp_path: Path,
 ) -> None:
+    # Binding used to refuse FILE_SHARE_WRITE, which Windows checks
+    # symmetrically: holding one directory then blocked us from binding it
+    # again ourselves, and every nested lookup does exactly that. Excluding
+    # a concurrent writer never protected the contents anyway -- any process
+    # running as the same user can write there -- while the guarantee that
+    # matters, that a bound directory cannot be renamed or deleted under its
+    # handle, comes from withholding FILE_SHARE_DELETE and is unchanged.
     root, _version, _model = _namespace(tmp_path)
     api = FakeWindowsDirectoryApi()
     api.foreign_write_paths.add(root)
 
-    with pytest.raises(OSError, match="sharing violation"):
-        _bind_windows(root, "2.0.72", "u2net", create=False, api=api)
+    bound = _bind_windows(root, "2.0.72", "u2net", create=False, api=api)
 
-    opened_before_conflict = _ancestor_chain(root)[:-1]
-    handles = list(range(100, 100 + len(opened_before_conflict)))
-    assert api.opened == opened_before_conflict
-    assert api.closed == list(reversed(handles))
+    assert bound is not None
+    assert api.opened[: len(_ancestor_chain(root))] == _ancestor_chain(root)
+    assert bound.path == root / "2.0.72" / "u2net"
 
 
 def test_windows_bound_directory_allows_attribute_mutation_but_not_data_writer(
@@ -313,7 +323,9 @@ def test_windows_bound_directory_allows_attribute_mutation_but_not_data_writer(
     bound = _bind_windows(root, "2.0.72", "u2net", create=False, api=api)
 
     assert bound is not None
-    assert api.attempt_in_place_reparse(model, _FILE_WRITE_DATA) is False
+    # A reparse point could always be set through FILE_WRITE_ATTRIBUTES; the
+    # binding never claimed to stop that. What it stops is a rename or
+    # delete under the handle, which needs FILE_SHARE_DELETE.
     assert api.attempt_in_place_reparse(model, _FILE_WRITE_ATTRIBUTES, outside) is True
     assert api.reparse_mutations == [model]
     assert api.named_redirects == {model: outside}
@@ -600,11 +612,14 @@ def test_windows_native_child_open_is_root_handle_relative() -> None:
     )
 
     assert handle == 321
+    # SYNCHRONIZE must reach NtCreateFile: without it the kernel rejects
+    # FILE_SYNCHRONOUS_IO_NONALERT with STATUS_INVALID_PARAMETER, which is
+    # how a real Windows build failed on the first path component.
     assert calls == [
         (
             123,
             "cache",
-            _GENERIC_READ,
+            _GENERIC_READ | 0x00100000,
             _FILE_SHARE_READ,
             3,
             0x00000001 | 0x00000020 | 0x00200000,
@@ -1279,3 +1294,127 @@ def test_windows_native_enumeration_parses_names_from_bound_handle(
 
     assert [name for name, _info in entries] == ["alpha.bin", "beta.bin"]
     assert queries == [11, 10]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="exercises the real Windows NT API")
+def test_real_windows_api_binds_a_cache_directory_end_to_end(tmp_path: Path) -> None:
+    """Bind through the actual ctypes implementation, not a fake API.
+
+    Every other Windows binding test substitutes _WindowsDirectoryApi, so a
+    defect in the real NtCreateFile call reaches users untested: the frozen
+    build failed with "[Errno 87] relative cache operation failed: 'Users'"
+    while the whole suite was green.
+    """
+    bound = BoundModelDirectory.bind(tmp_path, "2.0.72", "u2netp", create=True)
+
+    assert bound is not None
+    with bound:
+        assert bound.path.is_dir()
+    assert (tmp_path / "2.0.72" / "u2netp").is_dir()
+
+    reopened = BoundModelDirectory.bind(tmp_path, "2.0.72", "u2netp", create=False)
+
+    assert reopened is not None
+    reopened.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="compares the two Windows stat sources")
+def test_bound_lstat_matches_os_fstat_identity(tmp_path: Path) -> None:
+    """The cache's own lstat must agree with os.fstat about file identity.
+
+    Several checks compare an identity from bound.lstat() against one from
+    os.fstat(); they are only meaningful if both sources report st_dev and
+    st_ino the same way.
+    """
+    bound = BoundModelDirectory.bind(tmp_path, "2.0.72", "u2netp", create=True)
+    assert bound is not None
+    with bound:
+        (bound.path / "weight.onnx").write_bytes(b"weight")
+        from_api = bound.lstat("weight.onnx")
+        descriptor = bound.open_read("weight.onnx")
+        try:
+            from_os = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+
+    assert (from_api.st_dev, from_api.st_ino) == (from_os.st_dev, from_os.st_ino), (
+        f"bound.lstat dev/ino {from_api.st_dev}/{from_api.st_ino} != "
+        f"os.fstat {from_os.st_dev}/{from_os.st_ino}"
+    )
+    # Workspace frame checks compare st_mtime_ns across the same two
+    # sources, so a value rounded through float seconds fails them.
+    assert from_api.st_mtime_ns == from_os.st_mtime_ns, (
+        f"bound.lstat mtime_ns {from_api.st_mtime_ns} != "
+        f"os.fstat {from_os.st_mtime_ns}"
+    )
+    assert from_api.st_size == from_os.st_size
+
+
+@pytest.mark.skipif(os.name != "nt", reason="binds against a real Windows ACL")
+def test_publication_binds_a_directory_granting_only_modify(tmp_path: Path) -> None:
+    """Modify is what an ordinary output folder grants; Full is not.
+
+    FILE_DELETE_CHILD sits outside Modify (0x1301BF) and only inside Full
+    Control, and asking for it refused a plain "C:\\Temp" outright. Nothing
+    needs it: entries are removed through a child handle opened with DELETE.
+    """
+    import getpass
+    import subprocess
+
+    from matteloop.jobs.workspace._filesystem import _BoundDirectory
+
+    target = tmp_path / "output"
+    target.mkdir()
+    granted = subprocess.run(
+        [
+            "icacls",
+            str(target),
+            "/inheritance:r",
+            "/grant",
+            f"{getpass.getuser()}:(OI)(CI)(M)",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if granted.returncode != 0:
+        pytest.skip(f"could not restrict the directory: {granted.stderr.strip()}")
+
+    bound = _BoundDirectory._open_windows_publication(target)
+
+    try:
+        assert bound.path == target
+    finally:
+        bound.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="binds against a real Windows ACL")
+def test_binding_a_directory_needs_no_more_than_the_rights_it_uses(
+    tmp_path: Path,
+) -> None:
+    """A writable target must not require every right GENERIC_WRITE implies.
+
+    The final component is opened with GENERIC_WRITE, which also demands
+    FILE_WRITE_EA and FILE_WRITE_ATTRIBUTES. A directory that grants
+    everything the binding actually does -- listing, traversing, creating
+    and deleting entries -- but withholds those two is refused outright,
+    which is how "C:\\Temp" came back as "cache entry access denied".
+    """
+    import getpass
+    import subprocess
+
+    target = tmp_path / "restricted"
+    target.mkdir()
+    denied = subprocess.run(
+        ["icacls", str(target), "/deny", f"{getpass.getuser()}:(WEA,WA)"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if denied.returncode != 0:
+        pytest.skip(f"could not restrict the directory: {denied.stderr.strip()}")
+
+    bound = BoundModelDirectory.bind(target, "2.0.72", "u2netp", create=True)
+
+    assert bound is not None
+    bound.close()

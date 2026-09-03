@@ -23,6 +23,18 @@ __all__ = (
 )
 
 
+
+def _name_failed_bind(error: BaseException, path: Path) -> None:
+    """Name the directory a bind failed on, not just its last component.
+
+    The native layer knows only the component it asked for, so a refusal
+    reads as "'Temp'" with no way to tell which one. Skipped for an OSError
+    carrying just a message, which would then render as "[Errno None] None".
+    """
+    if isinstance(error, OSError) and error.strerror:
+        error.filename = str(path)
+
+
 class _BoundDirectory:
     __slots__ = (
         "_windows_api",
@@ -151,12 +163,13 @@ class _BoundDirectory:
                 windows_handles=tuple(handles),
                 windows_api=api,
             )
-        except BaseException:
+        except BaseException as error:
             for handle in reversed(handles):
                 try:
                     api.close_handle(handle)
                 except OSError:
                     pass
+            _name_failed_bind(error, path)
             raise
 
     @classmethod
@@ -222,6 +235,7 @@ class _BoundDirectory:
                     raise _unsafe_error(f"output component {component!r} is redirected")
             return cls(path, None, windows_handles=tuple(handles), windows_api=api)
         except BaseException as error:
+            _name_failed_bind(error, path)
             failed_handles: list[int] = []
             for handle in reversed(handles):
                 try:

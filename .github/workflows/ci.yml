@@ -25,6 +25,10 @@ jobs:
       - run: uv run mypy src
 
   test:
+    # Named from the matrix entry alone: the generated name would include
+    # every value, so it changes whenever a test path moves and any required
+    # status check referring to it silently stops being satisfied.
+    name: test (${{ matrix.name }})
     runs-on: ubuntu-22.04
     env:
       QT_QPA_PLATFORM: offscreen
@@ -56,3 +60,50 @@ jobs:
           enable-cache: true
       - run: uv sync --locked --all-groups
       - run: uv run pytest -q ${{ matrix.paths }}
+
+  swscale:
+    runs-on: ubuntu-22.04
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Qt runtime libraries and Valgrind
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libgl1 libegl1 libfontconfig1 libglib2.0-0 libdbus-1-3 libxkbcommon0 valgrind
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --locked --all-groups
+      # .venv/bin/python, not "uv run python": Valgrind would trace uv and
+      # report nothing about the decode.
+      - run: .venv/bin/python scripts/check_swscale_overrun.py
+
+  windows:
+    # The Windows-only code paths (NT directory API, stat identities, path
+    # handling) are replaced by fakes in the suite above, so defects in them
+    # reached users while every Linux job stayed green.
+    runs-on: windows-2022
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --locked --all-groups
+      # Scoped to the filesystem and model-cache paths for now: those hold
+        # the Windows-only code (NT directory API, stat identities, path
+        # handling) that shipped broken while Linux stayed green. Running the
+        # whole suite here also surfaces a crash in the Qt render worker and a
+        # long tail of POSIX assumptions in the tests themselves; widen this
+        # once those are addressed rather than leaving the job permanently red.
+      # Still out, each needing its own work: tests/jobs/test_workspace has
+      # POSIX-only test assumptions (os.utime on a descriptor, psutil's
+      # num_fds) and hits a real sharing violation cleaning scratch
+      # directories, and tests/ui/test_render_controller crashes the
+      # interpreter with an access violation raised while a worker thread
+      # closes the PyAV container in jobs/source.py.
+      - run: uv run pytest -q --durations=15 tests/jobs tests/core tests/test_resources.py
