@@ -10,9 +10,11 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -91,6 +93,16 @@ class MediaStackBuildError(RuntimeError):
         if stderr.strip():
             message += f"\n--- stderr ---\n{stderr}"
         super().__init__(message)
+
+
+def _report_step(stage: str, event: str, started: float) -> None:
+    timestamp = datetime.now(UTC).strftime("%H:%M:%S")
+    elapsed = int(time.monotonic() - started)
+    print(
+        f"{timestamp} media-stack {stage} {event} (+{elapsed}s)",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 @dataclass(slots=True)
@@ -741,6 +753,8 @@ def _run_command(
     if record:
         evidence = normalized if record_as is None else tuple(map(str, record_as))
         context.build_commands.append(evidence)
+    started = time.monotonic()
+    _report_step(stage, "start", started)
     # Decode explicitly: text=True would use the locale encoding, and MSVC
     # writes its diagnostics in the OEM code page. On a German Windows that
     # made cp1252 reject byte 0x81, killing subprocess's reader thread and
@@ -757,19 +771,24 @@ def _run_command(
     if cwd is not None:
         kwargs["cwd"] = str(cwd)
     try:
-        completed = context.runner(normalized, **kwargs)
-    except OSError as error:
-        raise MediaStackBuildError(stage, normalized, 127, context.staging) from error
-    if completed.returncode != 0:
-        raise MediaStackBuildError(
-            stage,
-            normalized,
-            completed.returncode,
-            context.staging,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
-        )
-    return completed
+        try:
+            completed = context.runner(normalized, **kwargs)
+        except OSError as error:
+            raise MediaStackBuildError(
+                stage, normalized, 127, context.staging
+            ) from error
+        if completed.returncode != 0:
+            raise MediaStackBuildError(
+                stage,
+                normalized,
+                completed.returncode,
+                context.staging,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+            )
+        return completed
+    finally:
+        _report_step(stage, "finished", started)
 
 
 def _atomic_write(path: Path, contents: bytes) -> None:
@@ -809,13 +828,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         artifacts = ensure_media_stack(root, cache, force=arguments.force)
     except MediaStackBuildError as error:
-        print(f"Media stack build failed: {error}", file=sys.stderr)
+        print(f"Media stack build failed: {error}", file=sys.stderr, flush=True)
         return 1
     payload = _artifact_payload(artifacts)
     if arguments.json:
-        print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+        print(json.dumps(payload, sort_keys=True, separators=(",", ":")), flush=True)
     else:
-        print(f"Media stack identity: {artifacts.identity}")
+        print(f"Media stack identity: {artifacts.identity}", flush=True)
         for name in (
             "wheel",
             "provenance",
@@ -823,7 +842,7 @@ def main(argv: list[str] | None = None) -> int:
             "report",
             "artifact_set",
         ):
-            print(f"{name}: {payload[name]}")
+            print(f"{name}: {payload[name]}", flush=True)
     return 0
 
 

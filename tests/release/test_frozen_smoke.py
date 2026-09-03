@@ -604,12 +604,24 @@ def test_pyside_deploy_accepts_spec_in_dry_run_mode(tmp_path: Path) -> None:
     assert "--mode=standalone" in command or "--standalone" in command
 
 
-def test_release_workflow_has_only_manual_unsigned_native_builds() -> None:
+def test_release_workflow_builds_on_dispatch_tags_and_media_stack_changes() -> None:
     workflow_path = REPOSITORY_ROOT / ".github" / "workflows" / "release.yml"
     workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
 
     assert set(workflow["on"]) == {"workflow_dispatch", "push"}
-    assert workflow["on"]["push"] == {"tags": ["v*"]}
+    # A tag push still triggers a full build (publishing stays gated on the
+    # tag below); a push to main only rebuilds when it touches the media
+    # stack, so main gets a warm cache without publishing an unsigned build.
+    assert workflow["on"]["push"] == {
+        "tags": ["v*"],
+        "branches": ["main"],
+        "paths": [
+            "packaging/media-stack/manifest.toml",
+            "scripts/media_stack/**",
+            "scripts/build_media_stack.py",
+            "scripts/verify_media_stack.py",
+        ],
+    }
     dispatch = workflow["on"]["workflow_dispatch"]
     assert dispatch["inputs"]["platform"]["default"] == "both"
     assert set(dispatch["inputs"]["platform"]["options"]) == {
@@ -744,6 +756,14 @@ def test_release_workflow_has_only_manual_unsigned_native_builds() -> None:
         step for step in steps if step["name"] == "Build native standalone bundle"
     )
     assert build["run"] == "uv run --frozen --no-sync python scripts/build.py"
+    cache_stats = next(
+        step for step in steps if step["name"] == "Report compile cache statistics"
+    )
+    assert cache_stats["if"] == "always()"
+    assert cache_stats["shell"] == "bash"
+    assert "du -sh" in cache_stats["run"]
+    assert "ccache -s" in cache_stats["run"]
+    assert steps.index(cache_stats) == build_index + 1
 
     upload = next(step for step in steps if step.get("id") == "upload")
     assert upload["with"]["name"] == "MatteLoop-unsigned-${{ matrix.target }}"

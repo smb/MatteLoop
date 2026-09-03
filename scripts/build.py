@@ -14,8 +14,10 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
 from zipfile import BadZipFile, ZipFile, ZipInfo
 
@@ -104,6 +106,22 @@ class PreparedMediaStack:
     target: BuildTarget
     contract: VerificationContract
     identity: str
+
+
+def _report_phase(phase: str, event: str, started: float) -> None:
+    timestamp = datetime.now(UTC).strftime("%H:%M:%S")
+    elapsed = int(time.monotonic() - started)
+    print(f"{timestamp} {phase} {event} (+{elapsed}s)", flush=True)
+
+
+@contextlib.contextmanager
+def _timed_phase(phase: str) -> Iterator[None]:
+    started = time.monotonic()
+    _report_phase(phase, "start", started)
+    try:
+        yield
+    finally:
+        _report_phase(phase, "finished", started)
 
 
 def deploy_executable(
@@ -443,9 +461,13 @@ def main(argv: list[str] | None = None) -> int:
 
     errors = [*prerequisite_errors(), *packaging_input_errors()]
     if errors:
-        print("Native build prerequisites are not satisfied:", file=sys.stderr)
+        print(
+            "Native build prerequisites are not satisfied:",
+            file=sys.stderr,
+            flush=True,
+        )
         for error in errors:
-            print(f"  - {error}", file=sys.stderr)
+            print(f"  - {error}", file=sys.stderr, flush=True)
         return 1
 
     return _run_native_build(arguments.media_wheel, arguments.rebuild_media_stack)
@@ -455,7 +477,6 @@ def _run_native_build(media_wheel: Path | None, rebuild_media_stack: bool) -> in
     deploy_path = deploy_executable()
     artifact = expected_artifact(sys.platform)
     deployment_staging = ROOT / "packaging" / "deployment"
-    print("Building unsigned native bundle with pyside6-deploy…", flush=True)
     try:
         remove_previous_artifact(sys.platform)
         shutil.rmtree(deployment_staging, ignore_errors=True)
@@ -471,12 +492,22 @@ def _run_native_build(media_wheel: Path | None, rebuild_media_stack: bool) -> in
                 )
                 if not validate_qt_source_companion(qt_companion):
                     raise ValueError("Qt source companion failed validation")
-                prepared = prepare_media_stack(
-                    build_directory / "media-wheel",
-                    root=ROOT,
-                    media_wheel=media_wheel,
-                    rebuild=rebuild_media_stack,
+                media_phase = (
+                    "media-stack wheel"
+                    if media_wheel is not None
+                    else (
+                        "media-stack rebuild"
+                        if rebuild_media_stack
+                        else "media-stack build/cache"
+                    )
                 )
+                with _timed_phase(media_phase):
+                    prepared = prepare_media_stack(
+                        build_directory / "media-wheel",
+                        root=ROOT,
+                        media_wheel=media_wheel,
+                        rebuild=rebuild_media_stack,
+                    )
                 temporary_spec = build_directory / "pysidedeploy.spec"
                 prepare_temporary_spec(
                     ROOT / "packaging" / "pysidedeploy.spec",
@@ -484,14 +515,18 @@ def _run_native_build(media_wheel: Path | None, rebuild_media_stack: bool) -> in
                     prepared.av_directory,
                     os_name=sys.platform,
                 )
-                completed = subprocess.run(
-                    build_command(deploy_path, temporary_spec), cwd=ROOT, check=False
-                )
+                with _timed_phase("pyside6-deploy/Nuitka"):
+                    completed = subprocess.run(
+                        build_command(deploy_path, temporary_spec),
+                        cwd=ROOT,
+                        check=False,
+                    )
         _recover_long_command_deploy_mismatch(artifact, deployment_staging)
     except (OSError, RuntimeError, ValueError) as error:
         print(
             f"Native build preparation or launch failed: {error}",
             file=sys.stderr,
+            flush=True,
         )
         _copy_failure_diagnostics(error)
         return 1
@@ -560,26 +595,37 @@ def _finish_native_build(
         print(
             f"Native build failed with exit status {completed.returncode}.",
             file=sys.stderr,
+            flush=True,
         )
         return completed.returncode or 1
 
-    try:
-        size = artifact_size_bytes(artifact)
-    except FileNotFoundError:
-        print(
-            f"Native build reported success but produced no bundle at {artifact}.",
-            file=sys.stderr,
-        )
-        return 1
-    if size <= 0:
-        print(f"Native build produced an empty bundle at {artifact}.", file=sys.stderr)
-        return 1
-    media_errors = bundle_media_errors(artifact, prepared.target, prepared.contract)
-    if media_errors:
-        print("Native bundle media verification failed:", file=sys.stderr)
-        for error in media_errors:
-            print(f"  - {error}", file=sys.stderr)
-        return 1
+    with _timed_phase("bundle verification"):
+        try:
+            size = artifact_size_bytes(artifact)
+        except FileNotFoundError:
+            print(
+                f"Native build reported success but produced no bundle at {artifact}.",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 1
+        if size <= 0:
+            print(
+                f"Native build produced an empty bundle at {artifact}.",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 1
+        media_errors = bundle_media_errors(artifact, prepared.target, prepared.contract)
+        if media_errors:
+            print(
+                "Native bundle media verification failed:",
+                file=sys.stderr,
+                flush=True,
+            )
+            for error in media_errors:
+                print(f"  - {error}", file=sys.stderr, flush=True)
+            return 1
     return _smoke_and_publish_evidence(artifact, prepared, qt_companion, size)
 
 
@@ -610,13 +656,18 @@ def _smoke_and_publish_evidence(
     except (OSError, ValueError) as error:
         for pair in evidence:
             discard_compliance_evidence(pair)
-        print(f"Could not prepare compliance evidence: {error}", file=sys.stderr)
+        print(
+            f"Could not prepare compliance evidence: {error}",
+            file=sys.stderr,
+            flush=True,
+        )
         return 1
-    smoke = subprocess.run(
-        [str(Path(sys.executable)), "packaging/smoke_child.py", "dist"],
-        cwd=ROOT,
-        check=False,
-    )
+    with _timed_phase("frozen smoke"):
+        smoke = subprocess.run(
+            [str(Path(sys.executable)), "packaging/smoke_child.py", "dist"],
+            cwd=ROOT,
+            check=False,
+        )
     if smoke.returncode != 0:
         for pair in evidence:
             discard_compliance_evidence(pair)
@@ -624,19 +675,28 @@ def _smoke_and_publish_evidence(
             "Native build produced a bundle that failed the offline smoke test "
             f"(exit status {smoke.returncode}).",
             file=sys.stderr,
+            flush=True,
         )
         return smoke.returncode or 1
-    try:
-        for pair in evidence:
-            publish_compliance_evidence(pair)
-    except OSError as error:
-        for pair in evidence:
-            discard_compliance_evidence(pair)
-        print(f"Could not publish compliance evidence: {error}", file=sys.stderr)
-        return 1
-    if not _distribution_artifacts_present(artifact, evidence):
-        return 1
-    print(f"Built {artifact.relative_to(ROOT)} ({size / 1024**2:.1f} MiB).")
+    with _timed_phase("evidence publication"):
+        try:
+            for pair in evidence:
+                publish_compliance_evidence(pair)
+        except OSError as error:
+            for pair in evidence:
+                discard_compliance_evidence(pair)
+            print(
+                f"Could not publish compliance evidence: {error}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 1
+        if not _distribution_artifacts_present(artifact, evidence):
+            return 1
+    print(
+        f"Built {artifact.relative_to(ROOT)} ({size / 1024**2:.1f} MiB).",
+        flush=True,
+    )
     return 0
 
 
@@ -655,6 +715,7 @@ def _distribution_artifacts_present(
     print(
         f"Native build is missing distribution evidence: {missing}",
         file=sys.stderr,
+        flush=True,
     )
     return False
 
