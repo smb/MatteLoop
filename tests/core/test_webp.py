@@ -1170,7 +1170,6 @@ def test_encoder_opens_frames_lazily_and_closes_every_handle(
 
     def tracked_open(*args: Any, **kwargs: Any) -> Image.Image:
         nonlocal maximum_live
-        gc.collect()
         image = actual_open(*args, **kwargs)
         references.append(weakref.ref(image))
         file_handle = getattr(image, "fp", None)
