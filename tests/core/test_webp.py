@@ -1379,7 +1379,6 @@ def test_fit_resizes_from_immutable_sources_and_stops_after_twelve_encodes(
     sources = (noisy_rgba(tmp_path / "source.png"),)
     output = tmp_path / "out.webp"
     output.write_bytes(b"existing")
-    actual_encode = webp_module.encode_lossless_webp
     actual_resize = webp_module._resize_from_sources
     encode_count = 0
     resize_sources: list[tuple[Path, ...]] = []
@@ -1390,8 +1389,17 @@ def test_fit_resizes_from_immutable_sources_and_stops_after_twelve_encodes(
     ) -> EncodeSummary:
         nonlocal encode_count
         encode_count += 1
-        summary = actual_encode(paths, delays, destination)
-        return replace(summary, file_size=1000)
+        with Image.open(paths[0]) as frame:
+            width, height = frame.size
+        destination.write_bytes(b"webp")
+        return EncodeSummary(
+            destination=destination,
+            width=width,
+            height=height,
+            frames=len(paths),
+            duration_ms=sum(delays),
+            file_size=1000,
+        )
 
     def observe_resize(
         paths: tuple[Path, ...],
