@@ -177,6 +177,20 @@ def test_vfr_decode_selects_frame_owning_half_open_interval(
     assert max(range(3), key=pixel.__getitem__) == dominant_channel
 
 
+def test_decode_preserves_dimensions_for_unaligned_yuv_frame(tmp_path) -> None:
+    """The padded reformat destination is cropped back to the source size."""
+    frames = [Image.new("RGB", (18, 8), color) for color in ("red", "blue")]
+    path = make_video(tmp_path / "unaligned.mp4", frames, Fraction(2))
+
+    decoded = decode_frame(path, Fraction(0), request_id=1)
+
+    try:
+        assert decoded.image.mode == "RGBA"
+        assert decoded.image.size == (18, 8)
+    finally:
+        decoded.image.close()
+
+
 def test_decode_tracker_keeps_only_returned_image_live(tmp_path) -> None:
     path = make_video(tmp_path / "tracked.mp4", _solid_frames(), Fraction(2))
     tracker = RgbaOwnershipTracker((16, 8))
@@ -1365,7 +1379,8 @@ def test_revision_drops_the_ctime_windows_reports_inconsistently(
     target.write_bytes(b"data")
     info = target.lstat()
 
-    assert source_module._revision_from_stat(info).ctime_ns == info.st_ctime_ns
+    if os.name != "nt":
+        assert source_module._revision_from_stat(info).ctime_ns == info.st_ctime_ns
 
     monkeypatch.setattr(source_module.os, "name", "nt")
     windows = source_module._revision_from_stat(info)

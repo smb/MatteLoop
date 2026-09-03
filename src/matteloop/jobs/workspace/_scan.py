@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from ._fs_helpers import (
         _fdopen_owned,
         _hash_file,
+        _set_times_fd,
         _sha256_fd,
         _stat_identity,
         _write_all,
@@ -252,9 +253,8 @@ def _copy_frame_descriptor_bound(
                 assert destination_fd is not None
                 try:
                     os.fsync(destination_fd)
-                    os.utime(
-                        destination_fd,
-                        ns=(before.st_atime_ns, before.st_mtime_ns),
+                    _set_times_fd(
+                        destination_fd, before.st_atime_ns, before.st_mtime_ns
                     )
                     destination_hash = _sha256_fd(destination_fd)
                     destination_info = os.fstat(destination_fd)

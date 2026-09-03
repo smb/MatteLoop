@@ -24,6 +24,12 @@ __all__ = (
     "_SystemAdvisoryFileLock",
 )
 
+# Past any payload byte, so the mandatory Windows lock never covers content
+# another handle has to read, while staying a valid seek target on the
+# filesystems the POSIX tests exercise. A terabyte is far above the 4 GiB
+# ceiling a WebP output can reach.
+_WINDOWS_LOCK_OFFSET = 1 << 40
+
 
 class _SystemAdvisoryFileLock:
     """Non-blocking process lock adapter over one held regular-file fd."""
@@ -77,7 +83,12 @@ class _SystemAdvisoryFileLock:
         windows = self._windows
         if windows is None:
             raise RuntimeError("Windows advisory-lock adapter is unavailable")
-        os.lseek(descriptor, 0, os.SEEK_SET)
+        # Windows byte-range locks are mandatory, not advisory: locking byte
+        # 0 would make every later reader of the file itself fail with
+        # ERROR_LOCK_VIOLATION. Lock a byte no payload can reach instead, and
+        # restore the position because callers write from where they left off.
+        position = os.lseek(descriptor, 0, os.SEEK_CUR)
+        os.lseek(descriptor, _WINDOWS_LOCK_OFFSET, os.SEEK_SET)
         try:
             windows.locking(descriptor, windows.LK_NBLCK, 1)
         except OSError as error:
@@ -86,6 +97,8 @@ class _SystemAdvisoryFileLock:
             ) in {33, 36}:
                 return False
             raise
+        finally:
+            os.lseek(descriptor, position, os.SEEK_SET)
         return True
 
 

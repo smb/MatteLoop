@@ -14,6 +14,7 @@ from matteloop.core.crop import (
 )
 from matteloop.core.crop_state import CropChanged
 from matteloop.core.geometry import (
+    _MEDIA_INSET,
     CropGeometryState,
     InteractionGeometry,
     MediaTransform,
@@ -266,14 +267,23 @@ class CropCanvas(PreviewCanvas):
                     crop=raw_crop,
                     rotation=presentation.rotation,
                     pixel_aspect=presentation.pixel_aspect,
-                    focused=focused if focused is not None else (
-                        self._focused_target if self.hasFocus() else None
-                    ),
+                    inset=_MEDIA_INSET,
+                    focused=focused
+                    if focused is not None
+                    else (self._focused_target if self.hasFocus() else None),
                     dragged=dragged if dragged is not None else self._dragged,
                 ),
                 viewport=SizeF(max(1, self.width()), max(1, self.height())),
                 dpr=float(self.devicePixelRatioF()),
             )
+            transform = self._geometry.transform
+            layout = self.layout()
+            assert isinstance(transform, MediaTransform)
+            assert layout is not None
+            inset = int(transform.inset)
+            if layout.contentsMargins().left() != inset:
+                layout.setContentsMargins(inset, inset, inset, inset)
+                self._update_pixmap()
         except (TypeError, ValueError):
             self._geometry = None
 

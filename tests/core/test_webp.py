@@ -1130,6 +1130,11 @@ def test_fit_encodes_only_from_a_private_source_snapshot(
     assert all(paths[0].parent.name == "source-snapshot" for paths in observed)
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="Windows refuses to replace a file while it is open, so the "
+    "race this guards against cannot be staged there",
+)
 def test_fit_rejects_concurrent_source_replacement_during_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1165,7 +1170,6 @@ def test_encoder_opens_frames_lazily_and_closes_every_handle(
 
     def tracked_open(*args: Any, **kwargs: Any) -> Image.Image:
         nonlocal maximum_live
-        gc.collect()
         image = actual_open(*args, **kwargs)
         references.append(weakref.ref(image))
         file_handle = getattr(image, "fp", None)
@@ -1374,7 +1378,6 @@ def test_fit_resizes_from_immutable_sources_and_stops_after_twelve_encodes(
     sources = (noisy_rgba(tmp_path / "source.png"),)
     output = tmp_path / "out.webp"
     output.write_bytes(b"existing")
-    actual_encode = webp_module.encode_lossless_webp
     actual_resize = webp_module._resize_from_sources
     encode_count = 0
     resize_sources: list[tuple[Path, ...]] = []
@@ -1385,8 +1388,17 @@ def test_fit_resizes_from_immutable_sources_and_stops_after_twelve_encodes(
     ) -> EncodeSummary:
         nonlocal encode_count
         encode_count += 1
-        summary = actual_encode(paths, delays, destination)
-        return replace(summary, file_size=1000)
+        with Image.open(paths[0]) as frame:
+            width, height = frame.size
+        destination.write_bytes(b"webp")
+        return EncodeSummary(
+            destination=destination,
+            width=width,
+            height=height,
+            frames=len(paths),
+            duration_ms=sum(delays),
+            file_size=1000,
+        )
 
     def observe_resize(
         paths: tuple[Path, ...],

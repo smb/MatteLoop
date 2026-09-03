@@ -475,7 +475,10 @@ def test_success_fsyncs_file_and_parent_before_return(
     monkeypatch.setattr(download_module.os, "fsync", recording_fsync)
     _download(tmp_path, b"durable")
 
-    assert len(calls) >= 2
+    # The parent directory is flushed through FlushFileBuffers on Windows,
+    # which has no os.fsync equivalent for a directory handle, so only the
+    # file itself passes through os.fsync there.
+    assert len(calls) >= (1 if os.name == "nt" else 2)
 
 
 @pytest.mark.parametrize(

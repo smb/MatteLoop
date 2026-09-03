@@ -196,6 +196,18 @@ def _rewrite_frame(path: Path, color: tuple[int, int, int, int]) -> None:
     os.replace(temporary, path)
 
 
+
+def _open_handle_count(process) -> int:  # type: ignore[no-untyped-def]
+    """Count what the platform exposes: fds on POSIX, handles on Windows.
+
+    Collects first so a descriptor waiting on a finalizer is not counted as
+    a leak, which made this measurement flake in full-suite runs.
+    """
+    gc.collect()
+    if hasattr(process, "num_fds"):
+        return int(process.num_fds())
+    return int(process.num_handles())
+
 def test_discard_staged_set_removes_only_the_private_candidate(tmp_path: Path) -> None:
     durable = _promoted(tmp_path, job_id="old")
     staged, _manifest = _completed_staging(tmp_path, job_id="new", image_offset=4)
@@ -645,6 +657,11 @@ class _PublicationSharingWindowsApi(_ExclusiveWindowsCutsApi):
         super().replace_at(handle, source, destination)
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="simulates the Windows API for POSIX runs; on Windows the real "
+    "one is used and bypasses the fake's bookkeeping",
+)
 def test_windows_recovery_lstat_is_compatible_with_held_writable_descriptor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -668,6 +685,11 @@ def test_windows_recovery_lstat_is_compatible_with_held_writable_descriptor(
         recovery.close()
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="simulates the Windows API for POSIX runs; on Windows the real "
+    "one is used and bypasses the fake's bookkeeping",
+)
 def test_windows_recovery_replace_is_compatible_with_held_writable_descriptor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -699,6 +721,11 @@ def test_windows_recovery_replace_is_compatible_with_held_writable_descriptor(
         recovery.close()
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="simulates the Windows API for POSIX runs; on Windows the real "
+    "one is used and bypasses the fake's bookkeeping",
+)
 def test_windows_existing_recovery_remains_shareable_while_read_write_fd_is_held(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1735,6 +1762,11 @@ def test_windows_close_releases_range_and_ambiguous_fd_is_never_retried(
     ]
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="simulates the Windows API for POSIX runs; on Windows the real "
+    "one is used and bypasses the fake's bookkeeping",
+)
 def test_windows_recovery_directory_uses_bound_copy_replace_and_flush(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2173,7 +2205,7 @@ def test_component_binding_closes_descriptors_when_fstat_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     process = psutil.Process()
-    before = process.num_fds()
+    before = _open_handle_count(process)
     original_fstat = workspace_module.os.fstat
     expected = tmp_path.stat()
 
@@ -2187,7 +2219,7 @@ def test_component_binding_closes_descriptors_when_fstat_fails(
     with pytest.raises(OSError, match="injected"):
         workspace_module._BoundDirectory.open(tmp_path)
 
-    assert process.num_fds() <= before
+    assert _open_handle_count(process) <= before
 
 
 def test_local_filesystem_policy_degrades_for_nonlocal_and_unknown_storage(
@@ -3187,6 +3219,11 @@ def test_windows_journal_failure_cleans_stage_through_exclusive_cuts_binding(
     assert api.sharing_violations == []
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="patches _atomic_directory_exchange, which the Windows branch "
+    "never calls; the journalled rename is covered separately",
+)
 def test_failed_atomic_exchange_rolls_back_to_previous_cache(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -3309,7 +3346,7 @@ def test_recovery_finishes_cleanup_after_promoted_exchange_crash(
 
     def crash_once(parent: workspace_module._BoundDirectory, name: str) -> None:
         nonlocal crashed
-        if not crashed and name.startswith(".stage-"):
+        if not crashed and name.startswith((".stage-", ".backup-")):
             crashed = True
             raise OSError("injected post-exchange crash")
         original_cleanup(parent, name)
@@ -3434,7 +3471,9 @@ def test_external_metadata_only_edit_is_detected(tmp_path: Path) -> None:
     promoted = _promoted(tmp_path)
     before = validate_cut_set(promoted)
     frame = promoted.path / "frame-000000.png"
-    os.utime(frame, ns=(before.frames[0].mtime_ns + 10, before.frames[0].mtime_ns + 10))
+    # Windows stores 100-nanosecond ticks, so a 10 ns bump rounds away.
+    bumped = before.frames[0].mtime_ns + 1_000_000
+    os.utime(frame, ns=(bumped, bumped))
 
     detected = detect_external_edits(promoted, now_ns=30_000)
 
@@ -3665,14 +3704,14 @@ def test_read_promoted_cut_returns_independent_tracked_rgba_images(
 def test_validation_and_reads_do_not_leak_file_descriptors(tmp_path: Path) -> None:
     cuts = _promoted(tmp_path)
     process = psutil.Process()
-    before = process.num_fds()
+    before = _open_handle_count(process)
 
     for _ in range(20):
         validate_cut_set(cuts)
         image = cuts.read_promoted_cut(0)
         image.close()
 
-    assert process.num_fds() <= before + 1
+    assert _open_handle_count(process) <= before + 1
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor ownership probe")
@@ -3980,3 +4019,88 @@ def test_native_initial_journal_failure_cleans_stage_and_keeps_primary_error(
     )
     assert not stage.path.exists()
     assert validate_cut_set(old).to_json_bytes() == before
+
+
+def test_frame_copy_timestamps_are_set_through_the_descriptor(tmp_path: Path) -> None:
+    # os.utime takes a descriptor only where os.supports_fd allows it, which
+    # excludes Windows: the frozen build failed there with "utime: path
+    # should be string, bytes or os.PathLike, not int" while promoting a
+    # render, so no output was ever written.
+    from matteloop.jobs.workspace._fs_helpers import _set_times_fd
+
+    target = tmp_path / "frame-000000.png"
+    target.write_bytes(b"frame")
+    descriptor = os.open(target, os.O_RDWR)
+    try:
+        _set_times_fd(descriptor, 1_500_000_000_000_000_000, 1_400_000_000_500_000_000)
+    finally:
+        os.close(descriptor)
+
+    written = target.stat().st_mtime_ns
+    # Windows stores 100-nanosecond ticks, so allow that much rounding.
+    assert abs(written - 1_400_000_000_500_000_000) < 1_000
+
+
+def test_windows_lock_never_covers_a_byte_a_reader_needs(tmp_path: Path) -> None:
+    # Windows byte-range locks are mandatory: a lock on byte 0 makes every
+    # other handle fail reading the file with ERROR_LOCK_VIOLATION, which
+    # surfaced as "output location is not writable" on 37 Windows tests and
+    # as a render that produced no file.
+    class FakeMsvcrt:
+        LK_NBLCK = 3
+
+        def __init__(self) -> None:
+            self.locked_offsets: list[int] = []
+
+        def locking(self, descriptor: int, operation: int, size: int) -> None:
+            self.locked_offsets.append(os.lseek(descriptor, 0, os.SEEK_CUR))
+
+    lock_path = tmp_path / "output.transaction.lock"
+    lock_path.write_bytes(b"payload")
+    descriptor = os.open(lock_path, os.O_RDWR)
+    windows = FakeMsvcrt()
+    adapter = workspace_module._SystemAdvisoryFileLock(
+        platform="windows", windows_module=windows
+    )
+    try:
+        os.lseek(descriptor, 3, os.SEEK_SET)
+
+        assert adapter.acquire_nonblocking(descriptor) is True
+
+        assert windows.locked_offsets == [workspace_module._WINDOWS_LOCK_OFFSET]
+        assert min(windows.locked_offsets) > lock_path.stat().st_size
+        # Callers write from where they left off, so the position must survive.
+        assert os.lseek(descriptor, 0, os.SEEK_CUR) == 3
+    finally:
+        os.close(descriptor)
+
+
+def test_bind_failure_names_the_directory_not_only_its_component(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The native layer raises with the component it asked for, so a refusal
+    # read as "cache entry access denied: 'Temp'" -- which cannot be told
+    # apart from a Temp inside a profile, and left a real report unusable.
+    target = (tmp_path / "output").absolute()
+
+    class RefusingApi:
+        def open_anchor(self, _path: Path, **_kwargs: int) -> int:
+            return 41
+
+        def open_child_directory(
+            self, _parent: int, name: str, **_kwargs: int | bool
+        ) -> int:
+            raise PermissionError(5, "cache entry access denied", name)
+
+        def close_handle(self, _handle: int) -> None:
+            return None
+
+    from matteloop.jobs.models import cache_fs
+
+    monkeypatch.setattr(cache_fs, "_CtypesWindowsDirectoryApi", RefusingApi)
+
+    with pytest.raises(PermissionError) as raised:
+        workspace_module._BoundDirectory._open_windows(target)
+
+    assert raised.value.filename == str(target)
+    assert "cache entry access denied" in str(raised.value)

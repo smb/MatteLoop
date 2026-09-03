@@ -83,6 +83,11 @@ def test_regenerating_fixtures_replaces_preexisting_artifacts(
         destination.write_bytes(b"previous fixture")
     monkeypatch.setattr(generate, "_FIXTURE_DIRECTORY", tmp_path)
 
+    def generate_twice(name: str, encoder: str, x265_params: str | None) -> bytes:
+        return f"generated fixture: {name}".encode()
+
+    monkeypatch.setattr(generate, "_generate_twice", generate_twice)
+
     generate.main()
 
     for destination in destinations:
@@ -96,6 +101,11 @@ def test_fixture_regeneration_removes_temporary_artifact_after_replace_error(
     destination = tmp_path / "h264-sdr.mp4"
     destination.write_bytes(b"previous fixture")
     monkeypatch.setattr(generate, "_FIXTURE_DIRECTORY", tmp_path)
+
+    def generate_twice(name: str, encoder: str, x265_params: str | None) -> bytes:
+        return f"generated fixture: {name}".encode()
+
+    monkeypatch.setattr(generate, "_generate_twice", generate_twice)
 
     def replacement_failure(_source: Path, _destination: Path) -> Path:
         raise OSError("simulated replacement failure")

@@ -748,6 +748,10 @@ def test_release_workflow_has_only_manual_unsigned_native_builds() -> None:
     upload = next(step for step in steps if step.get("id") == "upload")
     assert upload["with"]["name"] == "MatteLoop-unsigned-${{ matrix.target }}"
     assert upload["with"]["path"] == "dist"
+    # delocate stores PyAV's FFmpeg libraries in av/.dylibs, and the default
+    # upload silently drops hidden files: the runner's own smoke test passed
+    # while the artifact people downloaded could not import av at all.
+    assert upload["with"]["include-hidden-files"] is True
     serialized = json.dumps(workflow).lower()
     assert "secrets." not in serialized
     assert "codesign" not in serialized

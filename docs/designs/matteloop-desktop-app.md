@@ -147,7 +147,7 @@ Rules:
 
 - Timeline and crop each derive one immutable `InteractionGeometry` snapshot from `AppState`, logical viewport size, device-pixel ratio, and the current media transform. Geometry calculation is pure presentation logic and never reads mutable widget flags.
 - The snapshot contains visual paths/rectangles, pointer and touch hit regions, keyboard focus rectangles, accessible screen rectangles, and explicit source↔widget↔screen coordinate converters. Painting, hit testing, keyboard movement, focus rendering, tooltips, and `QAccessible` adapters must consume that same snapshot; none may repeat coordinate math independently.
-- Pointer and touch hit padding expands interaction regions without changing the visible geometry. Overlap resolution is deterministic and tested: the currently focused/dragged element wins, then handles, then playhead/range lines, then the containing region.
+- Pointer and touch hit padding expands interaction regions without changing the visible geometry. Overlap resolution is deterministic and tested: the currently focused/dragged element wins, then handles nearer a corner or endpoint, then playhead/range lines and the containing region, then any remaining edge handles.
 - Pure parameterized tests cover resize, zoom, rotation, letterboxing, clamping, and 100/150/200% device scaling before widget-level input tests are added.
 
 ## Interface Specification

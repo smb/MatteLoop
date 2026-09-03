@@ -21,6 +21,10 @@ from matteloop.core.specs import FramingSpec
 
 _ROTATIONS = frozenset({0, 90, 180, 270})
 _MAX_IMAGE_ALLOCATION_BYTES = 1024 * 1024 * 1024
+_HANDLE_MARKER = 8.0
+_POINTER_TARGET = 24.0
+_TOUCH_TARGET = 44.0
+_MEDIA_INSET = 16.0
 _CROP_HANDLES = (
     "north_west",
     "north",
@@ -265,6 +269,7 @@ class MediaTransform:
     pan: PointF = field(default_factory=lambda: PointF(0, 0))
     screen_origin: PointF = field(default_factory=lambda: PointF(0, 0))
     dpr: float = 1.0
+    inset: float = 0.0
 
     def __post_init__(self) -> None:
         if not isinstance(self.source_size, SizeF) or not isinstance(
@@ -276,12 +281,18 @@ class MediaTransform:
         pixel_aspect = _finite(self.pixel_aspect, "pixel_aspect")
         zoom = _finite(self.zoom, "zoom")
         dpr = _finite(self.dpr, "dpr")
+        inset = _finite(self.inset, "inset")
         if pixel_aspect <= 0:
             raise ValueError("pixel_aspect must be positive")
         if zoom <= 0:
             raise ValueError("zoom must be positive")
         if dpr <= 0:
             raise ValueError("dpr must be positive")
+        if inset < 0:
+            raise ValueError("inset must be non-negative")
+        inset = float(
+            math.floor(min(inset, self.viewport.width / 4, self.viewport.height / 4))
+        )
         if not isinstance(self.pan, PointF) or not isinstance(
             self.screen_origin, PointF
         ):
@@ -289,6 +300,7 @@ class MediaTransform:
         object.__setattr__(self, "pixel_aspect", pixel_aspect)
         object.__setattr__(self, "zoom", zoom)
         object.__setattr__(self, "dpr", dpr)
+        object.__setattr__(self, "inset", inset)
 
     @property
     def oriented_display_size(self) -> SizeF:
@@ -306,8 +318,8 @@ class MediaTransform:
     def scale(self) -> float:
         display = self.oriented_display_size
         fit = min(
-            self.viewport.width / display.width,
-            self.viewport.height / display.height,
+            (self.viewport.width - 2 * self.inset) / display.width,
+            (self.viewport.height - 2 * self.inset) / display.height,
         )
         return fit * self.zoom
 
@@ -416,6 +428,7 @@ class CropGeometryState:
     zoom: float = 1.0
     pan: PointF = field(default_factory=lambda: PointF(0, 0))
     screen_origin: PointF = field(default_factory=lambda: PointF(0, 0))
+    inset: float = 0.0
     focused: str | None = None
     dragged: str | None = None
 
@@ -569,48 +582,33 @@ def build_crop_geometry(
         pan=state.pan,
         screen_origin=state.screen_origin,
         dpr=dpr,
+        inset=state.inset,
     )
     crop = transform.source_rect_to_widget(transform.clamp_source_rect(state.crop))
-    centers = {
-        "north_west": PointF(crop.left, crop.top),
-        "north": PointF(crop.center().x, crop.top),
-        "north_east": PointF(crop.right, crop.top),
-        "east": PointF(crop.right, crop.center().y),
-        "south_east": PointF(crop.right, crop.bottom),
-        "south": PointF(crop.center().x, crop.bottom),
-        "south_west": PointF(crop.left, crop.bottom),
-        "west": PointF(crop.left, crop.center().y),
-    }
-    visual_values = {"crop": crop}
-    visual_values.update(
-        {name: _centered_rect(center, 8, 8) for name, center in centers.items()}
+    visual = _crop_visual(crop)
+    edge_strips = _edge_strips(crop)
+    pointer = _crop_hit_map(
+        visual, edge_strips, crop, viewport, minimum=_POINTER_TARGET
     )
-    visual = FrozenRectMap(visual_values)
-    pointer = FrozenRectMap(
-        {
-            name: _effective_target(rect, viewport, 24)
-            for name, rect in visual.items()
-        }
-    )
-    touch = FrozenRectMap(
-        {
-            name: _effective_target(rect, viewport, 44)
-            for name, rect in visual.items()
-        }
-    )
+    touch = _crop_hit_map(visual, edge_strips, crop, viewport, minimum=_TOUCH_TARGET)
     return InteractionGeometry(
         visual=visual,
         pointer_hit=pointer,
         touch_hit=touch,
         focus=visual,
-        accessible_screen=FrozenRectMap(
-            {
-                name: transform.widget_rect_to_screen(rect)
-                for name, rect in touch.items()
-            }
-        ),
+        accessible_screen=_accessible_screen(transform, touch, crop, viewport),
         transform=transform,
-        priority=(*_CROP_HANDLES, "crop"),
+        priority=(
+            "north_west",
+            "north_east",
+            "south_east",
+            "south_west",
+            "crop",
+            "north",
+            "east",
+            "south",
+            "west",
+        ),
         focused=state.focused,
         dragged=state.dragged,
     )
@@ -687,25 +685,17 @@ def build_timeline_geometry(
             "start_handle": _centered_rect(
                 PointF(start_x, viewport.height / 2), 12, 32
             ),
-            "end_handle": _centered_rect(
-                PointF(end_x, viewport.height / 2), 12, 32
-            ),
+            "end_handle": _centered_rect(PointF(end_x, viewport.height / 2), 12, 32),
             "playhead": _centered_rect(
                 PointF(playhead_x, viewport.height / 2), 2, viewport.height
             ),
         }
     )
     pointer = FrozenRectMap(
-        {
-            name: _effective_target(rect, viewport, 24)
-            for name, rect in visual.items()
-        }
+        {name: _effective_target(rect, viewport, 24) for name, rect in visual.items()}
     )
     touch = FrozenRectMap(
-        {
-            name: _effective_target(rect, viewport, 44)
-            for name, rect in visual.items()
-        }
+        {name: _effective_target(rect, viewport, 44) for name, rect in visual.items()}
     )
     return InteractionGeometry(
         visual=visual,
@@ -896,9 +886,7 @@ def solve_proportional_scale(
         Fraction(min_dimension, source_height),
     )
     with localcontext(Context(prec=80)):
-        step = (
-            Decimal(ratio.numerator) / Decimal(ratio.denominator)
-        ).sqrt()
+        step = (Decimal(ratio.numerator) / Decimal(ratio.denominator)).sqrt()
         step = min(Decimal("0.97"), step)
         current = Decimal(current_fraction.numerator) / Decimal(
             current_fraction.denominator
@@ -923,6 +911,109 @@ def _map_rect(rect: RectF, converter: Callable[[PointF], PointF]) -> RectF:
 
 def _centered_rect(center: PointF, width: float, height: float) -> RectF:
     return RectF(center.x - width / 2, center.y - height / 2, width, height)
+
+
+def _crop_visual(crop: RectF) -> FrozenRectMap:
+    center = crop.center()
+    centers = {
+        "north_west": PointF(crop.left, crop.top),
+        "north": PointF(center.x, crop.top),
+        "north_east": PointF(crop.right, crop.top),
+        "east": PointF(crop.right, center.y),
+        "south_east": PointF(crop.right, crop.bottom),
+        "south": PointF(center.x, crop.bottom),
+        "south_west": PointF(crop.left, crop.bottom),
+        "west": PointF(crop.left, center.y),
+    }
+    return FrozenRectMap(
+        {
+            "crop": crop,
+            **{
+                name: _centered_rect(center, _HANDLE_MARKER, _HANDLE_MARKER)
+                for name, center in centers.items()
+            },
+        }
+    )
+
+
+def _crop_hit_map(
+    visual: FrozenRectMap,
+    edge_strips: Mapping[str, RectF],
+    crop: RectF,
+    viewport: SizeF,
+    *,
+    minimum: float,
+) -> FrozenRectMap:
+    source = {
+        **visual,
+        **edge_strips,
+        "crop": _shrunk_region(crop, minimum / 2, minimum),
+    }
+    return FrozenRectMap(
+        {
+            name: _effective_target(rect, viewport, minimum)
+            for name, rect in source.items()
+        }
+    )
+
+
+def _accessible_screen(
+    transform: CoordinateTransform,
+    touch: FrozenRectMap,
+    crop: RectF,
+    viewport: SizeF,
+) -> FrozenRectMap:
+    return FrozenRectMap(
+        {
+            **{
+                name: transform.widget_rect_to_screen(rect)
+                for name, rect in touch.items()
+            },
+            "crop": transform.widget_rect_to_screen(
+                _effective_target(crop, viewport, _TOUCH_TARGET)
+            ),
+        }
+    )
+
+
+def _edge_strips(crop: RectF) -> dict[str, RectF]:
+    return {
+        "north": RectF(
+            crop.left,
+            crop.top - _HANDLE_MARKER / 2,
+            crop.width,
+            _HANDLE_MARKER,
+        ),
+        "east": RectF(
+            crop.right - _HANDLE_MARKER / 2,
+            crop.top,
+            _HANDLE_MARKER,
+            crop.height,
+        ),
+        "south": RectF(
+            crop.left,
+            crop.bottom - _HANDLE_MARKER / 2,
+            crop.width,
+            _HANDLE_MARKER,
+        ),
+        "west": RectF(
+            crop.left - _HANDLE_MARKER / 2,
+            crop.top,
+            _HANDLE_MARKER,
+            crop.height,
+        ),
+    }
+
+
+def _shrunk_region(rect: RectF, half_band: float, minimum: float) -> RectF:
+    x_shrink = min(half_band, max(0, (rect.width - minimum) / 2))
+    y_shrink = min(half_band, max(0, (rect.height - minimum) / 2))
+    return RectF(
+        rect.x + x_shrink,
+        rect.y + y_shrink,
+        rect.width - 2 * x_shrink,
+        rect.height - 2 * y_shrink,
+    )
 
 
 def _effective_target(rect: RectF, viewport: SizeF, minimum: float) -> RectF:
@@ -994,9 +1085,7 @@ def _number_fraction(value: Fraction | Decimal | float | int, name: str) -> Frac
         ) from None
 
 
-def _positive_fraction(
-    value: Fraction | Decimal | float | int, name: str
-) -> Fraction:
+def _positive_fraction(value: Fraction | Decimal | float | int, name: str) -> Fraction:
     converted = _number_fraction(value, name)
     if converted <= 0:
         raise ValidationError(
@@ -1018,9 +1107,7 @@ def _percentage_fraction(value: Decimal | float | int) -> Fraction:
 
 def _alpha_threshold_table(threshold: Fraction) -> list[int]:
     return [
-        255
-        if alpha * 100 * threshold.denominator > 255 * threshold.numerator
-        else 0
+        255 if alpha * 100 * threshold.denominator > 255 * threshold.numerator else 0
         for alpha in range(256)
     ]
 
@@ -1031,12 +1118,9 @@ def _integer_size(value: object, name: str) -> tuple[int, int]:
             ErrorCode.INVALID_FRAMING, "framing", f"{name} must contain two integers"
         )
     copied = tuple(value)
-    if (
-        len(copied) != 2
-        or any(
-            not isinstance(item, int) or isinstance(item, bool) or item <= 0
-            for item in copied
-        )
+    if len(copied) != 2 or any(
+        not isinstance(item, int) or isinstance(item, bool) or item <= 0
+        for item in copied
     ):
         raise ValidationError(
             ErrorCode.INVALID_FRAMING, "framing", f"{name} must contain two integers"
