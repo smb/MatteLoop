@@ -72,13 +72,16 @@ else:
 ROOT = Path(__file__).resolve().parent.parent
 DIST_PATH = ROOT / "dist"
 
-_PINNED_DISTRIBUTIONS = {
+_COMMON_PINNED_DISTRIBUTIONS = {
     "PySide6": "6.10.3",
     "PySide6_Addons": "6.10.3",
     "PySide6_Essentials": "6.10.3",
     "shiboken6": "6.10.3",
     "Nuitka": "2.8.10",
-    "onnxruntime": "1.29.0",
+}
+_PLATFORM_PINNED_DISTRIBUTIONS = {
+    "win32": {"onnxruntime-directml": "1.24.4"},
+    "default": {"onnxruntime": "1.29.0"},
 }
 
 _PLATFORM_ICONS = {
@@ -151,15 +154,16 @@ def prerequisite_errors(
             "Run `uv sync --all-groups` from the project root."
         )
 
-    versions = installed_versions or _installed_versions()
-    for distribution, expected in _PINNED_DISTRIBUTIONS.items():
+    pinned_distributions = _pinned_distributions(os_name)
+    versions = installed_versions or _installed_versions(os_name)
+    for distribution, expected in pinned_distributions.items():
         actual = versions.get(distribution)
         if actual is None:
             errors.append(
                 f"Missing build prerequisite: {distribution}. "
                 "Run `uv sync --all-groups` from the project root."
             )
-        elif not _version_matches(distribution, actual):
+        elif actual != expected:
             errors.append(
                 f"{distribution} {actual} is installed, but the build requires "
                 f"{distribution} {expected}. Run `uv sync --all-groups`."
@@ -659,9 +663,9 @@ def _distribution_artifacts_present(
     return False
 
 
-def _installed_versions() -> dict[str, str | None]:
+def _installed_versions(os_name: str = sys.platform) -> dict[str, str | None]:
     versions: dict[str, str | None] = {}
-    for distribution in _PINNED_DISTRIBUTIONS:
+    for distribution in _pinned_distributions(os_name):
         try:
             versions[distribution] = importlib.metadata.version(distribution)
         except importlib.metadata.PackageNotFoundError:
@@ -669,8 +673,11 @@ def _installed_versions() -> dict[str, str | None]:
     return versions
 
 
-def _version_matches(distribution: str, actual: str) -> bool:
-    return actual == _PINNED_DISTRIBUTIONS[distribution]
+def _pinned_distributions(os_name: str) -> dict[str, str]:
+    platform_distributions = _PLATFORM_PINNED_DISTRIBUTIONS.get(
+        os_name, _PLATFORM_PINNED_DISTRIBUTIONS["default"]
+    )
+    return _COMMON_PINNED_DISTRIBUTIONS | platform_distributions
 
 
 def _onnxruntime_capi_directory() -> Path:

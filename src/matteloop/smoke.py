@@ -7,6 +7,7 @@ import hashlib
 import json
 import multiprocessing
 import os
+import sys
 import tempfile
 from dataclasses import asdict, dataclass
 from fractions import Fraction
@@ -129,13 +130,25 @@ def _assert_ownership_bounds(rgba_owners: RgbaOwnershipTracker) -> None:
         raise RuntimeError("RGBA ownership was not measured")
     if rgba_owners.peak > 3:
         raise RuntimeError(
-            "smoke exceeded three full-resolution RGBA owners: "
-            f"peak {rgba_owners.peak}"
+            f"smoke exceeded three full-resolution RGBA owners: peak {rgba_owners.peak}"
         )
     if rgba_owners.current != 0:
         raise RuntimeError(
             f"smoke retained {rgba_owners.current} full-resolution RGBA owners"
         )
+
+
+def _check_windows_directml_runtime() -> None:
+    import onnxruntime  # type: ignore[import-untyped]
+
+    if "DmlExecutionProvider" not in onnxruntime.get_available_providers():
+        raise RuntimeError(
+            "Windows bundle shipped the CPU runtime: "
+            "DmlExecutionProvider is unavailable"
+        )
+    directml_path = Path(onnxruntime.__file__).parent / "capi" / "DirectML.dll"
+    if not directml_path.is_file():
+        raise RuntimeError(f"Windows bundle is missing {directml_path}")
 
 
 def run_smoke(work_dir: Path, use_fake_model: bool = True) -> SmokeResult:
@@ -144,6 +157,8 @@ def run_smoke(work_dir: Path, use_fake_model: bool = True) -> SmokeResult:
         raise TypeError("work_dir must be a pathlib.Path")
     if not isinstance(use_fake_model, bool):
         raise TypeError("use_fake_model must be a bool")
+    if sys.platform == "win32":
+        _check_windows_directml_runtime()
     work_dir.mkdir(parents=True, exist_ok=True)
     rgba_owners = RgbaOwnershipTracker(_FRAME_SIZE)
     with tempfile.TemporaryDirectory(prefix="matteloop-smoke-", dir=work_dir) as raw:

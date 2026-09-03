@@ -14,6 +14,7 @@ from matteloop.core.errors import AppError, ErrorCode
 from matteloop.core.execution_providers import (
     CPU_EXECUTION_PROVIDER,
     CUDA_EXECUTION_PROVIDER,
+    DML_EXECUTION_PROVIDER,
 )
 from matteloop.jobs.models.cache_fs import BoundModelDirectory
 from matteloop.jobs.models.catalog import ExecutionClass, ModelCatalog, ModelSpec
@@ -24,6 +25,7 @@ from matteloop.jobs.segmentation_host import (
     _instantiate_verified_rembg_session,
     _PreparedRembgSession,
     _run_rembg,
+    _session_options,
     _validate_verified_launch_payload,
 )
 
@@ -147,6 +149,23 @@ def _verified_launch(
         "execution_provider": "CPUExecutionProvider",
     }
     return catalog, payload, artifact_path
+
+
+def test_session_options_disable_mem_pattern_for_directml_only() -> None:
+    class FakeOptions:
+        enable_mem_pattern = True
+        enable_profiling = True
+
+    class FakeOrt:
+        @staticmethod
+        def SessionOptions() -> FakeOptions:
+            return FakeOptions()
+
+    directml_options = _session_options(FakeOrt, DML_EXECUTION_PROVIDER)
+    cpu_options = _session_options(FakeOrt, CPU_EXECUTION_PROVIDER)
+
+    assert directml_options.enable_mem_pattern is False  # type: ignore[attr-defined]
+    assert cpu_options.enable_mem_pattern is True  # type: ignore[attr-defined]
 
 
 def test_local_prepare_downloads_before_start_with_exact_safe_launch_payload(

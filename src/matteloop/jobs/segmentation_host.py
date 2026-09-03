@@ -47,6 +47,7 @@ from numpy.typing import NDArray
 from matteloop.core.errors import AppError, ErrorCode
 from matteloop.core.execution_providers import (
     CPU_EXECUTION_PROVIDER,
+    DML_EXECUTION_PROVIDER,
     is_allowed_provider,
     provider_base_label,
 )
@@ -1342,7 +1343,7 @@ def _instantiate_verified_rembg_session(
     runtime: Any = ort_module
     if not is_allowed_provider(execution_provider):
         raise _model_preparation_error("execution provider is not allowlisted")
-    session_options = _session_options(runtime)
+    session_options = _session_options(runtime, execution_provider)
     available = _available_runtime_providers(runtime)
     if execution_provider != CPU_EXECUTION_PROVIDER and (
         execution_provider not in available
@@ -1393,9 +1394,13 @@ def _resolve_rembg_session_class(
     raise _model_preparation_error("verified built-in rembg session is unavailable")
 
 
-def _session_options(runtime: Any) -> object:
+def _session_options(
+    runtime: Any, execution_provider: str = CPU_EXECUTION_PROVIDER
+) -> object:
     options = runtime.SessionOptions()
     options.enable_profiling = False
+    if execution_provider == DML_EXECUTION_PROVIDER:
+        options.enable_mem_pattern = False
     if platform.system() == "Darwin":
         optimization = getattr(
             getattr(runtime, "GraphOptimizationLevel", None), "ORT_ENABLE_ALL", None

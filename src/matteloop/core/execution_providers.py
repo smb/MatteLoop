@@ -48,9 +48,7 @@ def provider_options(
     """Filter, order, and label the providers reported by ONNX Runtime."""
     reported = set(available_providers)
     available = tuple(
-        provider
-        for provider in ALLOWED_EXECUTION_PROVIDERS
-        if provider in reported
+        provider for provider in ALLOWED_EXECUTION_PROVIDERS if provider in reported
     )
     if not available:
         return ()
@@ -104,7 +102,7 @@ def is_allowed_provider(value: object) -> TypeGuard[str]:
     return isinstance(value, str) and value in _ALLOWED
 
 
-def provider_base_label(provider: str, *, hardware: str | None = None) -> str:
+def provider_base_label(provider: str) -> str:
     """Return the human label without recommendation or experiment suffixes."""
     if provider == CPU_EXECUTION_PROVIDER:
         return "CPU"
@@ -116,8 +114,6 @@ def provider_base_label(provider: str, *, hardware: str | None = None) -> str:
         return "AMD ROCm"
     if provider == MIGRAPHX_EXECUTION_PROVIDER:
         return "AMD MIGraphX"
-    if provider == DML_EXECUTION_PROVIDER and hardware == "amd":
-        return "AMD DirectML"
     return "GPU over DirectML"
 
 
@@ -135,15 +131,8 @@ def _hardware_kind(
         return "nvidia"
     if ROCM_EXECUTION_PROVIDER in available or MIGRAPHX_EXECUTION_PROVIDER in available:
         return "amd"
-    device_label = str(device).upper()
-    if (
-        normalized_system == "windows"
-        and DML_EXECUTION_PROVIDER in available
-        and "AMD" in device_label
-    ):
-        return "amd"
-    if normalized_system == "windows" and device_label == "GPU":
-        return "gpu"
+    if normalized_system == "windows" and DML_EXECUTION_PROVIDER in available:
+        return "directml"
     return "other"
 
 
@@ -156,6 +145,8 @@ def _recommended_provider(available: tuple[str, ...], hardware: str) -> str | No
         for provider in (ROCM_EXECUTION_PROVIDER, MIGRAPHX_EXECUTION_PROVIDER):
             if provider in available:
                 return provider
+    if hardware == "directml" and DML_EXECUTION_PROVIDER in available:
+        return DML_EXECUTION_PROVIDER
     if CPU_EXECUTION_PROVIDER in available:
         return CPU_EXECUTION_PROVIDER
     return None
@@ -174,7 +165,7 @@ def _ordered_providers(
 def _provider_label(
     provider: str, hardware: str, model_id: str, recommended: str | None
 ) -> str:
-    label = provider_base_label(provider, hardware=hardware)
+    label = provider_base_label(provider)
     if provider == COREML_EXECUTION_PROVIDER and model_id.startswith("birefnet"):
         return f"{label} – experimentell"
     if provider == recommended:

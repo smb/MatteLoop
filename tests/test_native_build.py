@@ -29,14 +29,19 @@ from scripts.media_stack.platforms import BuildTarget
 from scripts.qt_source import QtSourceCompanion
 
 
-def _installed_versions() -> dict[str, str]:
+def _installed_versions(os_name: str = "darwin") -> dict[str, str]:
+    runtime = (
+        {"onnxruntime-directml": "1.24.4"}
+        if os_name == "win32"
+        else {"onnxruntime": "1.29.0"}
+    )
     return {
         "PySide6": "6.10.3",
         "PySide6_Addons": "6.10.3",
         "PySide6_Essentials": "6.10.3",
         "Nuitka": "2.8.10",
-        "onnxruntime": "1.29.0",
         "shiboken6": "6.10.3",
+        **runtime,
     }
 
 
@@ -227,13 +232,37 @@ def test_native_build_does_not_require_development_pyav_distribution(
     deploy = tmp_path / "pyside6-deploy"
     deploy.write_bytes(b"tool")
 
-    assert prerequisite_errors(
-        os_name="darwin",
-        machine="arm64",
+    assert (
+        prerequisite_errors(
+            os_name="darwin",
+            machine="arm64",
+            python_version=(3, 13),
+            deploy_path=deploy,
+            installed_versions=_installed_versions(),
+        )
+        == ()
+    )
+
+
+def test_native_build_requires_windows_directml_distribution(tmp_path: Path) -> None:
+    deploy = tmp_path / "pyside6-deploy"
+    deploy.write_bytes(b"tool")
+    versions = _installed_versions("win32") | {"onnxruntime-directml": None}
+
+    errors = prerequisite_errors(
+        os_name="win32",
+        machine="AMD64",
         python_version=(3, 13),
         deploy_path=deploy,
-        installed_versions=_installed_versions(),
-    ) == ()
+        installed_versions=versions,
+    )
+
+    assert any(
+        "Missing build prerequisite: onnxruntime-directml" in error for error in errors
+    )
+    assert not any(
+        error.startswith("Missing build prerequisite: onnxruntime.") for error in errors
+    )
 
 
 def test_native_build_cli_exposes_verified_media_selection_flags() -> None:
@@ -300,9 +329,7 @@ def test_native_build_temporarily_repairs_missing_onnxruntime_soname(
     versioned.write_bytes(b"runtime")
     alias = tmp_path / "libonnxruntime.1.dylib"
 
-    with temporary_onnxruntime_dylib_alias(
-        os_name="darwin", capi_directory=tmp_path
-    ):
+    with temporary_onnxruntime_dylib_alias(os_name="darwin", capi_directory=tmp_path):
         assert alias.is_symlink()
         assert alias.resolve() == versioned
 
@@ -384,9 +411,7 @@ def test_native_build_selects_the_windows_icon_in_temporary_spec(
     av_directory.mkdir()
     (av_directory / "__init__.py").write_text("", encoding="utf-8")
 
-    prepare_temporary_spec(
-        source, destination, av_directory, os_name="win32"
-    )
+    prepare_temporary_spec(source, destination, av_directory, os_name="win32")
 
     temporary = destination.read_text(encoding="utf-8")
     assert "icon = assets/branding/matteloop/derived/matteloop.ico" in temporary
@@ -417,9 +442,7 @@ def test_default_media_preparation_uses_verified_builder_output(
         ensure=ensure,
     )
 
-    assert calls == [
-        (root, root / ".matteloop-build-cache" / "media-stack", False)
-    ]
+    assert calls == [(root, root / ".matteloop-build-cache" / "media-stack", False)]
     assert prepared.av_directory == tmp_path / "extracted" / "av"
     assert prepared.compliance_archive == artifacts.compliance_archive
     assert prepared.target == MACOS
@@ -949,9 +972,7 @@ def _stub_native_main(
         "ensure_qt_source_companion",
         lambda *_a, **_k: selected_qt_companion,
     )
-    monkeypatch.setattr(
-        native_build, "installed_qt_distribution_inventory", lambda: {}
-    )
+    monkeypatch.setattr(native_build, "installed_qt_distribution_inventory", lambda: {})
     monkeypatch.setattr(
         native_build,
         "temporary_onnxruntime_dylib_alias",
