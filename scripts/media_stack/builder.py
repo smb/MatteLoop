@@ -741,7 +741,17 @@ def _run_command(
     if record:
         evidence = normalized if record_as is None else tuple(map(str, record_as))
         context.build_commands.append(evidence)
-    kwargs: dict[str, Any] = {"check": False, "capture_output": True, "text": True}
+    # Decode explicitly: text=True would use the locale encoding, and MSVC
+    # writes its diagnostics in the OEM code page. On a German Windows that
+    # made cp1252 reject byte 0x81, killing subprocess's reader thread and
+    # leaving stdout as None for every caller downstream.
+    kwargs: dict[str, Any] = {
+        "check": False,
+        "capture_output": True,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+    }
     if environment is not None:
         kwargs["env"] = dict(environment)
     if cwd is not None:
