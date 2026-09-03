@@ -190,7 +190,7 @@ class FakeWindowsDirectoryApi:
 
 def _namespace(tmp_path: Path) -> tuple[Path, Path, Path]:
     root = tmp_path / "cache"
-    version = root / "2.0.72"
+    version = root / "2.0.75"
     model = version / "u2net"
     model.mkdir(parents=True)
     return root, version, model
@@ -211,7 +211,7 @@ def test_windows_binding_holds_anchor_through_every_cache_ancestor(
     root, version, model = _namespace(tmp_path)
     api = FakeWindowsDirectoryApi()
 
-    bound = _bind_windows(root, "2.0.72", "u2net", create=False, api=api)
+    bound = _bind_windows(root, "2.0.75", "u2net", create=False, api=api)
 
     assert bound is not None
     expected = [*_ancestor_chain(root), version, model]
@@ -259,7 +259,7 @@ def test_windows_binding_blocks_redirect_of_ancestor_above_cache_root(
 
     api.before_open[root] = attempt_redirect
 
-    bound = _bind_windows(root, "2.0.72", "u2net", create=False, api=api)
+    bound = _bind_windows(root, "2.0.75", "u2net", create=False, api=api)
 
     assert bound is not None
     assert redirect_blocked is True
@@ -272,11 +272,11 @@ def test_windows_binding_creates_each_missing_segment_under_held_ancestors(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "new-parent" / "cache"
-    version = root / "2.0.72"
+    version = root / "2.0.75"
     model = version / "u2net"
     api = FakeWindowsDirectoryApi()
 
-    bound = _bind_windows(root, "2.0.72", "u2net", create=True, api=api)
+    bound = _bind_windows(root, "2.0.75", "u2net", create=True, api=api)
 
     assert bound is not None
     created = [root.parent, root, version, model]
@@ -305,11 +305,11 @@ def test_windows_binding_tolerates_a_concurrent_writer_on_a_component(
     api = FakeWindowsDirectoryApi()
     api.foreign_write_paths.add(root)
 
-    bound = _bind_windows(root, "2.0.72", "u2net", create=False, api=api)
+    bound = _bind_windows(root, "2.0.75", "u2net", create=False, api=api)
 
     assert bound is not None
     assert api.opened[: len(_ancestor_chain(root))] == _ancestor_chain(root)
-    assert bound.path == root / "2.0.72" / "u2net"
+    assert bound.path == root / "2.0.75" / "u2net"
 
 
 def test_windows_bound_directory_allows_attribute_mutation_but_not_data_writer(
@@ -320,7 +320,7 @@ def test_windows_bound_directory_allows_attribute_mutation_but_not_data_writer(
     outside.mkdir()
     api = FakeWindowsDirectoryApi()
 
-    bound = _bind_windows(root, "2.0.72", "u2net", create=False, api=api)
+    bound = _bind_windows(root, "2.0.75", "u2net", create=False, api=api)
 
     assert bound is not None
     # A reparse point could always be set through FILE_WRITE_ATTRIBUTES; the
@@ -344,7 +344,7 @@ def test_windows_bound_file_lifecycle_stays_relative_to_original_handle(
     outside_sentinel.write_bytes(b"outside")
     api = FakeWindowsDirectoryApi()
 
-    bound = _bind_windows(root, "2.0.72", "u2net", create=False, api=api)
+    bound = _bind_windows(root, "2.0.75", "u2net", create=False, api=api)
 
     assert bound is not None
     model_handle = 100 + len(api.opened) - 1
@@ -386,7 +386,7 @@ def test_open_new_fdopen_failure_closes_transferred_fd_and_allows_windows_unlink
 ) -> None:
     root, _version, model = _namespace(tmp_path)
     api = FakeWindowsDirectoryApi()
-    bound = _bind_windows(root, "2.0.72", "u2net", create=False, api=api)
+    bound = _bind_windows(root, "2.0.75", "u2net", create=False, api=api)
     assert bound is not None
     primary = RuntimeError("synthetic fdopen failure")
     captured: list[int] = []
@@ -422,7 +422,7 @@ def test_open_new_fdopen_and_fd_close_failure_preserves_both_once(
 ) -> None:
     root, _version, _model = _namespace(tmp_path)
     api = FakeWindowsDirectoryApi()
-    bound = _bind_windows(root, "2.0.72", "u2net", create=False, api=api)
+    bound = _bind_windows(root, "2.0.75", "u2net", create=False, api=api)
     assert bound is not None
     real_close = os.close
     primary = RuntimeError("synthetic fdopen failure")
@@ -501,7 +501,7 @@ def test_open_new_success_transfers_fd_ownership_to_file_object(
         return descriptor
 
     api.open_new_at = capture_open_new  # type: ignore[method-assign]
-    bound = _bind_windows(root, "2.0.72", "u2net", create=False, api=api)
+    bound = _bind_windows(root, "2.0.75", "u2net", create=False, api=api)
     assert bound is not None
 
     try:
@@ -526,7 +526,7 @@ def test_windows_binding_midway_native_open_error_closes_all_prior_handles(
     api.open_failures[root] = OSError("synthetic native open failure")
 
     with pytest.raises(OSError, match="native open failure"):
-        _bind_windows(root, "2.0.72", "u2net", create=False, api=api)
+        _bind_windows(root, "2.0.75", "u2net", create=False, api=api)
 
     expected_opened = _ancestor_chain(root)[:-1]
     handles = list(range(100, 100 + len(expected_opened)))
@@ -993,22 +993,22 @@ def test_windows_native_read_transfers_handle_ownership_to_crt_fd(
 
 def test_windows_path_chain_supports_drive_and_unc_anchors() -> None:
     assert cache_fs._windows_path_chain(  # type: ignore[attr-defined]
-        PureWindowsPath("C:/Users/alice/cache"), "2.0.72", "u2net"
+        PureWindowsPath("C:/Users/alice/cache"), "2.0.75", "u2net"
     ) == (
         PureWindowsPath("C:/"),
         PureWindowsPath("C:/Users"),
         PureWindowsPath("C:/Users/alice"),
         PureWindowsPath("C:/Users/alice/cache"),
-        PureWindowsPath("C:/Users/alice/cache/2.0.72"),
-        PureWindowsPath("C:/Users/alice/cache/2.0.72/u2net"),
+        PureWindowsPath("C:/Users/alice/cache/2.0.75"),
+        PureWindowsPath("C:/Users/alice/cache/2.0.75/u2net"),
     )
     assert cache_fs._windows_path_chain(  # type: ignore[attr-defined]
-        PureWindowsPath("//server/share/cache"), "2.0.72", "u2net"
+        PureWindowsPath("//server/share/cache"), "2.0.75", "u2net"
     ) == (
         PureWindowsPath("//server/share/"),
         PureWindowsPath("//server/share/cache"),
-        PureWindowsPath("//server/share/cache/2.0.72"),
-        PureWindowsPath("//server/share/cache/2.0.72/u2net"),
+        PureWindowsPath("//server/share/cache/2.0.75"),
+        PureWindowsPath("//server/share/cache/2.0.75/u2net"),
     )
 
 
@@ -1025,7 +1025,7 @@ def test_windows_path_chain_rejects_unanchored_or_drive_relative_roots(
 ) -> None:
     with pytest.raises(UnsafeCacheError, match="absolute"):
         cache_fs._windows_path_chain(  # type: ignore[attr-defined]
-            root, "2.0.72", "u2net"
+            root, "2.0.75", "u2net"
         )
 
 
@@ -1045,7 +1045,7 @@ def test_windows_path_chain_rejects_traversal_and_device_namespaces(
 ) -> None:
     with pytest.raises(UnsafeCacheError, match="invalid"):
         cache_fs._windows_path_chain(  # type: ignore[attr-defined]
-            root, "2.0.72", "u2net"
+            root, "2.0.75", "u2net"
         )
 
 
@@ -1055,7 +1055,7 @@ def test_windows_binding_validates_each_open_handle_and_holds_until_close(
     root, version, model = _namespace(tmp_path)
     api = FakeWindowsDirectoryApi()
 
-    bound = _bind_windows(root, "2.0.72", "u2net", create=False, api=api)
+    bound = _bind_windows(root, "2.0.75", "u2net", create=False, api=api)
 
     assert bound is not None
     expected = [*_ancestor_chain(root), version, model]
@@ -1090,9 +1090,9 @@ def test_windows_binding_rejects_junction_returned_by_native_open(
     api.before_open[model] = swap_to_junction
 
     with pytest.raises(UnsafeCacheError, match="reparse"):
-        _bind_windows(root, "2.0.72", "u2net", create=False, api=api)
+        _bind_windows(root, "2.0.75", "u2net", create=False, api=api)
 
-    expected = [*_ancestor_chain(root), root / "2.0.72", model]
+    expected = [*_ancestor_chain(root), root / "2.0.75", model]
     handles = list(range(100, 100 + len(expected)))
     assert api.opened == expected
     assert api.queried == handles
@@ -1107,9 +1107,9 @@ def test_windows_binding_rejects_open_handle_without_directory_identity(
     api.attribute_overrides[model] = 0
 
     with pytest.raises(UnsafeCacheError, match="not a directory"):
-        _bind_windows(root, "2.0.72", "u2net", create=False, api=api)
+        _bind_windows(root, "2.0.75", "u2net", create=False, api=api)
 
-    expected = [*_ancestor_chain(root), root / "2.0.72", model]
+    expected = [*_ancestor_chain(root), root / "2.0.75", model]
     handles = list(range(100, 100 + len(expected)))
     assert api.opened[-1] == model
     assert api.queried == handles
@@ -1120,13 +1120,13 @@ def test_windows_missing_namespace_closes_each_prior_handle_once_per_call(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "cache"
-    (root / "2.0.72").mkdir(parents=True)
+    (root / "2.0.75").mkdir(parents=True)
     api = FakeWindowsDirectoryApi()
 
-    assert _bind_windows(root, "2.0.72", "u2net", create=False, api=api) is None
-    assert _bind_windows(root, "2.0.72", "u2net", create=False, api=api) is None
+    assert _bind_windows(root, "2.0.75", "u2net", create=False, api=api) is None
+    assert _bind_windows(root, "2.0.75", "u2net", create=False, api=api) is None
 
-    expected_call = [*_ancestor_chain(root), root / "2.0.72"]
+    expected_call = [*_ancestor_chain(root), root / "2.0.75"]
     handles = list(range(100, 100 + len(expected_call) * 2))
     assert api.opened == [*expected_call, *expected_call]
     assert api.queried == handles
@@ -1141,14 +1141,14 @@ def test_windows_early_return_attempts_every_close_after_one_close_failure(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "cache"
-    (root / "2.0.72").mkdir(parents=True)
+    (root / "2.0.75").mkdir(parents=True)
     api = FakeWindowsDirectoryApi()
-    expected = [*_ancestor_chain(root), root / "2.0.72"]
+    expected = [*_ancestor_chain(root), root / "2.0.75"]
     handles = list(range(100, 100 + len(expected)))
     api.close_failures.add(handles[-1])
 
     with pytest.raises(OSError, match="synthetic close failure"):
-        _bind_windows(root, "2.0.72", "u2net", create=False, api=api)
+        _bind_windows(root, "2.0.75", "u2net", create=False, api=api)
 
     assert api.closed == list(reversed(handles))
 
@@ -1305,14 +1305,14 @@ def test_real_windows_api_binds_a_cache_directory_end_to_end(tmp_path: Path) -> 
     build failed with "[Errno 87] relative cache operation failed: 'Users'"
     while the whole suite was green.
     """
-    bound = BoundModelDirectory.bind(tmp_path, "2.0.72", "u2netp", create=True)
+    bound = BoundModelDirectory.bind(tmp_path, "2.0.75", "u2netp", create=True)
 
     assert bound is not None
     with bound:
         assert bound.path.is_dir()
-    assert (tmp_path / "2.0.72" / "u2netp").is_dir()
+    assert (tmp_path / "2.0.75" / "u2netp").is_dir()
 
-    reopened = BoundModelDirectory.bind(tmp_path, "2.0.72", "u2netp", create=False)
+    reopened = BoundModelDirectory.bind(tmp_path, "2.0.75", "u2netp", create=False)
 
     assert reopened is not None
     reopened.close()
@@ -1326,7 +1326,7 @@ def test_bound_lstat_matches_os_fstat_identity(tmp_path: Path) -> None:
     os.fstat(); they are only meaningful if both sources report st_dev and
     st_ino the same way.
     """
-    bound = BoundModelDirectory.bind(tmp_path, "2.0.72", "u2netp", create=True)
+    bound = BoundModelDirectory.bind(tmp_path, "2.0.75", "u2netp", create=True)
     assert bound is not None
     with bound:
         (bound.path / "weight.onnx").write_bytes(b"weight")
@@ -1344,8 +1344,7 @@ def test_bound_lstat_matches_os_fstat_identity(tmp_path: Path) -> None:
     # Workspace frame checks compare st_mtime_ns across the same two
     # sources, so a value rounded through float seconds fails them.
     assert from_api.st_mtime_ns == from_os.st_mtime_ns, (
-        f"bound.lstat mtime_ns {from_api.st_mtime_ns} != "
-        f"os.fstat {from_os.st_mtime_ns}"
+        f"bound.lstat mtime_ns {from_api.st_mtime_ns} != os.fstat {from_os.st_mtime_ns}"
     )
     assert from_api.st_size == from_os.st_size
 
@@ -1414,7 +1413,7 @@ def test_binding_a_directory_needs_no_more_than_the_rights_it_uses(
     if denied.returncode != 0:
         pytest.skip(f"could not restrict the directory: {denied.stderr.strip()}")
 
-    bound = BoundModelDirectory.bind(target, "2.0.72", "u2netp", create=True)
+    bound = BoundModelDirectory.bind(target, "2.0.75", "u2netp", create=True)
 
     assert bound is not None
     bound.close()

@@ -50,7 +50,7 @@ class FakeDownloader:
         assert cancelled() is False
         artifact = spec.artifact
         assert artifact is not None
-        target = destination / "2.0.72" / spec.id / artifact.runtime_filename
+        target = destination / "2.0.75" / spec.id / artifact.runtime_filename
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(b"test-double-verified")
         return target
@@ -130,7 +130,7 @@ def _verified_launch(
     catalog = ModelCatalog.from_bytes(json.dumps(manifest).encode())
     spec = catalog.get("u2net")
     assert spec.artifact is not None
-    home = tmp_path / "2.0.72" / "u2net"
+    home = tmp_path / "2.0.75" / "u2net"
     home.mkdir(parents=True)
     artifact_path = home / spec.artifact.runtime_filename
     artifact_path.write_bytes(data)
@@ -179,7 +179,7 @@ def test_local_prepare_downloads_before_start_with_exact_safe_launch_payload(
     assert payload["model_id"] == "u2net"
     assert payload["runtime_filename"] == "u2net.onnx"
     assert payload["execution_provider"] == "CPUExecutionProvider"
-    assert payload["model_home"] == str(tmp_path / "2.0.72" / "u2net")
+    assert payload["model_home"] == str(tmp_path / "2.0.75" / "u2net")
     assert "model_path" not in payload
     assert "extras" not in payload
 
@@ -409,11 +409,29 @@ def test_remove_rejects_active_model_then_removes_exact_inactive_artifact(
     assert manager.remove("u2net") is False
 
 
+def test_remove_obsolete_versions_removes_only_catalog_listed_directories(
+    tmp_path: Path,
+) -> None:
+    manager, _downloader, _clients, _events = _manager(tmp_path)
+    catalog = ModelCatalog.load_resource()
+    obsolete = tmp_path / catalog.obsolete_rembg_versions[0]
+    current = tmp_path / catalog.rembg_version
+    unrelated = tmp_path / "not-a-rembg-version"
+    obsolete.mkdir()
+    current.mkdir()
+    unrelated.mkdir()
+
+    assert manager.remove_obsolete_versions() == 1
+    assert not obsolete.exists()
+    assert current.is_dir()
+    assert unrelated.is_dir()
+
+
 def test_remove_rejects_symlink_traversal_and_unknown_ids(tmp_path: Path) -> None:
     manager, _downloader, _clients, _events = _manager(tmp_path)
     outside = tmp_path / "outside.onnx"
     outside.write_bytes(b"outside")
-    model_dir = tmp_path / "2.0.72" / "u2net"
+    model_dir = tmp_path / "2.0.75" / "u2net"
     model_dir.mkdir(parents=True)
     (model_dir / "u2net.onnx").symlink_to(outside)
 
@@ -433,7 +451,7 @@ def test_remove_parent_swap_never_unlinks_outside_bound_directory(
     import matteloop.jobs.models.session as session_module
 
     manager, _downloader, _clients, _events = _manager(tmp_path)
-    target = tmp_path / "2.0.72" / "u2net" / "u2net.onnx"
+    target = tmp_path / "2.0.75" / "u2net" / "u2net.onnx"
     target.parent.mkdir(parents=True)
     target.write_bytes(b"cache")
     outside = tmp_path / "outside-remove"
@@ -473,7 +491,7 @@ def test_remove_maps_bound_directory_close_oserror_after_visible_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     manager, _downloader, _clients, _events = _manager(tmp_path)
-    target = tmp_path / "2.0.72" / "u2net" / "u2net.onnx"
+    target = tmp_path / "2.0.75" / "u2net" / "u2net.onnx"
     target.parent.mkdir(parents=True)
     target.write_bytes(b"cache")
     real_close = BoundModelDirectory.close
@@ -569,7 +587,7 @@ def test_child_launch_reproves_exact_manifest_bound_regular_file(
 
     assert verified.model_id == "u2net"
     assert verified.artifact_path == artifact_path
-    assert verified.rembg_version == "2.0.72"
+    assert verified.rembg_version == "2.0.75"
     assert verified.model_bytes == b"verified-model"
     assert verified.inference_kwargs == ()
 
@@ -652,7 +670,7 @@ def test_child_creates_session_only_after_hash_proof_without_parent_env_mutation
     before = dict(os.environ)
 
     assert _create_rembg_session(payload) is sentinel
-    assert calls == [("u2net", b"verified-model", "2.0.72", ())]
+    assert calls == [("u2net", b"verified-model", "2.0.75", ())]
     assert dict(os.environ) == before
 
     artifact_path.write_bytes(b"tampered")
@@ -710,10 +728,10 @@ def test_verified_instantiation_uses_bytes_without_onnxruntime_profiling() -> No
     session = _instantiate_verified_rembg_session(
         "u2net",
         model_bytes,
-        "2.0.72",
+        "2.0.75",
         session_classes=[FakeSession],
         ort_module=FakeOrt,
-        installed_version="2.0.72",
+        installed_version="2.0.75",
     )
 
     assert isinstance(session, _PreparedRembgSession)
@@ -758,11 +776,11 @@ def test_failed_hardware_provider_falls_back_to_cpu_with_a_startup_notice() -> N
     prepared = _instantiate_verified_rembg_session(
         "u2net",
         b"already-verified",
-        "2.0.72",
+        "2.0.75",
         execution_provider=CUDA_EXECUTION_PROVIDER,
         session_classes=[FakeSession],
         ort_module=FakeOrt,
-        installed_version="2.0.72",
+        installed_version="2.0.75",
     )
 
     assert isinstance(prepared, _PreparedRembgSession)

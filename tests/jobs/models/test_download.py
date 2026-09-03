@@ -120,7 +120,7 @@ def test_download_streams_to_versioned_part_verifies_and_atomically_promotes(
         progress=lambda done, total: events.append((done, total)),
     )
 
-    assert path == tmp_path / "2.0.72" / "u2net" / "u2net.onnx"
+    assert path == tmp_path / "2.0.75" / "u2net" / "u2net.onnx"
     assert path.read_bytes() == data
     assert not path.with_suffix(".onnx.part").exists()
     assert events[0] == (0, len(data))
@@ -255,7 +255,7 @@ def test_verified_offline_cache_is_reused_and_invalid_cache_is_not(
 ) -> None:
     data = b"cached"
     catalog, spec = _spec(data)
-    path = tmp_path / "2.0.72" / "u2net" / "u2net.onnx"
+    path = tmp_path / "2.0.75" / "u2net" / "u2net.onnx"
     path.parent.mkdir(parents=True)
     path.write_bytes(data)
     offline = FakeTransport(failure=OSError("offline"))
@@ -285,7 +285,7 @@ def test_bound_directory_close_oserror_is_structured_for_download_and_reuse(
 ) -> None:
     data = b"bound-close"
     catalog, spec = _spec(data)
-    target = tmp_path / "2.0.72" / "u2net" / "u2net.onnx"
+    target = tmp_path / "2.0.75" / "u2net" / "u2net.onnx"
     if reuse_cached:
         target.parent.mkdir(parents=True)
         target.write_bytes(data)
@@ -346,7 +346,7 @@ def test_different_manifest_version_never_reuses_old_namespace(tmp_path: Path) -
         current_spec, tmp_path, lambda _done, _total: None, lambda: False
     )
 
-    assert path.parent.parent.name == "2.0.72"
+    assert path.parent.parent.name == "2.0.75"
     assert transport.urls
     assert old_path.read_bytes() == data
 
@@ -358,7 +358,7 @@ def test_symlinked_namespace_is_rejected_without_writing_outside_cache(
     catalog, spec = _spec(data)
     outside = tmp_path / "outside"
     outside.mkdir()
-    version = tmp_path / "cache" / "2.0.72"
+    version = tmp_path / "cache" / "2.0.75"
     version.parent.mkdir()
     version.symlink_to(outside, target_is_directory=True)
 
@@ -411,7 +411,7 @@ def test_single_flight_key_never_calls_path_resolve(
 ) -> None:
     import matteloop.jobs.models.download as download_module
 
-    target = tmp_path / "cache" / "2.0.72" / "u2net" / "u2net.onnx"
+    target = tmp_path / "cache" / "2.0.75" / "u2net" / "u2net.onnx"
 
     def forbid_resolve(*_args: object, **_kwargs: object) -> NoReturn:
         raise AssertionError("single-flight key must not resolve the filesystem")
@@ -432,7 +432,7 @@ def test_single_flight_lock_identity_survives_symlink_namespace_swap(
     second_root.mkdir()
     cache_link = tmp_path / "cache-link"
     cache_link.symlink_to(first_root, target_is_directory=True)
-    target = cache_link / "2.0.72" / "u2net" / "u2net.onnx"
+    target = cache_link / "2.0.75" / "u2net" / "u2net.onnx"
 
     before = download_module._flight_lock(target)
     cache_link.unlink()
@@ -447,9 +447,9 @@ def test_single_flight_key_normalizes_lexical_dotdot_and_windows_case(
 ) -> None:
     import matteloop.jobs.models.download as download_module
 
-    direct = tmp_path / "cache" / "2.0.72" / "u2net" / "u2net.onnx"
+    direct = tmp_path / "cache" / "2.0.75" / "u2net" / "u2net.onnx"
     equivalent = (
-        tmp_path / "cache" / "ignored" / ".." / "2.0.72" / "u2net" / "u2net.onnx"
+        tmp_path / "cache" / "ignored" / ".." / "2.0.75" / "u2net" / "u2net.onnx"
     )
 
     assert download_module._flight_lock(direct) is download_module._flight_lock(
@@ -577,7 +577,7 @@ def test_parent_swap_cannot_redirect_cached_reuse(
 
     data = b"cached"
     catalog, spec = _spec(data)
-    cached = tmp_path / "2.0.72" / "u2net" / "u2net.onnx"
+    cached = tmp_path / "2.0.75" / "u2net" / "u2net.onnx"
     cached.parent.mkdir(parents=True)
     cached.write_bytes(data)
     outside = tmp_path / "outside-reuse"

@@ -17,7 +17,7 @@ from matteloop.resources import read_resource_bytes
 from matteloop.resources import resource_path as packaged_resource_path
 
 _SCHEMA_VERSION = 1
-_PINNED_REMBG_VERSION = "2.0.72"
+_PINNED_REMBG_VERSION = "2.0.75"
 _DEFAULT_ID = "birefnet-portrait"
 _APPROVED_IDS = frozenset(
     {
@@ -38,7 +38,14 @@ _APPROVED_IDS = frozenset(
         "bria-rmbg",
     }
 )
-_ROOT_FIELDS = {"schema_version", "rembg_version", "default_id", "models"}
+_ROOT_FIELDS = {
+    "schema_version",
+    "rembg_version",
+    "obsolete_rembg_versions",
+    "default_id",
+    "models",
+}
+_OPTIONAL_ROOT_FIELDS = {"obsolete_rembg_versions"}
 _MODEL_FIELDS = {
     "id",
     "display_name",
@@ -121,12 +128,15 @@ class ModelCatalog:
     default_id: str
     ids: tuple[str, ...]
     specs: Mapping[str, ModelSpec]
+    obsolete_rembg_versions: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.rembg_version) is not str:
             raise _manifest_error("catalog rembg version must be a string")
         if type(self.default_id) is not str:
             raise _manifest_error("catalog default must be a string")
+        if type(self.obsolete_rembg_versions) not in (list, tuple):
+            raise _manifest_error("catalog obsolete rembg versions must be an array")
         if type(self.ids) not in (list, tuple):
             raise _manifest_error("catalog IDs must be an array")
         if not isinstance(self.specs, Mapping):
@@ -137,6 +147,8 @@ class ModelCatalog:
             raise _manifest_error("catalog rembg version is not the app pin")
         if self.default_id != _DEFAULT_ID:
             raise _manifest_error("catalog default is not the approved default")
+        obsolete_rembg_versions = tuple(self.obsolete_rembg_versions)
+        _validate_obsolete_rembg_versions(obsolete_rembg_versions, self.rembg_version)
         if any(type(model_id) is not str for model_id in ids):
             raise _manifest_error("catalog IDs must be strings")
         if (
@@ -152,10 +164,16 @@ class ModelCatalog:
             _validate_model_spec(spec)
         object.__setattr__(self, "ids", ids)
         object.__setattr__(self, "specs", MappingProxyType(specs))
+        object.__setattr__(self, "obsolete_rembg_versions", obsolete_rembg_versions)
 
     @classmethod
     def _build(
-        cls, *, rembg_version: str, default_id: str, specs: tuple[ModelSpec, ...]
+        cls,
+        *,
+        rembg_version: str,
+        default_id: str,
+        specs: tuple[ModelSpec, ...],
+        obsolete_rembg_versions: tuple[str, ...] = (),
     ) -> ModelCatalog:
         by_id = {spec.id: spec for spec in specs}
         return cls(
@@ -163,6 +181,7 @@ class ModelCatalog:
             default_id,
             tuple(spec.id for spec in specs),
             MappingProxyType(by_id),
+            obsolete_rembg_versions,
         )
 
     @staticmethod
@@ -209,13 +228,21 @@ class ModelCatalog:
             raise _manifest_error("model manifest is not valid strict JSON") from error
         if type(payload) is not dict:
             raise _manifest_error("model manifest root must be an object")
-        _exact_keys(payload, _ROOT_FIELDS, "manifest root")
+        _exact_keys(
+            payload,
+            _ROOT_FIELDS,
+            "manifest root",
+            optional=_OPTIONAL_ROOT_FIELDS,
+        )
         if _strict_int(payload, "schema_version", minimum=1) != _SCHEMA_VERSION:
             raise _manifest_error("unsupported model manifest schema version")
         if _strict_string(payload, "rembg_version") != _PINNED_REMBG_VERSION:
             raise _manifest_error("model manifest rembg version is not the app pin")
         if _strict_string(payload, "default_id") != _DEFAULT_ID:
             raise _manifest_error("model manifest default is not the approved default")
+        obsolete_rembg_versions = _parse_obsolete_rembg_versions(
+            payload.get("obsolete_rembg_versions", []), _PINNED_REMBG_VERSION
+        )
         model_payloads = payload["models"]
         if type(model_payloads) is not list or len(model_payloads) != len(
             _APPROVED_IDS
@@ -231,6 +258,7 @@ class ModelCatalog:
             rembg_version=_PINNED_REMBG_VERSION,
             default_id=_DEFAULT_ID,
             specs=specs,
+            obsolete_rembg_versions=obsolete_rembg_versions,
         )
 
     def get(self, model_id: str) -> ModelSpec:
@@ -347,6 +375,31 @@ def _validate_model_id(value: object) -> str:
     return model_id
 
 
+def _parse_obsolete_rembg_versions(
+    value: object, rembg_version: str
+) -> tuple[str, ...]:
+    if type(value) is not list:
+        raise _manifest_error("obsolete_rembg_versions must be an array")
+    versions = tuple(value)
+    _validate_obsolete_rembg_versions(versions, rembg_version)
+    return cast(tuple[str, ...], versions)
+
+
+def _validate_obsolete_rembg_versions(
+    versions: tuple[str, ...], rembg_version: str
+) -> None:
+    _validate_string_tuple(versions, "obsolete_rembg_versions", allowed=None)
+    if any(
+        version in {".", ".."} or "/" in version or "\\" in version
+        for version in versions
+    ):
+        raise _manifest_error("obsolete rembg versions must be directory names")
+    if rembg_version in versions:
+        raise _manifest_error(
+            "obsolete rembg versions must not include the current app pin"
+        )
+
+
 def _validate_model_artifact(artifact: object, model_id: str) -> None:
     if type(artifact) is not ModelArtifact:
         raise _manifest_error("model artifact has an invalid type")
@@ -455,8 +508,15 @@ def _strict_int(payload: dict[str, object], key: str, *, minimum: int) -> int:
     return value
 
 
-def _exact_keys(payload: dict[str, object], expected: set[str], label: str) -> None:
-    if set(payload) != expected:
+def _exact_keys(
+    payload: dict[str, object],
+    expected: set[str],
+    label: str,
+    *,
+    optional: set[str] | None = None,
+) -> None:
+    optional = set() if optional is None else optional
+    if set(payload) - expected or expected - optional - set(payload):
         raise _manifest_error(f"{label} has missing or unknown fields")
 
 

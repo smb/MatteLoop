@@ -74,7 +74,7 @@ class FakePreviewRuntime(PreviewRuntime):
             self,
             "birefnet-portrait",
             "ab" * 32,
-            "2.0.72",
+            "2.0.75",
             frozenset({"standard"}),
         )
 
@@ -228,9 +228,7 @@ def test_preview_request_uses_the_playhead_and_selected_export_range(
     controller.shutdown()
 
 
-def test_preview_request_uses_the_selected_oriented_crop(
-    tmp_path: Path, qtbot
-) -> None:
+def test_preview_request_uses_the_selected_oriented_crop(tmp_path: Path, qtbot) -> None:
     path = tmp_path / "source.mp4"
     path.write_bytes(b"fixture")
     runtime = FakePreviewRuntime()

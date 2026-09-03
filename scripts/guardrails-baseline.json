@@ -20,7 +20,7 @@
     "long_functions": 2
   },
   "src/matteloop/jobs/models/session.py": {
-    "lines": 421,
+    "lines": 432,
     "long_functions": 1
   },
   "src/matteloop/jobs/render.py": {
