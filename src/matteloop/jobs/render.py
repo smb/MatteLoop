@@ -79,6 +79,7 @@ from matteloop.jobs.models.cache_fs import BoundDirectoryCloseError, UnsafeCache
 from matteloop.jobs.protocol import PROTOCOL_VERSION, SegmentOptions, SegmentRequest
 from matteloop.jobs.source import DecodedFrame, SourceInfo, decode_frame, probe_source
 from matteloop.jobs.transform_stage import framing_plan, stage_encoder_frames
+from matteloop.jobs.transform_store import store_transform
 from matteloop.jobs.workspace import (
     AdvisoryFileLock,
     CutFrame,
@@ -1422,6 +1423,7 @@ class RenderService:
                 None,
                 notes,
             )
+            store_transform(durable, request.transform, notes)
         assert summary is not None
         return RenderArtifact(
             output_path,

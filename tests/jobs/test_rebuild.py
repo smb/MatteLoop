@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import stat
 from dataclasses import replace
 from decimal import Decimal
 from fractions import Fraction
@@ -28,6 +30,7 @@ from matteloop.jobs.render import (
     PreparedSegmentation,
     RenderService,
 )
+from matteloop.jobs.transform_store import load_transform, transform_sidecar_path
 from tests.jobs.render_support import (
     ExplodingSource,
     FakeClock,
@@ -681,3 +684,112 @@ def test_auto_fit_shrinks_a_resized_output_and_reports_actual_size(tmp_path) -> 
     assert artifact.file_size <= 150_000
     assert artifact.width <= 512 and artifact.height <= 256
     assert artifact.width < 512 or artifact.height < 256
+
+
+def test_rebuild_records_the_applied_transform_beside_the_cut(tmp_path) -> None:
+    """AC 8 / E11: a rebuild with a non-identity transform writes the sidecar,
+    and ``load_transform`` returns exactly the request's transform."""
+    workspace = FilesystemWorkspacePort()
+    seed_request = request(tmp_path)
+    original = render_service(workspace=workspace).render(
+        seed_request, job(tmp_path, "seed-record-transform", JobKind.RENDER)
+    )
+    transform = TransformSpec(first_frame=0, last_frame=0)
+
+    artifact = _rebuild_service(workspace, FakeEncoder()).rebuild(
+        replace(seed_request, rebuild=True, transform=transform),
+        original.cut_workspace,
+        job(tmp_path, "rebuild-record-transform", JobKind.REBUILD),
+    )
+
+    assert load_transform(artifact.cut_workspace) == transform
+
+
+def test_identity_rebuild_after_a_recorded_transform_removes_the_sidecar(
+    tmp_path,
+) -> None:
+    """E12: an identity rebuild after a non-identity one removes the sidecar,
+    so reopening the cut afterwards loads as identity."""
+    workspace = FilesystemWorkspacePort()
+    seed_request = request(tmp_path)
+    original = render_service(workspace=workspace).render(
+        seed_request, job(tmp_path, "seed-clear-transform", JobKind.RENDER)
+    )
+    non_identity = _rebuild_service(workspace, FakeEncoder()).rebuild(
+        replace(
+            seed_request,
+            rebuild=True,
+            transform=TransformSpec(first_frame=0, last_frame=0),
+            output=replace(seed_request.output, filename="non-identity.webp"),
+        ),
+        original.cut_workspace,
+        job(tmp_path, "rebuild-non-identity", JobKind.REBUILD),
+    )
+    assert transform_sidecar_path(non_identity.cut_workspace).exists()
+
+    artifact = _rebuild_service(workspace, FakeEncoder()).rebuild(
+        replace(
+            seed_request,
+            rebuild=True,
+            output=replace(seed_request.output, filename="identity-again.webp"),
+        ),
+        original.cut_workspace,
+        job(tmp_path, "rebuild-back-to-identity", JobKind.REBUILD),
+    )
+
+    assert not transform_sidecar_path(artifact.cut_workspace).exists()
+    assert load_transform(artifact.cut_workspace) == TransformSpec()
+
+
+def test_render_with_a_transform_records_it_too(tmp_path) -> None:
+    """E18: a Render (not a Rebuild) with a transform also writes the sidecar,
+    via the same shared ``_encode_snapshot`` call site."""
+    workspace = FilesystemWorkspacePort()
+    transform = TransformSpec(first_frame=0, last_frame=0)
+
+    artifact = render_service(workspace=workspace).render(
+        request(tmp_path, transform=transform),
+        job(tmp_path, "render-with-transform", JobKind.RENDER),
+    )
+
+    assert load_transform(artifact.cut_workspace) == transform
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="chmod cannot make a Windows directory read-only for this process",
+)
+def test_unwritable_cuts_root_notes_the_failure_and_still_publishes(
+    tmp_path,
+) -> None:
+    """E13 / T1: an unwritable ``cuts_root`` must not fail the job -- the
+    output has already been published by the time the sidecar write is
+    attempted (guardrail G4). The note must reach the artifact, which is
+    only possible because ``store_transform`` runs inside ``_encode_snapshot``
+    before its ``notes`` tuple is baked in."""
+    workspace = FilesystemWorkspacePort()
+    seed_request = request(tmp_path)
+    original = render_service(workspace=workspace).render(
+        seed_request, job(tmp_path, "seed-unwritable-cuts-root", JobKind.RENDER)
+    )
+    cuts_root = original.cut_workspace.cuts_root
+    mode = cuts_root.stat().st_mode
+    cuts_root.chmod(stat.S_IRUSR | stat.S_IXUSR)
+    try:
+        artifact = _rebuild_service(workspace, FakeEncoder()).rebuild(
+            replace(
+                seed_request,
+                rebuild=True,
+                transform=TransformSpec(first_frame=0, last_frame=0),
+                output=replace(seed_request.output, filename="unwritable.webp"),
+            ),
+            original.cut_workspace,
+            job(tmp_path, "rebuild-unwritable-cuts-root", JobKind.REBUILD),
+        )
+    finally:
+        cuts_root.chmod(mode)
+
+    assert artifact.output_path.exists()
+    assert any(
+        "could not record the applied transform" in note for note in artifact.notes
+    )
