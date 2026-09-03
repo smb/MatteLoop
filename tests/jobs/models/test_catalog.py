@@ -7,6 +7,7 @@ from dataclasses import FrozenInstanceError, fields, replace
 import pytest
 
 from matteloop.core.errors import AppError, ErrorCode
+from matteloop.core.fingerprints import REMBG_VERSION
 from matteloop.jobs.models.catalog import (
     ClothCategory,
     ExecutionClass,
@@ -61,9 +62,10 @@ def test_manifest_contains_exact_approved_catalog_and_default() -> None:
 
 
 def test_manifest_pin_matches_the_installed_rembg_distribution() -> None:
-    assert ModelCatalog.load_resource().rembg_version == importlib.metadata.version(
-        "rembg"
-    )
+    catalog = ModelCatalog.load_resource()
+
+    assert catalog.rembg_version == REMBG_VERSION
+    assert catalog.rembg_version == importlib.metadata.version("rembg")
 
 
 def test_manifest_without_obsolete_versions_remains_compatible() -> None:
