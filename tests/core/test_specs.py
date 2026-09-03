@@ -607,6 +607,51 @@ def test_transform_spec_validate_for_returns_the_final_canvas_size() -> None:
     assert transform.validate_for(4, (256, 128)) == (150, 128)
 
 
+def test_transform_spec_validate_for_rejects_a_derived_height_too_small() -> None:
+    transform = TransformSpec(resize=ResizeSpec(width=128, height=None))
+
+    with pytest.raises(ValidationError) as exc:
+        transform.validate_for(4, (512, 128))
+
+    assert exc.value.code is ErrorCode.INVALID_TRANSFORM
+    assert "128" in exc.value.technical_detail
+    assert "32" in exc.value.technical_detail
+
+
+def test_transform_spec_validate_for_rejects_a_derived_width_too_small() -> None:
+    transform = TransformSpec(resize=ResizeSpec(width=None, height=128))
+
+    with pytest.raises(ValidationError) as exc:
+        transform.validate_for(4, (128, 512))
+
+    assert exc.value.code is ErrorCode.INVALID_TRANSFORM
+    assert "128" in exc.value.technical_detail
+    assert "32" in exc.value.technical_detail
+
+
+def test_transform_spec_validate_for_rejects_a_crop_only_final_canvas_too_small() -> (
+    None
+):
+    """Bounds apply to the final canvas, not just the crop rectangle in isolation."""
+    transform = TransformSpec(crop=CropSpec(x=0, y=0, width=100, height=100))
+
+    with pytest.raises(ValidationError) as exc:
+        transform.validate_for(4, (256, 256))
+
+    assert exc.value.code is ErrorCode.INVALID_TRANSFORM
+    assert "128" in exc.value.technical_detail
+
+
+def test_transform_spec_validate_for_accepts_a_keep_resize_limited_by_short_axis() -> (
+    None
+):
+    transform = TransformSpec(
+        resize=ResizeSpec(width=256, height=128, mismatch=MismatchMode.KEEP)
+    )
+
+    assert transform.validate_for(4, (256, 256)) == (128, 128)
+
+
 def test_render_request_default_transform_is_identity(tmp_path: Path) -> None:
     request = valid_render_request(tmp_path)
 
