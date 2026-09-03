@@ -4,6 +4,7 @@ from dataclasses import replace
 from decimal import Decimal
 from fractions import Fraction
 
+import numpy as np
 import pytest
 from PIL import Image
 
@@ -12,6 +13,7 @@ from matteloop.core.specs import (
     CropSpec,
     FramingSpec,
     MismatchMode,
+    OutputSpec,
     ResizeSpec,
     SamplingSpec,
     TransformSpec,
@@ -22,6 +24,7 @@ from matteloop.core.webp import validate_webp
 from matteloop.jobs.render import (
     AtomicOutputPublisher,
     FilesystemWorkspacePort,
+    PillowWebPEncoder,
     PreparedSegmentation,
     RenderService,
 )
@@ -630,3 +633,51 @@ def test_transforms_never_touch_stored_cut_frames(tmp_path) -> None:
         frame.sha256 for frame in workspace.validate(original.cut_workspace).frames
     )
     assert after_hashes == before_hashes
+
+
+def test_auto_fit_shrinks_a_resized_output_and_reports_actual_size(tmp_path) -> None:
+    """AC 6 / E9 (guardrail G4, degrade never refuse): a resize that exceeds
+    ``max_bytes`` still succeeds; the summary reports the smaller actual
+    dimensions, not the requested ones."""
+    workspace = FilesystemWorkspacePort()
+    seed_request = request(tmp_path, sampling=SamplingSpec(Fraction(0), Fraction(1), 1))
+    original = render_service(workspace=workspace).render(
+        seed_request, job(tmp_path, "seed-autofit", JobKind.RENDER)
+    )
+    rng = np.random.default_rng(1234)
+    noise = rng.integers(0, 256, size=(128, 128, 4), dtype=np.uint8)
+    noise[:, :, 3] = 255
+    Image.fromarray(noise, mode="RGBA").save(
+        original.cut_workspace.path / "frame-000000.png"
+    )
+
+    artifact = RenderService(
+        source=ExplodingSource(),
+        segmentation=binding(FakeSegmenter()),
+        workspace=workspace,
+        encoder=PillowWebPEncoder(),
+        disk_probe=FakeDiskProbe(),
+        clock=FakeClock(),
+        output_publisher=AtomicOutputPublisher(),
+    ).rebuild(
+        replace(
+            seed_request,
+            rebuild=True,
+            transform=TransformSpec(
+                resize=ResizeSpec(width=512, height=256, mismatch=MismatchMode.STRETCH)
+            ),
+            output=OutputSpec(
+                tmp_path,
+                "fit.webp",
+                max_bytes=150_000,
+                collision_policy=seed_request.output.collision_policy,
+            ),
+        ),
+        original.cut_workspace,
+        job(tmp_path, "rebuild-autofit", JobKind.REBUILD),
+    )
+
+    assert artifact.output_path.exists()
+    assert artifact.file_size <= 150_000
+    assert artifact.width <= 512 and artifact.height <= 256
+    assert artifact.width < 512 or artifact.height < 256
