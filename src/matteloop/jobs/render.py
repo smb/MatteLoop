@@ -70,7 +70,12 @@ from matteloop.core.webp import (
     validate_webp,
 )
 from matteloop.jobs.context import JobContext, JobTerminalState
-from matteloop.jobs.encoding import auto_fit_progress, auto_fit_webp
+from matteloop.jobs.encoding import (
+    _map_output_os_error,
+    _output_error,
+    auto_fit_progress,
+    auto_fit_webp,
+)
 from matteloop.jobs.models.cache_fs import BoundDirectoryCloseError, UnsafeCacheError
 from matteloop.jobs.protocol import PROTOCOL_VERSION, SegmentOptions, SegmentRequest
 from matteloop.jobs.source import DecodedFrame, SourceInfo, decode_frame, probe_source
@@ -2903,36 +2908,3 @@ def _is_sha256(value: object) -> bool:
     )
 
 
-def _map_output_os_error(error: OSError, detail: str) -> AppError:
-    if error.errno in {errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)}:
-        suffix = "disk quota or free space exhausted"
-        action = "free-disk-space"
-    elif error.errno in {errno.EACCES, errno.EPERM}:
-        suffix = "output location is not writable"
-        action = "choose-writable-output"
-    elif error.errno == getattr(errno, "EROFS", -1):
-        suffix = "output filesystem is read-only"
-        action = "choose-writable-output"
-    elif error.errno == errno.EEXIST:
-        suffix = "output target already exists"
-        action = "choose-collision-policy"
-    else:
-        suffix = f"{type(error).__name__}: {error}"
-        action = "retry-output"
-    return AppError(
-        ErrorCode.INVALID_OUTPUT,
-        "output",
-        "error.output.failed",
-        f"{detail}: {suffix}",
-        action,
-    )
-
-
-def _output_error(detail: str) -> AppError:
-    return AppError(
-        ErrorCode.INVALID_OUTPUT,
-        "output",
-        "error.output.failed",
-        detail,
-        "retry-output",
-    )
