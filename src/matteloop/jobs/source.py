@@ -1391,6 +1391,39 @@ def _pixel_format_is_high_depth(name: str) -> bool:
     return any(token in lowered for token in ("p9", "p10", "p12", "p14", "p16"))
 
 
+def _padded_yuv_frame(frame: Any) -> tuple[Any, bool]:
+    """Copy a YUV frame into one with two spare bottom rows.
+
+    libswscale writes past the end of the rgba destination PyAV allocates for
+    it; Valgrind on x86-64 reports the write landing 0 bytes after the block
+    av_image_alloc returned, and only the last output row escapes the
+    allocation. Two spare rows give that write somewhere legal to land, and
+    the caller crops them off again.
+
+    Every YUV frame is padded, not just the ones whose width looks unaligned:
+    a 440-wide clip reproduces and a 448-wide one does not, but the SIMD block
+    width that separates them is not something this repository has measured,
+    and a predicate guessed wrong reintroduces silent heap corruption.
+
+    Returns the original frame unpadded when the copy cannot be made exactly,
+    which trades the guard away rather than failing a decode the user cannot
+    otherwise complete.
+    """
+    try:
+        padded = av.VideoFrame(frame.width, frame.height + 2, frame.format.name)
+        if len(padded.planes) != len(frame.planes):
+            return frame, False
+        for destination, source in zip(padded.planes, frame.planes):
+            source_bytes = bytes(source)
+            spare = destination.buffer_size - len(source_bytes)
+            if destination.line_size != source.line_size or spare < 0:
+                return frame, False
+            destination.update(source_bytes + bytes(spare))
+    except Exception:
+        return frame, False
+    return padded, True
+
+
 def _normalized_image(
     frame: Any,
     stream: Any,
@@ -1405,6 +1438,7 @@ def _normalized_image(
     try:
         profile = _color_profile(stream, frame)
         _validate_frame_color(stream, frame)
+        padded = False
         if profile.rgb_input:
             converted = (
                 frame.reformat(format="rgba") if hasattr(frame, "reformat") else frame
@@ -1415,8 +1449,9 @@ def _normalized_image(
                 5: Colorspace.ITU601,
                 6: Colorspace.ITU601,
             }[profile.matrix]
+            reformat_frame, padded = _padded_yuv_frame(frame)
             converted = VideoReformatter().reformat(
-                frame,
+                reformat_frame,
                 format="rgba",
                 src_colorspace=colorspace,
                 dst_colorspace=Colorspace.ITU709,
@@ -1430,6 +1465,10 @@ def _normalized_image(
             converted_owner = rgba_ownership_tracker.track_nonweak(converted)
             converted = converted_owner.value
         pillow_intermediate = converted.to_image()
+        if padded:
+            cropped = pillow_intermediate.crop((0, 0, frame.width, frame.height))
+            pillow_intermediate.close()
+            pillow_intermediate = cropped
         if rgba_ownership_tracker is not None:
             rgba_ownership_tracker.register(
                 pillow_intermediate,
