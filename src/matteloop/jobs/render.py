@@ -1086,7 +1086,7 @@ class RenderService:
                 finally:
                     cut.close()
                     del cut
-                    gc.collect()
+                    gc.collect(0)
                 context.checkpoint("cut-stage")
                 context.progress(
                     "render-cut", index + 1, total=len(timestamps),
