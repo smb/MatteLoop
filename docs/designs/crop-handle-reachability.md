@@ -273,3 +273,35 @@ depends on both, and step 5 on step 4.
 
 Existing pipeline — `.github/workflows/release.yml` builds unsigned macOS and
 Windows packages on a `v*` tag.
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | — |
+| Codex Review | `/codex review` | Independent 2nd opinion | 0 | — | — |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | CLEAR | 15 issues, 0 critical gaps |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | — |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | — |
+
+**CODEX:** outside voice (gpt-5.6-sol, xhigh) raised 10 points. Seven were
+folded in: cache invalidation on frame identity and dpr, paint order against the
+crop guard, physical-pixel cover-crop, an explicit zero default for
+`MediaTransform.inset`, a third breaking test, the pixel-aspect rounding caveat,
+and the missing hover affordance (deferred, listed in NOT in scope). Two were
+verified and rejected in part: the four core geometry tests it listed as broken
+are unaffected because the inset defaults to zero, and its guardrail citation
+pointed at the wrong line though the rule it described is real and now gates
+the plan. One reopened an accepted decision and was decided against it.
+
+**CROSS-MODEL:** two tensions, both resolved by the maintainer. On the paint
+path, the outside voice argued the rebuild is overbuilt for a V1 defect; the
+snapshot approach was kept because this repository carries a standing decision
+against parallel coordinate math, with the three costs the outside voice named
+made mandatory rather than optional. On the proposed constant invariant the
+outside voice was upheld: the ratio was measured and does not carry the fix, so
+the plan tests reachability instead.
+
+**VERDICT:** ENG CLEARED — ready to implement.
+
+NO UNRESOLVED DECISIONS
