@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from decimal import Decimal, InvalidOperation
 from fractions import Fraction
 from pathlib import Path
@@ -20,6 +20,7 @@ from matteloop.core.specs import (
     OutputSpec,
     SamplingSpec,
     SegmentationSpec,
+    TransformSpec,
     is_local_path_syntax,
 )
 
@@ -58,6 +59,7 @@ class ParameterState:
     output_filename: str | None = None
     max_mib: Decimal = Decimal("0")
     execution_provider: str = CPU_EXECUTION_PROVIDER
+    transform: TransformSpec = field(default_factory=TransformSpec)
 
     def __post_init__(self) -> None:
         if self.model_id not in V1_MODEL_IDS:
