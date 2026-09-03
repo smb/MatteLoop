@@ -82,13 +82,30 @@ def _load_onnxruntime() -> object:
     return onnxruntime
 
 
+def _onnxruntime_flavor(device: str) -> str:
+    if "DML" in device:
+        return "onnxruntime-directml"
+    if "GPU" in device:
+        return "onnxruntime-gpu"
+    return "onnxruntime"
+
+
 def _onnxruntime_distribution() -> tuple[str, str]:
     for distribution in _ONNXRUNTIME_DISTRIBUTIONS:
         try:
             return distribution, metadata.version(distribution)
         except metadata.PackageNotFoundError:
             continue
-    return "none", "none"
+    # Frozen bundles (Nuitka standalone) carry no dist-info for onnxruntime,
+    # so fall back to facts read straight off the loaded module.
+    try:
+        import onnxruntime
+
+        version = str(onnxruntime.__version__)
+        device = str(onnxruntime.get_device())
+    except Exception:
+        return "none", "none"
+    return _onnxruntime_flavor(device), version
 
 
 def _error_reason(error: BaseException) -> str:

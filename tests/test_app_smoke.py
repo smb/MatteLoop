@@ -176,6 +176,23 @@ def test_provider_command_prints_fake_runtime_facts(
     assert "CPUExecutionProvider: CPU" in output
 
 
+def test_onnxruntime_distribution_falls_back_to_loaded_module_when_metadata_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import matteloop.app as app
+
+    def missing(name: str) -> str:
+        raise app.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(app.metadata, "version", missing)
+    fake_runtime = SimpleNamespace(__version__="1.24.4", get_device=lambda: "CPU-DML")
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake_runtime)
+
+    distribution, distribution_version = app._onnxruntime_distribution()
+
+    assert f"{distribution} {distribution_version}" == "onnxruntime-directml 1.24.4"
+
+
 def test_provider_command_reports_unavailable_windows_video_adapters(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
