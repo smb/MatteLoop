@@ -76,82 +76,9 @@ jobs:
           python-version: "3.13"
           enable-cache: true
       - run: uv sync --locked --all-groups
-      - name: Generate clips
-        id: clips
-        shell: bash
-        run: |
-          set -euo pipefail
-          report="$(.venv/bin/python scripts/check_swscale_overrun.py --mode report)"
-          printf '%s\n' "$report"
-          clip_440="$(printf '%s\n' "$report" | sed -n 's/^clip 440x444: //p')"
-          clip_448="$(printf '%s\n' "$report" | sed -n 's/^clip 448x448: //p')"
-          test -n "$clip_440"
-          test -n "$clip_448"
-          echo "clip_440=$clip_440" >> "$GITHUB_OUTPUT"
-          echo "clip_448=$clip_448" >> "$GITHUB_OUTPUT"
-      - name: Decode 440x444 under Valgrind
-        env:
-          CLIP_PATH: ${{ steps.clips.outputs.clip_440 }}
-        shell: bash
-        run: |
-          PYTHONMALLOC=malloc valgrind --tool=memcheck --num-callers=30 \
-            --log-file=valgrind-440x444.log \
-            .venv/bin/python scripts/check_swscale_overrun.py --mode decode-only "$CLIP_PATH"
-      - name: Decode 448x448 under Valgrind
-        env:
-          CLIP_PATH: ${{ steps.clips.outputs.clip_448 }}
-        shell: bash
-        run: |
-          PYTHONMALLOC=malloc valgrind --tool=memcheck --num-callers=30 \
-            --log-file=valgrind-448x448.log \
-            .venv/bin/python scripts/check_swscale_overrun.py --mode decode-only "$CLIP_PATH"
-      - name: Fail on libswscale invalid writes
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          invalid_write_stanzas() {
-            awk '
-              /Invalid write/ {
-                if (in_stanza) print stanza
-                stanza = $0 ORS
-                in_stanza = 1
-                next
-              }
-              in_stanza {
-                stanza = stanza $0 ORS
-                if ($0 ~ /^==[0-9]+==[[:space:]]*$/ || NF == 0) {
-                  print stanza
-                  stanza = ""
-                  in_stanza = 0
-                }
-              }
-              END {
-                if (in_stanza) print stanza
-              }
-            ' "$1"
-          }
-
-          failed=0
-          for log in valgrind-440x444.log valgrind-448x448.log; do
-            echo "--- $log ---"
-            if [[ ! -f "$log" ]]; then
-              echo "missing Valgrind log: $log"
-              failed=1
-              continue
-            fi
-            stanzas="$(invalid_write_stanzas "$log")"
-            if [[ -n "$stanzas" ]]; then
-              printf '%s\n' "$stanzas"
-              if printf '%s\n' "$stanzas" | grep -Fqi "libswscale"; then
-                echo "libswscale invalid write detected in $log"
-                failed=1
-              fi
-            else
-              echo "no Invalid write reported"
-            fi
-          done
-          exit "$failed"
+      # .venv/bin/python, not "uv run python": Valgrind would trace uv and
+      # report nothing about the decode.
+      - run: .venv/bin/python scripts/check_swscale_overrun.py
 
   windows:
     # The Windows-only code paths (NT directory API, stat identities, path

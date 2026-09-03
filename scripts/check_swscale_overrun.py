@@ -1,8 +1,17 @@
-"""Check the production decode path for libswscale destination overruns."""
+"""Check the production decode path for libswscale destination overruns.
+
+libswscale writes past the end of the rgba destination PyAV allocates for it,
+which FFmpeg trac #9254 reports against the SSSE3 yuv420_rgb32 converter. The
+converter is x86, so this only detects anything on an x86-64 host, and only
+under Valgrind: on a normal run the write lands in whatever slack the
+allocator happened to leave and corrupts silently.
+"""
 
 from __future__ import annotations
 
 import argparse
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -10,12 +19,15 @@ from fractions import Fraction
 from pathlib import Path
 
 import av
-from av.video.reformatter import ColorRange, Colorspace, VideoReformatter
 
-_CLIPS = ((440, 444), (448, 448))
+# Widths that are not a multiple of 16 are the suspect case; 448 is the
+# control. The small sizes probe whether the fix holds near the floor
+# MIN_SOURCE_DIMENSION allows.
+_CLIPS = ((18, 8), (40, 24), (200, 116), (440, 444), (448, 448))
 _FRAME_COUNT = 3
 _FRAME_RATE = 2
 _TIME_BASE = Fraction(1, _FRAME_RATE)
+_STANZA = re.compile(r"^==\d+== *$")
 
 
 def _encode_clip(path: Path, width: int, height: int) -> None:
@@ -28,7 +40,6 @@ def _encode_clip(path: Path, width: int, height: int) -> None:
         stream.codec_context.color_trc = 1
         stream.codec_context.colorspace = 1
         stream.codec_context.color_range = 1
-
         for index in range(_FRAME_COUNT):
             frame = av.VideoFrame(width, height, "yuv420p")
             for plane, value in zip(frame.planes, (32 + index * 32, 96, 160)):
@@ -39,36 +50,6 @@ def _encode_clip(path: Path, width: int, height: int) -> None:
                 container.mux(packet)
         for packet in stream.encode():
             container.mux(packet)
-
-
-def _reformat_and_report(path: Path, width: int, height: int) -> None:
-    with av.open(str(path), mode="r") as container:
-        frame = next(container.decode(video=0))
-        av.logging.set_level(av.logging.DEBUG)
-        with av.logging.Capture() as logs:
-            rgba = VideoReformatter().reformat(
-                frame,
-                format="rgba",
-                src_colorspace=Colorspace.ITU709,
-                dst_colorspace=Colorspace.ITU709,
-                src_color_range=ColorRange.MPEG,
-                dst_color_range=ColorRange.JPEG,
-            )
-
-    plane = rgba.planes[0]
-    slack = plane.buffer_size - width * 4 * height
-    print(f"dimensions: {width}x{height}")
-    print(f"width % 16: {width % 16}")
-    print(
-        "rgba destination: "
-        f"line_size={plane.line_size} buffer_size={plane.buffer_size} slack={slack}"
-    )
-    print("libswscale logs:")
-    if logs:
-        for level, name, message in logs:
-            print(f"  level={level} logger={name}: {message.rstrip()}")
-    else:
-        print("  (none captured)")
 
 
 def _decode_only(path: Path) -> int:
@@ -86,29 +67,85 @@ def _decode_only(path: Path) -> int:
     return 0
 
 
-def _report() -> None:
-    temporary_directory = Path(tempfile.mkdtemp(prefix="matteloop-swscale-"))
-    print(f"temporary directory: {temporary_directory}")
-    paths: list[Path] = []
-    for width, height in _CLIPS:
-        path = temporary_directory / f"clip-{width}x{height}.mp4"
-        _encode_clip(path, width, height)
-        paths.append(path)
-        _reformat_and_report(path, width, height)
-        print(f"clip {width}x{height}: {path}")
+def _invalid_writes(log: str) -> list[str]:
+    """Return every Invalid write stanza in a Valgrind log."""
+    stanzas: list[str] = []
+    current: list[str] | None = None
+    for line in log.splitlines():
+        if "Invalid write" in line:
+            if current is not None:
+                stanzas.append("\n".join(current))
+            current = [line]
+            continue
+        if current is None:
+            continue
+        if _STANZA.match(line):
+            stanzas.append("\n".join(current))
+            current = None
+            continue
+        current.append(line)
+    if current is not None:
+        stanzas.append("\n".join(current))
+    return stanzas
+
+
+def _check(directory: Path) -> int:
+    if shutil.which("valgrind") is None:
+        print("valgrind not installed; nothing to check")
+        return 0
 
     script = Path(__file__).resolve()
-    for path in paths:
-        result = subprocess.run(
-            [sys.executable, str(script), "--mode", "decode-only", str(path)],
+    failures = 0
+    for width, height in _CLIPS:
+        clip = directory / f"clip-{width}x{height}.mp4"
+        _encode_clip(clip, width, height)
+        log_path = directory / f"valgrind-{width}x{height}.log"
+        completed = subprocess.run(
+            [
+                "valgrind",
+                "--tool=memcheck",
+                "--num-callers=30",
+                f"--log-file={log_path}",
+                sys.executable,
+                str(script),
+                "--mode",
+                "decode-only",
+                str(clip),
+            ],
             check=False,
+            env={**_child_env()},
         )
-        print(f"decode subprocess {path.name}: exit_status={result.returncode}")
+        log = log_path.read_text(encoding="utf-8", errors="replace")
+        stanzas = _invalid_writes(log)
+        swscale = [stanza for stanza in stanzas if "libswscale" in stanza]
+        if swscale:
+            verdict = "OVERRUN"
+        else:
+            verdict = "other invalid write" if stanzas else "clean"
+        print(
+            f"{width}x{height}: width%16={width % 16:>2} "
+            f"exit={completed.returncode} {verdict}"
+        )
+        # Print every stanza, not only the libswscale ones: a write from
+        # somewhere else would mean the padding itself is wrong.
+        for stanza in stanzas:
+            print(stanza)
+        failures += len(swscale)
+    return 1 if failures else 0
+
+
+def _child_env() -> dict[str, str]:
+    import os
+
+    environment = dict(os.environ)
+    # pymalloc's arena reuse hides the write from memcheck.
+    environment["PYTHONMALLOC"] = "malloc"
+    return environment
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=("report", "decode-only"), default="report")
+    parser.add_argument("--mode", choices=("check", "decode-only"), default="check")
     parser.add_argument("path", nargs="?", type=Path)
     arguments = parser.parse_args()
 
@@ -117,11 +154,8 @@ def main() -> int:
             parser.error("decode-only requires a clip path")
         return _decode_only(arguments.path)
 
-    try:
-        _report()
-    except Exception as error:
-        print(f"report error: {error}", file=sys.stderr)
-    return 0
+    with tempfile.TemporaryDirectory(prefix="matteloop-swscale-") as directory:
+        return _check(Path(directory))
 
 
 if __name__ == "__main__":
