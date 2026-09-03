@@ -389,10 +389,7 @@ def _validate_obsolete_rembg_versions(
     versions: tuple[str, ...], rembg_version: str
 ) -> None:
     _validate_string_tuple(versions, "obsolete_rembg_versions", allowed=None)
-    if any(
-        version in {".", ".."} or "/" in version or "\\" in version
-        for version in versions
-    ):
+    if any(re.fullmatch(r"\d+\.\d+\.\d+", version) is None for version in versions):
         raise _manifest_error("obsolete rembg versions must be directory names")
     if rembg_version in versions:
         raise _manifest_error(

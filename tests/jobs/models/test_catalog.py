@@ -77,7 +77,23 @@ def test_manifest_without_obsolete_versions_remains_compatible() -> None:
 
 @pytest.mark.parametrize(
     "obsolete_versions",
-    [["2.0.75"], ["2.0.72", "2.0.72"], ["2.0.72", 2]],
+    [
+        ["2.0.75"],
+        ["2.0.72", "2.0.72"],
+        ["2.0.72", 2],
+        ["2.0.75."],
+        ["2.0.75 "],
+        ["../x"],
+        ["a/b"],
+        ["a\\b"],
+        ["C:"],
+        [""],
+        ["not-a-version"],
+        ["."],
+        [".."],
+        ["/"],
+        ["\\"],
+    ],
 )
 def test_manifest_rejects_invalid_obsolete_rembg_versions(
     obsolete_versions: object,
