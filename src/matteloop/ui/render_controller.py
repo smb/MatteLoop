@@ -1,4 +1,13 @@
-"""GUI-thread render orchestration, confirmations, and output actions."""
+"""GUI-thread render orchestration, confirmations, and output actions.
+
+Shutdown note: every widget this controller creates is destroyed in
+``shutdown``. The job dialog is the one that is easy to miss -- it survives
+its job to show the completion summary, and with no dialog parent it is a
+top-level widget kept alive by this controller's reference alone. Leaving it
+to Python's garbage collector meant a QWidget could be destroyed from inside
+a running event loop, which crashed the process with an access violation
+long after the job it belonged to had finished.
+"""
 
 from __future__ import annotations
 
@@ -172,6 +181,11 @@ class RenderController(QObject):
 
     def shutdown(self) -> None:
         self._closed = True
+        if self._dialog is not None:
+            # Destroyed here, not by a later GC pass -- see the module docstring.
+            dialog, self._dialog = self._dialog, None
+            dialog.close()
+            dialog.deleteLater()
         if self._preflight_dialog is not None:
             self._preflight_dialog.close()
         if self._collision_dialog is not None:
