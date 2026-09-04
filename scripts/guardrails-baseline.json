@@ -28,7 +28,7 @@
     "long_functions": 11
   },
   "src/matteloop/jobs/segmentation_host.py": {
-    "lines": 1784,
+    "lines": 1850,
     "long_functions": 8
   },
   "src/matteloop/jobs/source.py": {

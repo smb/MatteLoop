@@ -91,6 +91,7 @@ _LOGGER = logging.getLogger(__name__)
 type Uint8Frame = NDArray[np.uint8]
 type ChildTarget = Callable[[Connection, object], None]
 type Inference = Callable[[Uint8Frame, object, SegmentOptions], Uint8Frame]
+type _FallbackArtifact = tuple[Path, str, str, int, str]
 
 
 class SegmentationClient:
@@ -989,9 +990,57 @@ def _serve_segmentation_connection(
             try:
                 result = inference(source, session, message.options)
             except BaseException as error:
-                if not _send_child(connection, _inference_failure(message, error)):
-                    return
-                continue
+                wrapper = getattr(session, "session", None)
+                fallback = getattr(wrapper, "_cpu_fallback", None)
+                provider = getattr(session, "execution_provider", "")
+                if fallback is None or provider == CPU_EXECUTION_PROVIDER:
+                    if not _send_child(connection, _inference_failure(message, error)):
+                        return
+                    continue
+                try:
+                    cache_root, version, filename, size, sha256 = fallback[0]
+                    bound = BoundModelDirectory.bind(
+                        cache_root,
+                        version,
+                        getattr(wrapper, "model_name"),
+                        create=False,
+                    )
+                    if bound is None:
+                        raise _model_cache_error("child model namespace does not exist")
+                    with bound:
+                        model_bytes = _read_verified_bound_artifact(
+                            bound,
+                            filename,
+                            expected_size=size,
+                            expected_sha256=sha256,
+                        )
+                        bound.assert_still_named()
+                except BaseException as reread_error:
+                    _LOGGER.error(
+                        "verified ONNX CPU fallback model re-read failed: %s",
+                        reread_error,
+                    )
+                    if not _send_child(connection, _inference_failure(message, error)):
+                        return
+                    continue
+                try:
+                    session = _create_cpu_fallback_session(
+                        type(wrapper),
+                        getattr(wrapper, "model_name"),
+                        model_bytes,
+                        fallback[1],
+                        fallback[2],
+                        getattr(session, "inference_kwargs"),
+                        provider,
+                        error,
+                    )
+                    result = inference(source, session, message.options)
+                except BaseException as retry_error:
+                    if not _send_child(
+                        connection, _inference_failure(message, retry_error)
+                    ):
+                        return
+                    continue
             shutdown = False
             cancel_requested = False
             while True:
@@ -1108,6 +1157,13 @@ def _create_rembg_session(model_spec: dict[str, object]) -> object:
         verified.rembg_version,
         verified.inference_kwargs,
         execution_provider=verified.execution_provider,
+        fallback_artifact=(
+            verified.artifact_path.parent.parent.parent,
+            verified.rembg_version,
+            verified.artifact_path.name,
+            verified.size_bytes,
+            verified.sha256,
+        ),
     )
 
 
@@ -1326,6 +1382,7 @@ def _instantiate_verified_rembg_session(
     session_classes: object | None = None,
     ort_module: object | None = None,
     installed_version: str | None = None,
+    fallback_artifact: _FallbackArtifact | None = None,
 ) -> object:
     """Construct the pinned rembg class around the exact SHA-proven bytes."""
     if type(model_bytes) is not bytes:
@@ -1366,6 +1423,7 @@ def _instantiate_verified_rembg_session(
         runtime,
         inference_kwargs,
         execution_provider,
+        fallback_artifact,
     )
 
 
@@ -1431,6 +1489,7 @@ def _construct_requested_session(
     runtime: Any,
     inference_kwargs: tuple[tuple[str, str], ...],
     execution_provider: str,
+    fallback_artifact: _FallbackArtifact | None = None,
 ) -> _PreparedRembgSession:
     providers = (
         [CPU_EXECUTION_PROVIDER]
@@ -1440,6 +1499,8 @@ def _construct_requested_session(
     try:
         session = session_class.__new__(session_class)
         session.model_name = model_id
+        if fallback_artifact is not None:
+            session._cpu_fallback = (fallback_artifact, session_options, runtime)
         session.inner_session = runtime.InferenceSession(
             model_bytes,
             sess_options=session_options,
@@ -1476,9 +1537,10 @@ def _create_cpu_fallback_session(
 ) -> _PreparedRembgSession:
     label = provider_base_label(requested_provider)
     _LOGGER.error(
-        "ONNX Runtime provider %s could not initialise model %s; using CPU: %s",
+        "ONNX Runtime provider %s failed for model %s; using CPU after %s: %s",
         requested_provider,
         model_id,
+        type(error).__name__,
         error,
     )
     try:
@@ -1738,11 +1800,15 @@ def _failure(request: SegmentRequest, detail: str) -> SegmentFailure:
 
 
 def _inference_failure(request: SegmentRequest, error: BaseException) -> SegmentFailure:
+    try:
+        detail = f"{type(error).__name__}: {error}"
+    except BaseException:
+        detail = type(error).__name__
     app_error = AppError(
         ErrorCode.INVALID_SEGMENTATION,
         "segmentation",
         "error.segmentation.inference-failed",
-        f"{type(error).__name__}: {error}",
+        detail,
         "retry-job",
         request.job_id,
     )
