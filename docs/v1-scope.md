@@ -74,6 +74,10 @@ Nothing else gates V1. When that sentence is true end to end, V1 is done.
   its Actions build has no paid-minute constraint; this adds the second
   committed packaging target without reopening Linux artifacts or any other
   deferred item.
+- **Model Manager outdated-weight cleanup, 2026-09-04:** although the Model
+  Manager UI remains deferred, it gained the outdated-weight notice and
+  `Delete outdated` as the agreed handling for a rembg namespace move (issue
+  #22). Bulk re-download is deliberately not part of it.
 
 ---
 
