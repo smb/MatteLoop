@@ -4,6 +4,7 @@ from fractions import Fraction
 
 from matteloop.core.crop import (
     centered_crop_for_aspect,
+    clamp_crop,
     crop_from_drag,
     fit_crop_aspect,
     nudge_crop,
@@ -180,3 +181,31 @@ def test_centered_crop_for_aspect_centres_a_narrower_rectangle() -> None:
     crop = centered_crop_for_aspect(Fraction(1, 1), source_width=200, source_height=100)
 
     assert crop == CropSpec(50, 0, 100, 100)
+
+
+def test_clamp_crop_slides_an_off_origin_crop_inward_instead_of_shrinking_it() -> None:
+    # Stored while the framed frame was 500x300 (e.g. more padding); the
+    # frame then shrank to 420x220 underneath it. The rectangle still fits
+    # at its original size -- only its origin needs to move -- so this must
+    # not collapse below MIN_FINAL_DIMENSION (128) and force a render refusal.
+    clamped = clamp_crop(CropSpec(330, 160, 170, 140), 420, 220)
+
+    assert clamped == CropSpec(250, 80, 170, 140)
+
+
+def test_clamp_crop_shrinks_a_crop_wider_than_the_new_frame() -> None:
+    clamped = clamp_crop(CropSpec(10, 10, 300, 50), 100, 100)
+
+    assert clamped == CropSpec(0, 10, 100, 50)
+
+
+def test_clamp_crop_shrinks_a_crop_oversized_in_both_axes() -> None:
+    clamped = clamp_crop(CropSpec(10, 10, 300, 300), 100, 100)
+
+    assert clamped == CropSpec(0, 0, 100, 100)
+
+
+def test_clamp_crop_leaves_a_crop_that_already_fits_unchanged() -> None:
+    crop = CropSpec(5, 5, 50, 50)
+
+    assert clamp_crop(crop, 100, 100) == crop

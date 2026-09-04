@@ -71,12 +71,23 @@ def nudge_crop(
 
 
 def clamp_crop(crop: CropSpec, source_width: int, source_height: int) -> CropSpec:
-    """Clamp an otherwise valid crop to a non-empty source rectangle."""
+    """Clamp an otherwise valid crop to fit inside a source rectangle.
+
+    A crop that still fits at its stored size (e.g. after the framed frame
+    shrank underneath it -- a padding change or a cut-set switch) is *slid*
+    inward to stay in bounds; its width/height are preserved. Only a crop
+    genuinely larger than the frame in an axis is shrunk on that axis. Doing
+    it in this order -- shrink to fit, then clamp the origin into what
+    remains -- naturally slides an origin that was fine before the frame
+    shrank, instead of trimming a corner down to nothing (issue #25: a crop
+    near the right/bottom edge collapsing below MIN_FINAL_DIMENSION and the
+    render being refused for a precondition the user cannot see or fix).
+    """
     _validate_dimensions(source_width, source_height)
-    left = min(max(crop.x, 0), source_width - 1)
-    top = min(max(crop.y, 0), source_height - 1)
-    width = min(max(crop.width, 1), source_width - left)
-    height = min(max(crop.height, 1), source_height - top)
+    width = min(max(crop.width, 1), source_width)
+    height = min(max(crop.height, 1), source_height)
+    left = min(max(crop.x, 0), source_width - width)
+    top = min(max(crop.y, 0), source_height - height)
     return CropSpec(left, top, width, height)
 
 
