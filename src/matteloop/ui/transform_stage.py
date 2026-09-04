@@ -230,10 +230,24 @@ class TransformStageController(QObject):
     def facts(self) -> CutFacts | None:
         return self._facts
 
-    # -- Stage C: crop-edit mode ---------------------------------------
+    # -- Stage C: playhead coupling and crop-edit mode ----------------------
 
-    def _use_playhead_requested(self, _edge: str) -> None:
-        """Playhead coupling lands in task C3; nothing to answer with yet."""
+    def _use_playhead_requested(self, edge: str) -> None:
+        """Resolve "Use playhead" against the player's current stored frame."""
+        canvas = self._player_canvas
+        if canvas is None:
+            return
+        index = canvas.current_frame
+        if index is None:
+            return
+        transform = self._store.state.parameters.transform
+        updated = (
+            replace(transform, first_frame=index)
+            if edge == "first"
+            else replace(transform, last_frame=index)
+        )
+        if updated != transform:
+            self._store.dispatch(TransformChanged(updated))
 
     def _crop_edit_toggled(self, enabled: bool) -> None:
         was_enabled = self._crop_edit_enabled

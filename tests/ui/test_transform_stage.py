@@ -246,6 +246,40 @@ def test_open_artifact_ignored_leaves_an_existing_session_untouched(
     controller.shutdown()
 
 
+# -- C3: playhead coupling --------------------------------------------------
+
+
+def test_use_playhead_requested_dispatches_the_players_current_frame(qtbot) -> None:
+    store = _FakeStore(AppState())
+    controller = TransformStageController(store)
+    canvas = ResultPlayerCanvas()
+    qtbot.addWidget(canvas)
+    group = TransformGroup(lambda _event: None)
+    qtbot.addWidget(group)
+    controller.attach(group, canvas)
+    canvas._playhead_index = 5  # noqa: SLF001
+
+    controller._use_playhead_requested("last")  # noqa: SLF001
+
+    assert store.dispatched == [TransformChanged(TransformSpec(last_frame=5))]
+    controller.shutdown()
+
+
+def test_use_playhead_requested_without_a_player_frame_does_nothing(qtbot) -> None:
+    store = _FakeStore(AppState())
+    controller = TransformStageController(store)
+    canvas = ResultPlayerCanvas()
+    qtbot.addWidget(canvas)
+    group = TransformGroup(lambda _event: None)
+    qtbot.addWidget(group)
+    controller.attach(group, canvas)
+
+    controller._use_playhead_requested("first")  # noqa: SLF001
+
+    assert store.dispatched == []
+    controller.shutdown()
+
+
 # -- E24: a stale frame-load generation is discarded ------------------------
 
 
