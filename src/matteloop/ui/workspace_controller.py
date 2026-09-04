@@ -85,4 +85,4 @@ class WorkspacePickerController:
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
-        return answer is QMessageBox.StandardButton.Yes
+        return answer == QMessageBox.StandardButton.Yes

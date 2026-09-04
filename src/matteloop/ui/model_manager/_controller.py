@@ -139,8 +139,6 @@ class ModelManagerController(QObject):
             return "Cannot remove a model while a job is running."
         if self._manager is None:
             return "Model removal is unavailable in this runtime."
-        if self._manager.active_id == entry.model_id:
-            return "Cannot remove the model used by the active session."
         return None
 
     def _download_requested(self, value: object) -> None:
@@ -196,7 +194,9 @@ class ModelManagerController(QObject):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
-        if answer is not QMessageBox.StandardButton.Yes:
+        # QMessageBox.question returns an int, so identity with StandardButton
+        # does not hold.
+        if answer != QMessageBox.StandardButton.Yes:
             return
         self._start_obsolete_removal(manager)
 
@@ -213,10 +213,7 @@ class ModelManagerController(QObject):
             return
         if self._remove_thread is not None:
             return
-        if (
-            _confirm_redownload(self.dialog, entries)
-            is not QMessageBox.StandardButton.Yes
-        ):
+        if _confirm_redownload(self.dialog, entries) != QMessageBox.StandardButton.Yes:
             return
         cancel = CancellationState()
         self._batch = {entry.model_id: entry for entry in entries}
@@ -373,7 +370,9 @@ class ModelManagerController(QObject):
     def _remove_requested(self, value: object) -> None:
         if not isinstance(value, ModelEntry) or not value.cached:
             return
-        if self._removal_block_reason(value) is not None:
+        reason = self._removal_block_reason(value)
+        if reason is not None:
+            self.dialog.set_message(reason)
             return
         if self._remove_thread is not None:
             return
@@ -385,7 +384,7 @@ class ModelManagerController(QObject):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
-        if answer is not QMessageBox.StandardButton.Yes:
+        if answer != QMessageBox.StandardButton.Yes:
             return
         manager = self._manager
         if manager is None:
