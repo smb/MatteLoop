@@ -220,14 +220,12 @@ class ModelSessionManager:
     def remove(self, model_id: str) -> bool:
         with self._lock:
             spec = self._catalog.get(model_id)
-            if (self._active_spec is not None and self._active_spec.id == spec.id) or (
-                spec.id in self._cleanup_ids
-            ):
+            if spec.id in self._cleanup_ids:
                 raise AppError(
                     ErrorCode.MODEL_IN_USE,
                     "model-cache",
                     "error.model.in-use",
-                    f"model {spec.id!r} owns the active segmentation session",
+                    f"model {spec.id!r} is pending segmentation cleanup",
                     "close-or-switch-model",
                 )
             self._require_open()
