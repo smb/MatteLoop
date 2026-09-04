@@ -211,6 +211,18 @@ class OutputPublisher(Protocol):
     ) -> Path: ...
 
 
+def _overall_budget(
+    timestamp_count: int, kept_count: int, *, rebuilt: bool
+) -> tuple[int, int]:
+    post_process_and_encode = 2 * kept_count
+    total = (
+        post_process_and_encode
+        if rebuilt
+        else timestamp_count + post_process_and_encode
+    )
+    return (0 if rebuilt else timestamp_count, total)
+
+
 @dataclass(frozen=True, slots=True)
 class PreparedSegmentation:
     port: SegmentationPort
@@ -1046,7 +1058,12 @@ class RenderService:
                 request.sampling.end,
                 request.sampling.fps,
             )
-            delays = webp_delays(len(timestamps), request.sampling.fps)
+            timestamp_count = len(timestamps)
+            kept_count = len(request.transform.kept_range(timestamp_count))
+            overall_start, overall_total = _overall_budget(
+                timestamp_count, kept_count, rebuilt=False
+            )
+            delays = webp_delays(timestamp_count, request.sampling.fps)
             source_sha = self._source.complete_sha256(request.source, context)
             context.checkpoint("source-hash")
             inputs = cut_cache_key_inputs(
@@ -1071,8 +1088,8 @@ class RenderService:
             for index, timestamp in enumerate(timestamps):
                 context.set_frame_context(
                     index + 1,
-                    len(timestamps),
-                    overall=(index, len(timestamps) * 2),
+                    timestamp_count,
+                    overall=(index, overall_total),
                 )
                 cut, actual = _produce_cut_frame(
                     self._source,
@@ -1095,9 +1112,12 @@ class RenderService:
                     gc.collect(0)
                 context.checkpoint("cut-stage")
                 context.progress(
-                    "render-cut", index + 1, total=len(timestamps),
+                    "render-cut",
+                    index + 1,
+                    total=timestamp_count,
                     detail=f"Cut frame {index + 1} of {len(timestamps)}",
-                    overall_completed=index + 1, overall_total=len(timestamps) * 2,
+                    overall_completed=index + 1,
+                    overall_total=overall_total,
                 )
             union_metadata = (
                 None
@@ -1138,6 +1158,7 @@ class RenderService:
                 union,
                 notes,
                 tuple(scratch_owners),
+                overall=(overall_start, overall_total),
                 rebuilt=False,
             )
             scratch_owners.clear()
@@ -1208,7 +1229,12 @@ class RenderService:
                     "choose-matching-cuts",
                     context.job_id,
                 )
-            delays = webp_delays(len(timestamps), request.sampling.fps)
+            timestamp_count = len(timestamps)
+            kept_count = len(request.transform.kept_range(timestamp_count))
+            overall_start, overall_total = _overall_budget(
+                timestamp_count, kept_count, rebuilt=True
+            )
+            delays = webp_delays(timestamp_count, request.sampling.fps)
             snapshot_width = durable_manifest.width
             snapshot_height = durable_manifest.height
             worst_case = request.framing.dimensions_after_padding_and_stretch(
@@ -1258,6 +1284,7 @@ class RenderService:
                 union,
                 notes,
                 tuple(scratch_owners),
+                overall=(overall_start, overall_total),
                 rebuilt=True,
             )
             scratch_owners.clear()
@@ -1340,6 +1367,7 @@ class RenderService:
         notes: list[str],
         scratch_owners: tuple[Path, ...],
         *,
+        overall: tuple[int, int],
         rebuilt: bool,
     ) -> RenderArtifact:
         plan = framing_plan((manifest.width, manifest.height), union, request.framing)
@@ -1354,6 +1382,7 @@ class RenderService:
             scratch / "framed-inputs",
             tracker,
             context,
+            overall=overall,
         )
         candidate = self._output_publisher.candidate_path(
             request.output.path, context.job_id, scratch
@@ -2840,5 +2869,3 @@ def _is_sha256(value: object) -> bool:
         and len(value) == 64
         and all(character in "0123456789abcdefABCDEF" for character in value)
     )
-
-

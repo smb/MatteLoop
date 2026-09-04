@@ -23,6 +23,7 @@ from matteloop.core.specs import (
 from matteloop.core.state import JobKind
 from matteloop.core.timebase import webp_delays
 from matteloop.core.webp import validate_webp
+from matteloop.jobs.context import CancellationState, JobContext, ProgressEvent
 from matteloop.jobs.render import (
     AtomicOutputPublisher,
     FilesystemWorkspacePort,
@@ -491,6 +492,39 @@ def test_trim_keeps_exactly_the_selected_frames_and_their_delays(tmp_path) -> No
     )
     assert info.frames == 4
     assert info.delays_ms == expected
+
+
+def test_rebuild_reports_adjacent_framing_and_encode_overall_stages(tmp_path) -> None:
+    workspace = FilesystemWorkspacePort()
+    seed_request = request(tmp_path)
+    original = render_service(workspace=workspace).render(
+        seed_request, job(tmp_path, "seed-progress", JobKind.RENDER)
+    )
+    events: list[ProgressEvent] = []
+
+    _rebuild_service(workspace, FakeEncoder()).rebuild(
+        replace(
+            seed_request,
+            rebuild=True,
+            output=replace(seed_request.output, filename="progress.webp"),
+        ),
+        original.cut_workspace,
+        JobContext(
+            "rebuild-progress",
+            JobKind.REBUILD,
+            tmp_path / "rebuild-work",
+            events.append,
+            CancellationState(),
+        ),
+    )
+
+    framing = [event for event in events if event.stage == "Framing"]
+    encode = [event for event in events if event.stage == "Encode"]
+    assert [event.overall_completed for event in framing] == [1, 2]
+    assert [event.overall_completed for event in encode] == [2, 4]
+    assert all(event.overall_total == 4 for event in framing + encode)
+    assert framing[-1].overall_completed == encode[0].overall_completed
+    assert encode[-1].overall_completed == encode[-1].overall_total
 
 
 @pytest.mark.parametrize(
