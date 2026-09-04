@@ -134,6 +134,7 @@ class RenderController(QObject):
         self._workspace_picker: WorkspacePickerController | None = None
         self._active_workspace: CutWorkspace | None = None
         self.transform_restore: Callable[[CutWorkspace], None] | None = None
+        self.open_cut_key: Callable[[], str | None] | None = None
         self._closed = False
 
     @property
@@ -249,41 +250,59 @@ class RenderController(QObject):
             return
         self._probe_for_reuse(request)
 
+    def _choice_dialog(
+        self,
+        name: str,
+        title: str,
+        text: str,
+        informative: str,
+        buttons: tuple[tuple[str, str], ...],
+        default: int,
+        chosen: Callable[[str], None],
+        closed: Callable[[], None],
+    ) -> QMessageBox:
+        """Build one three-choice confirmation, unopened.
+
+        The preflight, reuse and collision prompts differ only in wording and
+        in what they do with the answer, so they share this: *buttons* pairs
+        each label with the choice *chosen* receives, in display order; the
+        last is always the escape button, and *default* indexes the
+        preselected one. The caller stores the dialog before opening it --
+        *closed* runs while it is still recorded.
+        """
+        dialog = QMessageBox(self._dialog_parent)
+        dialog.setObjectName(name)
+        dialog.setWindowTitle(title)
+        dialog.setText(text)
+        dialog.setInformativeText(informative)
+        role = QMessageBox.ButtonRole.AcceptRole
+        answers = {dialog.addButton(label, role): choice for label, choice in buttons}
+        widgets = tuple(answers)
+        dialog.setDefaultButton(widgets[default])
+        dialog.setEscapeButton(widgets[-1])
+        dialog.buttonClicked.connect(lambda button: chosen(answers[button]))
+        dialog.finished.connect(lambda _result: closed())
+        return dialog
+
     def _show_preflight(self) -> None:
         if self._preflight_dialog is not None:
             return
-        dialog = QMessageBox(self._dialog_parent)
-        dialog.setObjectName("render_preflight_dialog")
-        dialog.setWindowTitle("Preview recommended")
-        dialog.setText("Preview this frame before rendering?")
-        dialog.setInformativeText(
-            "A preview lets you verify the cutout before processing the whole video."
+        dialog = self._choice_dialog(
+            "render_preflight_dialog",
+            "Preview recommended",
+            "Preview this frame before rendering?",
+            "A preview lets you verify the cutout before processing the whole video.",
+            (
+                ("Preview first", "preview"),
+                ("Render anyway", "render"),
+                ("Cancel", "cancel"),
+            ),
+            0,
+            self._finish_preflight,
+            self._preflight_closed,
         )
-        preview = dialog.addButton(
-            "Preview first", QMessageBox.ButtonRole.AcceptRole
-        )
-        render = dialog.addButton(
-            "Render anyway", QMessageBox.ButtonRole.AcceptRole
-        )
-        cancel = dialog.addButton("Cancel", QMessageBox.ButtonRole.AcceptRole)
-        dialog.setDefaultButton(preview)
-        dialog.setEscapeButton(cancel)
-        dialog.buttonClicked.connect(
-            lambda button: self._preflight_selected(button, preview, render, cancel)
-        )
-        dialog.finished.connect(lambda _result: self._preflight_closed())
         self._preflight_dialog = dialog
         dialog.open()
-
-    def _preflight_selected(
-        self, button: object, preview: object, render: object, cancel: object
-    ) -> None:
-        if button is preview:
-            self._finish_preflight("preview")
-        elif button is render:
-            self._finish_preflight("render")
-        elif button is cancel:
-            self._finish_preflight("cancel")
 
     def _preflight_closed(self) -> None:
         if self._preflight_dialog is not None:
@@ -363,42 +382,22 @@ class RenderController(QObject):
     def _show_reuse(self) -> None:
         if self._reuse_dialog is not None or self._reuse_request is None:
             return
-        dialog = QMessageBox(self._dialog_parent)
-        dialog.setObjectName("render_reuse_dialog")
-        dialog.setWindowTitle("Matching cut set found")
-        dialog.setText("A validated cut set matches the current source and settings.")
-        dialog.setInformativeText(
-            "Rebuild reuses the cuts and only reruns framing and encoding."
+        dialog = self._choice_dialog(
+            "render_reuse_dialog",
+            "Matching cut set found",
+            "A validated cut set matches the current source and settings.",
+            "Rebuild reuses the cuts and only reruns framing and encoding.",
+            (
+                ("Rebuild", "rebuild"),
+                ("Regenerate", "regenerate"),
+                ("Cancel", "cancel"),
+            ),
+            0,
+            self._finish_reuse,
+            self._reuse_closed,
         )
-        rebuild = dialog.addButton("Rebuild", QMessageBox.ButtonRole.AcceptRole)
-        regenerate = dialog.addButton(
-            "Regenerate", QMessageBox.ButtonRole.AcceptRole
-        )
-        cancel = dialog.addButton("Cancel", QMessageBox.ButtonRole.AcceptRole)
-        dialog.setDefaultButton(rebuild)
-        dialog.setEscapeButton(cancel)
-        dialog.buttonClicked.connect(
-            lambda button: self._reuse_selected(
-                button, rebuild, regenerate, cancel
-            )
-        )
-        dialog.finished.connect(lambda _result: self._reuse_closed())
         self._reuse_dialog = dialog
         dialog.open()
-
-    def _reuse_selected(
-        self,
-        button: object,
-        rebuild: object,
-        regenerate: object,
-        cancel: object,
-    ) -> None:
-        if button is rebuild:
-            self._finish_reuse("rebuild")
-        elif button is regenerate:
-            self._finish_reuse("regenerate")
-        elif button is cancel:
-            self._finish_reuse("cancel")
 
     def _reuse_closed(self) -> None:
         if self._reuse_dialog is not None:
@@ -417,9 +416,35 @@ class RenderController(QObject):
         self._reuse_workspace = None
         dialog.close()
         if choice == "rebuild" and workspace is not None:
-            self._resolve_collision(replace(request, rebuild=True), workspace)
+            self._resolve_collision(
+                self._transform_for_rebuild(replace(request, rebuild=True), workspace),
+                workspace,
+            )
         elif choice == "regenerate":
             self._resolve_collision(replace(request, regenerate=True), None)
+
+    def _transform_for_rebuild(
+        self, request: RenderRequest, workspace: CutWorkspace
+    ) -> RenderRequest:
+        """Restore the matched cut's stored transform before it is rebuilt.
+
+        This request predates the probe, so on a cold start it carries
+        identity: the rebuild dropped the stored trim/crop/resize, and
+        ``store_transform`` then deleted the sidecar holding them because an
+        identity result records nothing. Restoring mirrors ``_use_workspace``
+        -- dispatch, then read the transform back off the store.
+
+        The cut already open is the exception: what the inspector holds for
+        it is an unsaved edit, and restoring over that is the same loss in
+        the other direction. ``open_cut_key`` asks the Transform stage, which
+        owns that session and closes it when the source is reloaded, rather
+        than tracking a second copy here. Every other cut restores, so
+        keeping that edit can never rewrite a different cut's sidecar.
+        """
+        open_key = self.open_cut_key() if self.open_cut_key is not None else None
+        if self.transform_restore is not None and open_key != workspace.cache_key:
+            self.transform_restore(workspace)
+        return replace(request, transform=self._store.state.parameters.transform)
 
     def _current_request(self) -> RenderRequest | None:
         state = self._store.state
@@ -467,42 +492,22 @@ class RenderController(QObject):
     def _show_collision(self) -> None:
         if self._collision_dialog is not None or self._collision_request is None:
             return
-        dialog = QMessageBox(self._dialog_parent)
-        dialog.setObjectName("render_collision_dialog")
-        dialog.setWindowTitle("Output already exists")
-        dialog.setText(f"{self._collision_request.output.path} already exists.")
-        dialog.setInformativeText("Choose how to handle the existing output.")
-        replace_button = dialog.addButton(
-            "Replace", QMessageBox.ButtonRole.AcceptRole
+        dialog = self._choice_dialog(
+            "render_collision_dialog",
+            "Output already exists",
+            f"{self._collision_request.output.path} already exists.",
+            "Choose how to handle the existing output.",
+            (
+                ("Replace", "replace"),
+                ("Choose another name", "choose"),
+                ("Cancel", "cancel"),
+            ),
+            2,
+            self._finish_collision,
+            self._collision_closed,
         )
-        choose_button = dialog.addButton(
-            "Choose another name", QMessageBox.ButtonRole.AcceptRole
-        )
-        cancel_button = dialog.addButton("Cancel", QMessageBox.ButtonRole.AcceptRole)
-        dialog.setDefaultButton(cancel_button)
-        dialog.setEscapeButton(cancel_button)
-        dialog.buttonClicked.connect(
-            lambda button: self._collision_selected(
-                button, replace_button, choose_button, cancel_button
-            )
-        )
-        dialog.finished.connect(lambda _result: self._collision_closed())
         self._collision_dialog = dialog
         dialog.open()
-
-    def _collision_selected(
-        self,
-        button: object,
-        replace_button: object,
-        choose_button: object,
-        cancel: object,
-    ) -> None:
-        if button is replace_button:
-            self._finish_collision("replace")
-        elif button is choose_button:
-            self._finish_collision("choose")
-        elif button is cancel:
-            self._finish_collision("cancel")
 
     def _collision_closed(self) -> None:
         if self._collision_dialog is not None:
@@ -521,15 +526,8 @@ class RenderController(QObject):
         self._collision_workspace = None
         dialog.close()
         if choice == "replace":
-            self._start(
-                replace(
-                    request,
-                    output=replace(
-                        request.output, collision_policy=CollisionPolicy.REPLACE
-                    ),
-                ),
-                workspace,
-            )
+            output = replace(request.output, collision_policy=CollisionPolicy.REPLACE)
+            self._start(replace(request, output=output), workspace)
         elif choice == "choose":
             self._choose_output_name(request, workspace)
 
@@ -656,14 +654,11 @@ class RenderController(QObject):
             self._dialog.open_output_requested.connect(self._open_output)
             self._dialog.open_folder_requested.connect(self._open_output_folder)
             self._dialog_cancel_connected = True
+        rebuilding = kind is JobKind.REBUILD
         self._dialog.reset(
-            "Rebuilding from edited cuts"
-            if kind is JobKind.REBUILD
-            else "Rendering video"
+            "Rebuilding from edited cuts" if rebuilding else "Rendering video"
         )
-        self._dialog.stage_label.setText(
-            "Validation" if kind is JobKind.REBUILD else "Decode"
-        )
+        self._dialog.stage_label.setText("Validation" if rebuilding else "Decode")
         self._dialog.set_job_details(
             request.segmentation.model_id, request.output.filename
         )
@@ -785,16 +780,7 @@ class RenderController(QObject):
 def _normalise_progress(event: ProgressEvent) -> ProgressEvent:
     if event.stage != "render-cut":
         return event
-    return ProgressEvent(
-        event.job_id,
-        "Decode",
-        event.completed,
-        event.total,
-        event.detail,
-        event.overall_completed,
-        event.overall_total,
-        event.overall_indeterminate,
-    )
+    return replace(event, stage="Decode")
 
 
 def _path_value(value: object) -> Path | None:

@@ -196,6 +196,7 @@ class SourceController(QObject):
             self._transform_stage.open_artifact
         )
         self._render_controller.transform_restore = self._transform_stage.restore_for
+        self._render_controller.open_cut_key = self._open_cut_key
         self._preview_controller.provider_ready.connect(self._provider_ready)
         self._render_controller.provider_ready.connect(self._provider_ready)
         self._working_provider = store.state.parameters.execution_provider
@@ -241,6 +242,17 @@ class SourceController(QObject):
     def transform_stage(self) -> TransformStageController:
         """Expose the cut-session owner for lifecycle and UI integration tests."""
         return self._transform_stage
+
+    def _open_cut_key(self) -> str | None:
+        """Name the cut the Transform group currently edits, if any.
+
+        The rebuild path asks this before restoring a matched cut's stored
+        transform, so that an unsaved edit to the cut on screen wins. The
+        stage owns the session -- it opens one per artifact and closes it
+        when the source is reloaded -- so it is asked rather than mirrored.
+        """
+        session = self._transform_stage.session
+        return None if session is None else session.workspace.cache_key
 
     def attach_transform_stage(
         self, group: TransformGroup, canvas: CropCanvas | None
