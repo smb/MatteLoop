@@ -116,6 +116,13 @@ request that references the issue. Never push it to `main` directly.
   is done, and whether it lands, is the maintainer's call — not something to
   infer from green CI.
 - `main` is protected; a direct push is rejected, and that is intentional.
+- **Never force-push a branch that has been pushed, without being told to.**
+  Amending, rebasing or squashing published commits is the maintainer's call,
+  the same as merging is. `--force-with-lease` only protects against
+  destroying somebody else's commits; it does not grant permission to rewrite
+  history a reviewer may already have fetched, a comment may already cite, or
+  a pull request already lists. Amend freely before the first push; after it,
+  add a commit, or ask.
 
 The repository is public and takes reports from other people, so the trail
 from a report to the change answering it has to stay visible and reviewable.
