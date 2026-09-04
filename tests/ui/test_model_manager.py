@@ -5,9 +5,9 @@ from pathlib import Path
 from threading import Event, get_ident
 
 import pytest
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from matteloop.core.errors import AppError, ErrorCode
 from matteloop.core.parameters import ParameterState
@@ -192,7 +192,7 @@ def test_model_manager_removes_only_confirmed_selected_weight_in_background(
     monkeypatch.setattr(
         QMessageBox,
         "question",
-        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+        lambda *_args, **_kwargs: int(QMessageBox.StandardButton.Yes),
     )
     reported: list[str] = []
     monkeypatch.setattr(
@@ -224,7 +224,73 @@ def test_model_manager_removes_only_confirmed_selected_weight_in_background(
     controller.close()
 
 
-def test_model_manager_blocks_active_and_running_job_removal(
+def test_model_manager_removes_weight_after_real_confirmation(
+    tmp_path: Path, qtbot
+) -> None:
+    target = _model_path(tmp_path, "u2netp")
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"cached-weight")
+    manager = FakeModelRemovalService(targets={"u2netp": target})
+    controller = ModelManagerController(
+        ReducerStore(AppState(model_available=True)),
+        catalog=ModelCatalog.load_resource(),
+        cache_root=tmp_path,
+        manager=manager,
+    )
+    qtbot.addWidget(controller.dialog)
+    controller.open()
+    controller.dialog.model_list.setCurrentRow(
+        next(
+            index
+            for index, entry in enumerate(controller.dialog.entries)
+            if entry.model_id == "u2netp"
+        )
+    )
+
+    def click_active_modal_button() -> None:
+        app = QApplication.instance()
+        assert isinstance(app, QApplication)
+        modal = app.activeModalWidget()
+        if not isinstance(modal, QMessageBox):
+            return
+        yes_button = next(
+            (
+                button
+                for button in modal.buttons()
+                if modal.buttonRole(button) == QMessageBox.ButtonRole.YesRole
+            ),
+            None,
+        )
+        if yes_button is not None:
+            yes_button.click()
+            return
+        if manager.removed != ["u2netp"]:
+            return
+        ok_button = next(
+            (
+                button
+                for button in modal.buttons()
+                if modal.buttonRole(button) == QMessageBox.ButtonRole.AcceptRole
+            ),
+            None,
+        )
+        if ok_button is not None:
+            ok_button.click()
+
+    modal_timer = QTimer(controller.dialog)
+    modal_timer.setInterval(10)
+    modal_timer.timeout.connect(click_active_modal_button)
+    modal_timer.start()
+    try:
+        controller.dialog.remove_button.click()
+        qtbot.waitUntil(lambda: manager.removed == ["u2netp"], timeout=5000)
+        qtbot.waitUntil(lambda: not target.exists(), timeout=5000)
+    finally:
+        modal_timer.stop()
+    controller.close()
+
+
+def test_model_manager_allows_active_and_blocks_running_job_removal(
     tmp_path: Path, qtbot
 ) -> None:
     target = _model_path(tmp_path, "u2netp")
@@ -247,8 +313,7 @@ def test_model_manager_blocks_active_and_running_job_removal(
         )
     )
 
-    assert controller.dialog.remove_button.isEnabled() is False
-    assert "active session" in controller.dialog.remove_button.toolTip()
+    assert controller.dialog.remove_button.isEnabled() is True
 
     running = ReducerStore(
         AppState(
@@ -283,6 +348,12 @@ def test_model_manager_blocks_active_and_running_job_removal(
 
     assert running_controller.dialog.remove_button.isEnabled() is False
     assert "job is running" in running_controller.dialog.remove_button.toolTip()
+    selected = running_controller.dialog.selected_entry
+    assert selected is not None
+    running_controller._remove_requested(selected)
+    assert running_controller.dialog._message.text() == (
+        "Cannot remove a model while a job is running."
+    )
     controller.close()
     running_controller.close()
 
@@ -529,7 +600,7 @@ def test_model_manager_reports_and_deletes_outdated_copy_alongside_current_weigh
         QMessageBox,
         "question",
         lambda _parent, title, message, *_args: (
-            confirmation.append((title, message)) or QMessageBox.StandardButton.Yes
+            confirmation.append((title, message)) or int(QMessageBox.StandardButton.Yes)
         ),
     )
     controller.dialog.delete_outdated_button.click()
@@ -570,7 +641,7 @@ def test_model_manager_deletes_outdated_directory_without_touching_other_cache(
     monkeypatch.setattr(
         QMessageBox,
         "question",
-        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+        lambda *_args, **_kwargs: int(QMessageBox.StandardButton.Yes),
     )
 
     controller.dialog.delete_outdated_button.click()
@@ -644,7 +715,7 @@ def test_model_manager_confirms_the_download_size_before_re_downloading_outdated
         QMessageBox,
         "question",
         lambda _parent, title, body, *_args: (
-            confirmation.append((title, body)) or QMessageBox.StandardButton.No
+            confirmation.append((title, body)) or int(QMessageBox.StandardButton.No)
         ),
     )
 
@@ -691,7 +762,7 @@ def test_model_manager_re_downloads_each_outdated_weight_then_deletes_its_old_co
     monkeypatch.setattr(
         QMessageBox,
         "question",
-        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+        lambda *_args, **_kwargs: int(QMessageBox.StandardButton.Yes),
     )
 
     controller.dialog.redownload_outdated_button.click()
@@ -757,7 +828,7 @@ def test_model_manager_shows_the_batch_position_while_downloading(
     monkeypatch.setattr(
         QMessageBox,
         "question",
-        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+        lambda *_args, **_kwargs: int(QMessageBox.StandardButton.Yes),
     )
 
     controller.dialog.redownload_outdated_button.click()
@@ -792,7 +863,7 @@ def test_model_manager_cancel_stops_the_batch_and_keeps_the_rest_outdated(
     monkeypatch.setattr(
         QMessageBox,
         "question",
-        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+        lambda *_args, **_kwargs: int(QMessageBox.StandardButton.Yes),
     )
 
     controller.dialog.redownload_outdated_button.click()
@@ -840,7 +911,7 @@ def test_model_manager_escape_cancels_a_running_download_instead_of_hiding_the_d
     monkeypatch.setattr(
         QMessageBox,
         "question",
-        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+        lambda *_args, **_kwargs: int(QMessageBox.StandardButton.Yes),
     )
     controller.dialog.redownload_outdated_button.click()
     qtbot.waitUntil(lambda: manager.in_flight, timeout=5000)
@@ -877,7 +948,7 @@ def test_model_manager_ignores_dismissal_while_a_removal_runs(
     monkeypatch.setattr(
         QMessageBox,
         "question",
-        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+        lambda *_args, **_kwargs: int(QMessageBox.StandardButton.Yes),
     )
     controller.dialog.delete_outdated_button.click()
     qtbot.waitUntil(lambda: manager.obsolete_calls == 1, timeout=5000)
@@ -923,7 +994,7 @@ def test_model_manager_stops_the_batch_at_the_first_failed_download(
     monkeypatch.setattr(
         QMessageBox,
         "question",
-        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+        lambda *_args, **_kwargs: int(QMessageBox.StandardButton.Yes),
     )
 
     controller.dialog.redownload_outdated_button.click()
@@ -974,7 +1045,7 @@ def test_model_manager_close_cancels_the_running_download_before_waiting(
     monkeypatch.setattr(
         QMessageBox,
         "question",
-        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+        lambda *_args, **_kwargs: int(QMessageBox.StandardButton.Yes),
     )
     controller.dialog.redownload_outdated_button.click()
     qtbot.waitUntil(lambda: manager.in_flight, timeout=5000)
@@ -1089,7 +1160,7 @@ def test_model_manager_refuses_re_download_while_a_job_runs(
     monkeypatch.setattr(
         QMessageBox,
         "question",
-        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+        lambda *_args, **_kwargs: int(QMessageBox.StandardButton.Yes),
     )
 
     controller.dialog.redownload_outdated_button.click()
@@ -1128,7 +1199,7 @@ def test_model_manager_refreshes_rows_after_outdated_removal_fails(
     monkeypatch.setattr(
         QMessageBox,
         "question",
-        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+        lambda *_args, **_kwargs: int(QMessageBox.StandardButton.Yes),
     )
 
     controller.dialog.delete_outdated_button.click()

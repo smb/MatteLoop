@@ -413,20 +413,17 @@ def test_task9_rejects_custom_options_and_unimplemented_prompts(
     assert exc.value.code is ErrorCode.MODEL_PREPARATION_INVALID
 
 
-def test_remove_rejects_active_model_then_removes_exact_inactive_artifact(
-    tmp_path: Path,
-) -> None:
+def test_remove_active_and_inactive_model_weights(tmp_path: Path) -> None:
     manager, _downloader, _clients, _events = _manager(tmp_path)
-    result = manager.prepare("u2net", {})
-    assert result.artifact_path is not None
+    inactive = manager.prepare("u2net", {})
+    active = manager.prepare("u2netp", {})
+    assert inactive.artifact_path is not None
+    assert active.artifact_path is not None
 
-    with pytest.raises(AppError) as exc:
-        manager.remove("u2net")
-    assert exc.value.code is ErrorCode.MODEL_IN_USE
-
-    manager.prepare("u2netp", {})
     assert manager.remove("u2net") is True
-    assert not result.artifact_path.exists()
+    assert not inactive.artifact_path.exists()
+    assert manager.remove("u2netp") is True
+    assert not active.artifact_path.exists()
     assert manager.remove("u2net") is False
 
 
