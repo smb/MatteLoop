@@ -422,10 +422,9 @@ def test_model_manager_lists_an_outdated_weight_with_size_and_rembg_version(
     assert row.columns[2].text == "outdated weight"
     assert "rembg 2.0.72" in row.accessible_description
     assert dialog.outdated_notice_label.text() == (
-        "1 outdated weight(s) from rembg 2.0.72 use 10.0 B on disk and cannot "
+        "Outdated weights from rembg 2.0.72 occupy 10.0 B on disk and cannot "
         "be used by this version."
     )
-    assert dialog.redownload_outdated_button.isHidden() is False
     assert dialog.delete_outdated_button.isHidden() is False
 
 
@@ -438,6 +437,9 @@ def test_model_manager_reports_and_deletes_outdated_copy_alongside_current_weigh
     current.write_bytes(b"current-weight")
     outdated.parent.mkdir(parents=True)
     outdated.write_bytes(b"old-weight")
+    unlisted = tmp_path / "2.0.72" / "bria-rmbg" / "model.onnx"
+    unlisted.parent.mkdir(parents=True)
+    unlisted.write_bytes(b"unlisted-weight")
     manager = FakeModelRemovalService()
     manager.obsolete_roots = (tmp_path / "2.0.72",)
     controller = ModelManagerController(
@@ -458,20 +460,34 @@ def test_model_manager_reports_and_deletes_outdated_copy_alongside_current_weigh
     assert entry.cached is True
     assert entry.outdated_size_bytes == len(b"old-weight")
     assert entry in controller.dialog.outdated_entries
-    assert controller.dialog.redownload_outdated_button.isVisible()
     assert controller.dialog.delete_outdated_button.isVisible()
-    assert controller.dialog.total_size_label.text() == "Total on disk: 24.0 B"
-    assert "outdated copy from rembg 2.0.72" in controller.dialog.model_list.item(
-        index
-    ).toolTip()
+    assert controller.dialog.total_size_label.text() == "Total on disk: 39.0 B"
+    assert (
+        "outdated copy from rembg 2.0.72"
+        in controller.dialog.model_list.item(index).toolTip()
+    )
+    assert controller.dialog.outdated_notice_label.text() == (
+        "Outdated weights from rembg 2.0.72 occupy 25.0 B on disk and cannot "
+        "be used by this version."
+    )
 
+    confirmation: list[tuple[str, str]] = []
     monkeypatch.setattr(
         QMessageBox,
         "question",
-        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+        lambda _parent, title, message, *_args: (
+            confirmation.append((title, message)) or QMessageBox.StandardButton.Yes
+        ),
     )
     controller.dialog.delete_outdated_button.click()
 
+    assert confirmation == [
+        (
+            "Delete all weights from rembg 2.0.72?",
+            "This removes the whole 2.0.72 directory: 25.0 B on disk. "
+            "Weights this version needs are downloaded again on demand.",
+        )
+    ]
     qtbot.waitUntil(lambda: manager.obsolete_calls == 1, timeout=5000)
     qtbot.waitUntil(lambda: controller._remove_thread is None, timeout=5000)
     assert not manager.obsolete_roots[0].exists()
@@ -513,19 +529,14 @@ def test_model_manager_deletes_outdated_directory_without_touching_other_cache(
     controller.close()
 
 
-def test_model_manager_redownloads_outdated_models_in_catalog_order(
-    tmp_path: Path, qtbot
+def test_model_manager_refreshes_rows_after_outdated_removal_fails(
+    tmp_path: Path, monkeypatch, qtbot
 ) -> None:
-    outdated_roots = (tmp_path / "2.0.72",)
-    outdated_ids = ("u2net", "u2netp")
-    for model_id in outdated_ids:
-        target = _outdated_model_path(tmp_path, model_id)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(b"old-weight")
-    manager = FakeModelRemovalService(
-        targets={model_id: _model_path(tmp_path, model_id) for model_id in outdated_ids}
-    )
-    manager.obsolete_roots = outdated_roots
+    outdated = _outdated_model_path(tmp_path, "u2netp")
+    outdated.parent.mkdir(parents=True)
+    outdated.write_bytes(b"old-weight")
+    manager = FakeModelRemovalService()
+    manager.obsolete_roots = (tmp_path / "2.0.72",)
     controller = ModelManagerController(
         ReducerStore(AppState()),
         catalog=ModelCatalog.load_resource(),
@@ -535,20 +546,35 @@ def test_model_manager_redownloads_outdated_models_in_catalog_order(
     qtbot.addWidget(controller.dialog)
     controller.open()
 
-    controller.dialog.redownload_outdated_button.click()
+    def fail_after_external_removal() -> int:
+        outdated.unlink()
+        raise PermissionError("cache is read-only")
 
-    qtbot.waitUntil(lambda: manager.fetched == list(outdated_ids), timeout=5000)
+    monkeypatch.setattr(
+        manager, "remove_obsolete_versions", fail_after_external_removal
+    )
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+    )
+
+    controller.dialog.delete_outdated_button.click()
+
     qtbot.waitUntil(lambda: controller._remove_thread is None, timeout=5000)
-    assert manager.operations == [
-        "remove-obsolete",
-        "fetch:u2net",
-        "fetch:u2netp",
-    ]
-    assert not outdated_roots[0].exists()
+    entry = next(
+        entry for entry in controller.dialog.entries if entry.model_id == "u2netp"
+    )
+    assert entry.outdated_size_bytes is None
+    assert controller.dialog.delete_outdated_button.isHidden()
+    assert controller.dialog.outdated_notice_label.isHidden()
+    assert controller.dialog._message.text() == (
+        "Could not remove outdated weights: PermissionError: cache is read-only"
+    )
     controller.close()
 
 
-def test_model_manager_refuses_both_outdated_actions_while_a_job_runs(
+def test_model_manager_refuses_outdated_removal_while_a_job_runs(
     tmp_path: Path, qtbot
 ) -> None:
     target = _outdated_model_path(tmp_path, "u2netp")
@@ -583,10 +609,5 @@ def test_model_manager_refuses_both_outdated_actions_while_a_job_runs(
     assert controller.dialog._message.text() == (
         "Cannot remove a model while a job is running."
     )
-    controller.dialog.redownload_outdated_button.click()
-    assert controller.dialog._message.text() == (
-        "Cannot download a model while a job is running."
-    )
     assert manager.obsolete_calls == 0
-    assert manager.fetched == []
     controller.close()
