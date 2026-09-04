@@ -37,7 +37,10 @@ from matteloop.core.specs import (
 )
 from matteloop.core.state import ArtifactResult
 from matteloop.ui.compact_widgets import compact_field
-from matteloop.ui.parameter_presentation import ParameterPresentation
+from matteloop.ui.parameter_presentation import (
+    ParameterPresentation,
+    fraction_from_widget_value,
+)
 from matteloop.ui.source_presentation import (
     format_source_dimensions,
     format_source_file_size,
@@ -477,7 +480,7 @@ class TransformGroup(QWidget):
         if self._syncing or self._facts is None or value <= 0:
             return
         cropped_width, cropped_height = self._cropped_size()
-        fraction = Fraction(value) / 100
+        fraction = fraction_from_widget_value(value) / 100
         width = _rhu(Fraction(cropped_width) * fraction)
         height = _rhu(Fraction(cropped_height) * fraction)
         with QSignalBlocker(self.width_spinbox), QSignalBlocker(self.height_spinbox):

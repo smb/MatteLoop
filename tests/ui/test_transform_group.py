@@ -153,6 +153,45 @@ def test_percentage_fills_both_dimensions_and_clears_on_manual_edit(qtbot) -> No
     assert group.percent_spinbox.value() == 0
 
 
+def test_percent_rounds_from_the_displayed_decimal_not_the_binary_float(
+    qtbot,
+) -> None:
+    """12.85% of 1000 px is a half-pixel case: Fraction(12.85) preserves the
+    binary float's approximation (128.49999...) and rounds down to 128,
+    while Fraction("12.85") preserves the decimal the spin box actually
+    shows and rounds half-up to 129, matching what the user typed."""
+    group, emitted = _group(qtbot)
+    group.apply(_presentation(), editable=True)
+    group.set_cut(_facts(framed_size=(1000, 1000)))
+    emitted.clear()
+
+    group.percent_spinbox.setValue(12.85)
+
+    assert group.width_spinbox.value() == 129
+    assert group.height_spinbox.value() == 129
+    last = emitted[-1]
+    assert isinstance(last, TransformChanged)
+    assert last.transform.resize == ResizeSpec(129, 129, MismatchMode.KEEP)
+
+
+def test_percent_rounding_unaffected_by_the_decimal_fix_stays_the_same(
+    qtbot,
+) -> None:
+    """2.35% of 10000 px is not a half-pixel case (235 exactly, whether the
+    fraction comes from the binary float or the decimal text), so the fix
+    must not perturb it. (10000 px, rather than the defect report's 1000 px,
+    keeps the result above the width spinbox's 128 px "Auto" floor.)"""
+    group, emitted = _group(qtbot)
+    group.apply(_presentation(), editable=True)
+    group.set_cut(_facts(framed_size=(10000, 10000)))
+    emitted.clear()
+
+    group.percent_spinbox.setValue(2.35)
+
+    assert group.width_spinbox.value() == 235
+    assert group.height_spinbox.value() == 235
+
+
 def test_choosing_an_aspect_preset_emits_a_centred_crop_and_locks_it(qtbot) -> None:
     group, emitted = _group(qtbot)
     locks: list[object] = []
