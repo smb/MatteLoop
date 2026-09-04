@@ -222,6 +222,11 @@ class SegmentationClient:
                         self._startup_timeout, expected_job_id=None
                     )
                     if (
+                        isinstance(message, SegmentFailure)
+                        and message.job_id == CONTROL_JOB_ID
+                    ):
+                        raise AppError.from_primitives(message.error)
+                    if (
                         not isinstance(message, WorkerReady)
                         or message.process_id != process.pid
                     ):
@@ -893,12 +898,32 @@ def segmentation_process_main(connection: Connection, model_spec: object) -> Non
     """Frozen child entry: create one session, then enter the exact tested loop."""
     session: object | None = None
     try:
-        normalized = _normalize_launch_payload(model_spec)
-        session = _create_rembg_session(normalized)
-        effective_provider = getattr(
-            session, "execution_provider", _launch_provider(normalized)
-        )
-        startup_notice = getattr(session, "startup_notice", None)
+        try:
+            normalized = _normalize_launch_payload(model_spec)
+            session = _create_rembg_session(normalized)
+            effective_provider = getattr(
+                session, "execution_provider", _launch_provider(normalized)
+            )
+            startup_notice = getattr(session, "startup_notice", None)
+        except BaseException as error:
+            if isinstance(error, AppError):
+                app_error = error
+            else:
+                try:
+                    detail = f"{type(error).__name__}: {error}"
+                except BaseException:
+                    detail = type(error).__name__
+                app_error = _model_preparation_error(detail)
+            _send_child(
+                connection,
+                SegmentFailure(
+                    PROTOCOL_VERSION,
+                    CONTROL_JOB_ID,
+                    CONTROL_JOB_ID,
+                    app_error.to_primitives(),
+                ),
+            )
+            return
         process_id = multiprocessing.current_process().pid
         if process_id is None:
             return
