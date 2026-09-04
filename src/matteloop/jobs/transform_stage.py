@@ -59,6 +59,7 @@ def stage_encoder_frames(
     framed_directory: Path,
     tracker: RgbaOwnershipTracker,
     context: JobContext,
+    overall: tuple[int, int],
 ) -> tuple[tuple[Path, ...], tuple[int, ...]]:
     """Frame, crop, and resize the kept cut frames and persist them.
 
@@ -90,9 +91,7 @@ def stage_encoder_frames(
     kept_count = len(kept)
     framed_paths: list[Path] = []
     for position, index in enumerate(kept):
-        context.set_frame_context(
-            position + 1, kept_count, overall=context.overall_progress
-        )
+        context.set_frame_context(position + 1, kept_count, overall=overall)
         context.checkpoint("framing")
         framed_paths.append(
             _stage_frame(
@@ -104,6 +103,8 @@ def stage_encoder_frames(
             position + 1,
             total=kept_count,
             detail=f"Frame {position + 1} of {kept_count}",
+            overall_completed=overall[0] + position + 1,
+            overall_total=overall[1],
         )
     return tuple(framed_paths), transform.select_kept(delays)
 

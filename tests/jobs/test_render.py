@@ -24,6 +24,7 @@ from matteloop.core.specs import (
     FramingSpec,
     OutputSpec,
     SamplingSpec,
+    TransformSpec,
 )
 from matteloop.core.state import JobKind
 from matteloop.core.webp import EncodeSummary, encode_lossless_webp, validate_webp
@@ -1278,15 +1279,50 @@ def test_render_reports_counted_stages_and_global_frame_units(tmp_path) -> None:
         (1, 1),
         (2, 2),
     ]
-    assert all(event.total == 2 and event.overall_total == 4 for event in cuts)
+    assert all(event.total == 2 and event.overall_total == 6 for event in cuts)
     assert (encode[0].completed, encode[0].total) == (0, 2)
-    assert (encode[0].overall_completed, encode[0].overall_total) == (2, 4)
-    assert (encode[-1].completed, encode[-1].overall_completed) == (2, 4)
+    assert (encode[0].overall_completed, encode[0].overall_total) == (4, 6)
+    assert (encode[-1].completed, encode[-1].overall_completed) == (2, 6)
+    counted = [event for event in events if event.overall_completed is not None]
+    overall_values = [event.overall_completed for event in counted]
+    assert overall_values == sorted(overall_values)
+    framing = [event for event in events if event.stage == "Framing"]
+    assert [event.overall_completed for event in framing] == [3, 4]
+    assert counted[-1].overall_completed == counted[-1].overall_total == 6
     assert {event.stage for event in events} >= {
         "Cut promotion",
         "Framing",
         "Validation",
     }
+
+
+def test_render_uses_kept_frames_for_the_post_process_and_encode_budget(
+    tmp_path,
+) -> None:
+    events: list[ProgressEvent] = []
+    render_request = replace(
+        request(tmp_path), transform=TransformSpec(first_frame=1, last_frame=1)
+    )
+
+    render_service().render(
+        render_request,
+        JobContext(
+            "trimmed-progress",
+            JobKind.RENDER,
+            tmp_path / "job-work",
+            events.append,
+            CancellationState(),
+        ),
+    )
+
+    framing = [event for event in events if event.stage == "Framing"]
+    encode = [event for event in events if event.stage == "Encode"]
+    assert [(event.completed, event.overall_completed) for event in framing] == [(1, 3)]
+    assert [(event.completed, event.overall_completed) for event in encode] == [
+        (0, 3),
+        (1, 4),
+    ]
+    assert all(event.overall_total == 4 for event in framing + encode)
 
 
 def test_render_succeeds_when_a_static_passage_repeats_sampled_pixels(
@@ -1362,6 +1398,14 @@ def test_render_auto_fit_validates_emitted_static_run_count(
         for event in auto_fit_events
     )
     assert all(event.overall_indeterminate for event in auto_fit_events)
+    cuts = [event for event in events if event.stage == "render-cut"]
+    framing = [event for event in events if event.stage == "Framing"]
+    assert all(
+        event.overall_completed is not None
+        and event.overall_total == 6
+        and not event.overall_indeterminate
+        for event in cuts + framing
+    )
 
 
 @pytest.mark.parametrize(

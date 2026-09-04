@@ -14,6 +14,7 @@ from matteloop.core.geometry import FramingPlan, PixelBounds
 from matteloop.core.rgba import RgbaOwnershipTracker
 from matteloop.core.specs import CropSpec, FramingSpec, TransformSpec
 from matteloop.core.state import JobKind
+from matteloop.jobs.context import CancellationState, JobContext
 from matteloop.jobs.transform_stage import framing_plan, stage_encoder_frames
 from tests.jobs.render_support import job
 
@@ -62,7 +63,14 @@ def test_stage_encoder_frames_writes_the_framed_pixels_and_keeps_the_delays(
     plan = FramingPlan((128, 128), global_bounds=None, padding=0, stretch_x=Fraction(1))
     delays = (100, 100, 100)
     tracker = RgbaOwnershipTracker((128, 128))
-    context = job(tmp_path, "job-1", JobKind.RENDER)
+    events = []
+    context = JobContext(
+        "job-1",
+        JobKind.RENDER,
+        tmp_path / "job-work",
+        events.append,
+        CancellationState(),
+    )
 
     paths, returned_delays = stage_encoder_frames(
         read_cut,
@@ -73,6 +81,7 @@ def test_stage_encoder_frames_writes_the_framed_pixels_and_keeps_the_delays(
         tmp_path / "framed-inputs",
         tracker,
         context,
+        (0, 6),
     )
 
     assert paths == tuple(
@@ -85,6 +94,8 @@ def test_stage_encoder_frames_writes_the_framed_pixels_and_keeps_the_delays(
             assert saved.size == (128, 128)
             assert saved.tobytes() == frame.tobytes()
     assert returned_delays == delays
+    assert [event.overall_completed for event in events] == [1, 2, 3]
+    assert all(event.overall_total == 6 for event in events)
 
 
 def test_stage_encoder_frames_clamps_a_crop_stored_against_a_larger_frame(
@@ -119,6 +130,7 @@ def test_stage_encoder_frames_clamps_a_crop_stored_against_a_larger_frame(
         tmp_path / "framed-inputs",
         tracker,
         context,
+        (0, 2),
     )
 
     with Image.open(paths[0]) as saved:
