@@ -174,6 +174,71 @@ def test_choosing_an_aspect_preset_emits_a_centred_crop_and_locks_it(qtbot) -> N
     assert group.crop_height_spinbox.value() == expected.height
 
 
+def test_aspect_lock_survives_an_apply_round_trip_and_free_actually_unlocks(
+    qtbot,
+) -> None:
+    group, emitted = _group(qtbot)
+    locks: list[object] = []
+    group.aspect_lock_changed.connect(locks.append)
+    group.apply(_presentation(), editable=True)
+    group.set_cut(_facts(framed_size=(1920, 1080)))
+    emitted.clear()
+
+    group.aspect_combo.setCurrentIndex(
+        _index_with_data(group.aspect_combo, Fraction(16, 9))
+    )
+    last = emitted[-1]
+    assert isinstance(last, TransformChanged)
+
+    # A dispatched TransformChanged always comes back through apply() once the
+    # reducer accepts it; the aspect choice must not be reset by that round trip.
+    group.apply(_presentation(transform=last.transform), editable=True)
+
+    assert group.aspect_combo.currentData() == Fraction(16, 9)
+
+    locks.clear()
+    group.aspect_combo.setCurrentIndex(_index_with_data(group.aspect_combo, None))
+
+    assert locks == [None]
+
+
+def test_raising_first_frame_above_last_adjusts_last_instead_of_raising(
+    qtbot,
+) -> None:
+    group, emitted = _group(qtbot)
+    group.apply(
+        _presentation(transform=TransformSpec(first_frame=0, last_frame=3)),
+        editable=True,
+    )
+    group.set_cut(_facts(frame_count=10))
+    emitted.clear()
+
+    group.first_frame_spinbox.setValue(4)
+
+    last = emitted[-1]
+    assert isinstance(last, TransformChanged)
+    assert last.transform.first_frame == 4
+    assert last.transform.last_frame is None or last.transform.last_frame >= 4
+
+
+def test_lowering_last_frame_below_first_adjusts_first_instead_of_raising(
+    qtbot,
+) -> None:
+    group, emitted = _group(qtbot)
+    group.apply(
+        _presentation(transform=TransformSpec(first_frame=5)), editable=True
+    )
+    group.set_cut(_facts(frame_count=10))
+    emitted.clear()
+
+    group.last_frame_spinbox.setValue(2)
+
+    last = emitted[-1]
+    assert isinstance(last, TransformChanged)
+    assert last.transform.last_frame == 2
+    assert last.transform.first_frame <= 2
+
+
 def test_apply_with_editable_false_disables_every_control(qtbot) -> None:
     group, _emitted = _group(qtbot)
     group.set_cut(_facts())

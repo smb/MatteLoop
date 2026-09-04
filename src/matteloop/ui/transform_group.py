@@ -318,9 +318,10 @@ class TransformGroup(QWidget):
     # -- reducer-owned state -> widgets --------------------------------------
 
     def _apply_transform_to_widgets(self) -> None:
+        # The aspect lock is a UI-only choice, not derived from TransformSpec,
+        # so a reducer round trip must never touch aspect_combo's selection.
         self._sync_trim_widgets()
         self._sync_crop_widgets()
-        self.aspect_combo.setCurrentIndex(0)
         self._sync_resize_widgets()
 
     def _sync_trim_widgets(self) -> None:
@@ -386,13 +387,34 @@ class TransformGroup(QWidget):
     def _first_frame_changed(self, value: int) -> None:
         if self._syncing:
             return
-        self._update_transform(replace(self._transform, first_frame=value))
+        last_frame = self._transform.last_frame
+        if last_frame is not None and value > last_frame:
+            last_frame = value
+            self._set_spinbox_silently(self.last_frame_spinbox, value)
+        self._update_transform(
+            replace(self._transform, first_frame=value, last_frame=last_frame)
+        )
 
     def _last_frame_changed(self, _value: int) -> None:
         if self._syncing:
             return
         last_frame = self._last_frame_value()
-        self._update_transform(replace(self._transform, last_frame=last_frame))
+        first_frame = self._transform.first_frame
+        if last_frame is not None and last_frame < first_frame:
+            first_frame = last_frame
+            self._set_spinbox_silently(self.first_frame_spinbox, first_frame)
+        self._update_transform(
+            replace(self._transform, first_frame=first_frame, last_frame=last_frame)
+        )
+
+    def _set_spinbox_silently(self, spinbox: QSpinBox, value: int) -> None:
+        """Move *spinbox* to keep first/last coupled without re-entering a slot."""
+        was_syncing = self._syncing
+        self._syncing = True
+        try:
+            spinbox.setValue(value)
+        finally:
+            self._syncing = was_syncing
 
     def _last_frame_value(self) -> int | None:
         value = self.last_frame_spinbox.value()
