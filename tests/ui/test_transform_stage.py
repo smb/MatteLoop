@@ -21,11 +21,12 @@ from matteloop.core.timebase import webp_delays
 from matteloop.jobs.render import FilesystemWorkspacePort
 from matteloop.jobs.transform_stage import framing_plan
 from matteloop.jobs.transform_store import store_transform
-from matteloop.jobs.workspace import CutWorkspace
+from matteloop.jobs.workspace import CutFrame, CutWorkspace
 from matteloop.ui.crop_canvas import CropCanvas
+from matteloop.ui.result_player import PlayerFrames, ResultPlayerCanvas
 from matteloop.ui.store import ReducerStore
 from matteloop.ui.transform_group import CutFacts, TransformGroup
-from matteloop.ui.transform_stage import TransformStageController
+from matteloop.ui.transform_stage import TransformStageController, _DirectFrameReader
 from tests.jobs.render_support import job, render_service, request
 
 
@@ -172,7 +173,10 @@ def test_facts_ready_clamps_a_crop_left_over_from_a_larger_framed_size(
         fps=15,
         delays_ms=(67, 67, 67, 67),
     )
-    controller._facts_ready(smaller_facts, controller._current_generation)  # noqa: SLF001
+    plan = framing_plan((128, 128), None, FramingSpec())
+    controller._facts_ready(  # noqa: SLF001
+        smaller_facts, plan, controller._current_generation
+    )
 
     clamped = store.state.parameters.transform.crop
     assert clamped is not None
@@ -239,4 +243,85 @@ def test_open_artifact_ignored_leaves_an_existing_session_untouched(
     controller.open_artifact(object())
 
     assert isinstance(controller.session.workspace, CutWorkspace)
+    controller.shutdown()
+
+
+# -- E24: a stale frame-load generation is discarded ------------------------
+
+
+def test_frame_load_succeeded_ignores_a_stale_generation(qtbot) -> None:
+    store = _FakeStore(AppState())
+    controller = TransformStageController(store)
+    canvas = ResultPlayerCanvas()
+    qtbot.addWidget(canvas)
+    group = TransformGroup(lambda _event: None)
+    qtbot.addWidget(group)
+    controller.attach(group, canvas)
+    controller._frame_generation = 5  # noqa: SLF001
+
+    stale = PlayerFrames(
+        key="stale",
+        framed=(),
+        transformed=(),
+        delays_ms=(),
+        cached=0,
+        frame_count=0,
+    )
+    controller._frame_load_succeeded(stale, 3)  # noqa: SLF001
+
+    assert canvas._frames is None  # noqa: SLF001
+    controller.shutdown()
+
+
+# -- E33: crop-edit drags are debounced and skipped while editing -----------
+
+
+class _CountingReader:
+    """Wrap ``_DirectFrameReader`` to count how many stored frames were read."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self._inner = _DirectFrameReader()
+
+    def read(self, workspace: CutWorkspace, frame: CutFrame):
+        self.calls += 1
+        return self._inner.read(workspace, frame)
+
+
+def test_crop_edits_are_debounced_and_reuse_the_framed_cache(tmp_path, qtbot) -> None:
+    artifact = _seed_cut(tmp_path, "debounce")
+    reader = _CountingReader()
+    store = ReducerStore(_ready_state(tmp_path / "source.mp4"))
+    controller = TransformStageController(store, frame_reader=reader)
+    canvas = ResultPlayerCanvas()
+    qtbot.addWidget(canvas)
+    group = TransformGroup(lambda _event: None)
+    qtbot.addWidget(group)
+    controller.attach(group, canvas)
+
+    controller.open_artifact(artifact)
+    qtbot.waitUntil(lambda: canvas.current_frame is not None, timeout=5000)
+    frame_count = artifact.manifest.frame_count
+    initial_reads = reader.calls
+    assert initial_reads == frame_count
+    first_key = canvas._frames.key  # noqa: SLF001
+
+    controller._crop_edit_toggled(True)  # noqa: SLF001
+    for index in range(10):
+        crop = CropSpec(0, 0, 100, 100 - index)
+        store.dispatch(TransformChanged(TransformSpec(crop=crop)))
+    qtbot.wait(60)
+    assert reader.calls == initial_reads, "no rebuild while crop-edit is on"
+
+    controller._crop_edit_toggled(False)  # noqa: SLF001
+    qtbot.waitUntil(
+        lambda: reader.calls == initial_reads + frame_count, timeout=2000
+    )
+
+    reloaded_key = canvas._frames.key  # noqa: SLF001
+    assert (reloaded_key[0], reloaded_key[1], reloaded_key[4]) == (
+        first_key[0],
+        first_key[1],
+        first_key[4],
+    ), "the framed cache's identity (cache_key, framing, display size) is unchanged"
     controller.shutdown()
