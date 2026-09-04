@@ -105,6 +105,11 @@ substitute for this list: it cannot see steps 3, 4 or 7.
 Work that answers a GitHub issue goes onto its own branch and into a pull
 request that references the issue. Never push it to `main` directly.
 
+- **Check the assignee before you start, then assign yourself.** An assignee is
+  the only signal other people have that the work is taken; without one, two
+  contributors can spend an evening on the same defect. If the issue is already
+  assigned to somebody else, ask before you begin rather than working in
+  parallel with them. Unassign yourself if you stop.
 - Reference the issue in the pull request: `Closes #N` when the change fully
   resolves it, `Refs #N` otherwise.
 - **Never merge a branch and never close a pull request.** Whether the work
