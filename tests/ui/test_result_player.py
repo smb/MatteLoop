@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from fractions import Fraction
 from pathlib import Path
 
@@ -26,7 +27,7 @@ from matteloop.ui.result_player import (
 )
 from matteloop.ui.store import ReducerStore
 from matteloop.ui.transform_group import TransformGroup
-from matteloop.ui.transform_stage import TransformStageController
+from matteloop.ui.transform_stage import TransformStageController, _DirectFrameReader
 from tests.jobs.render_support import (
     FakeEncoder,
     FakeSegmenter,
@@ -260,6 +261,53 @@ def test_frame_load_worker_reports_unreadable_frames(tmp_path) -> None:
     worker.run()
 
     assert failures == ["Cut frames could not be read"]
+
+
+class _CancelAfterFirstReadReader:
+    """Read normally, but signal cancellation once the first frame is read --
+    simulating a supersede that lands while the worker is mid-load."""
+
+    def __init__(self, cancel_after: threading.Event) -> None:
+        self._cancel_after = cancel_after
+        self.calls = 0
+        self._inner = _DirectFrameReader()
+
+    def read(self, workspace: object, frame: object) -> QImage:
+        self.calls += 1
+        image = self._inner.read(workspace, frame)
+        self._cancel_after.set()
+        return image
+
+
+def test_frame_load_worker_stops_early_once_cancelled(tmp_path) -> None:
+    """A superseded load must stop reading further stored frames instead of
+    running to completion -- otherwise cancelling it cannot be fast, only
+    delayed until the whole in-flight load finishes.
+    """
+    artifact = _seed_cut(tmp_path, "worker-cancel")
+    manifest = artifact.manifest
+    assert manifest.frame_count >= 2, "need a second frame that must never load"
+    plan = framing_plan((manifest.width, manifest.height), None, FramingSpec())
+    cancelled = threading.Event()
+    reader = _CancelAfterFirstReadReader(cancelled)
+    worker = FrameLoadWorker(
+        artifact.cut_workspace,
+        manifest,
+        reader,
+        plan,
+        TransformSpec(),
+        (100,) * manifest.frame_count,
+        1,
+        cancelled=cancelled.is_set,
+    )
+    outcomes: list[str] = []
+    worker.succeeded.connect(lambda *_a: outcomes.append("succeeded"))
+    worker.failed.connect(lambda *_a: outcomes.append("failed"))
+
+    worker.run()
+
+    assert reader.calls == 1, "the worker must stop before reading the next frame"
+    assert outcomes == [], "a cancelled load must not report success or failure"
 
 
 # -- AC 9: zero segmentation, zero encoder calls during playback ------------

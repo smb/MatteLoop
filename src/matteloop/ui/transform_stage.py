@@ -17,6 +17,7 @@ two drift.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, replace
 from decimal import Decimal
@@ -150,6 +151,7 @@ class TransformStageController(QObject):
         self._frame_generation = 0
         self._frame_thread: QThread | None = None
         self._frame_worker: FrameLoadWorker | None = None
+        self._frame_cancel_event: threading.Event | None = None
         self._cache_budget = cache_budget
         self._debounce_timer = QTimer(self)
         self._debounce_timer.setSingleShot(True)
@@ -220,9 +222,12 @@ class TransformStageController(QObject):
         if self._unsubscribe is not None:
             unsubscribe, self._unsubscribe = self._unsubscribe, None
             unsubscribe()
+        # Join the frame loader before close_session(): it also cancels the
+        # frame load (via _sync_player_frames), but without waiting, which
+        # would otherwise clear _frame_thread and leave nothing here to join.
+        self._cancel_frame_load(wait=True)
         self.close_session()
         self._join_worker()
-        self._cancel_frame_load()
 
     @property
     def session(self) -> CutSession | None:
@@ -305,8 +310,24 @@ class TransformStageController(QObject):
             kept = transform.kept_range(facts.frame_count)
             self._player_canvas.set_kept_range(kept)
             crop_editing = self._crop_edit_enabled
-            if transform_changed and not framing_changed and not crop_editing:
-                self._sync_player_frames(immediate=False)
+            if transform_changed and not framing_changed:
+                if crop_editing:
+                    self._refresh_crop_edit_presentation(transform)
+                else:
+                    self._sync_player_frames(immediate=False)
+
+    def _refresh_crop_edit_presentation(self, transform: TransformSpec) -> None:
+        """Re-apply the crop-edit presentation for *transform* without the
+        frame reload ``_sync_player_frames`` would trigger (E33): the canvas
+        overlay and its focus/drag geometry only ever refresh inside
+        ``apply_presentation``, so a stale presentation between commands is
+        what stalls a drag mid-gesture and repeats a nudge's first pixel.
+        """
+        canvas = self._player_canvas
+        if canvas is None:
+            return
+        presentation = self._crop_edit_presentation(transform)
+        canvas.set_crop_edit(True, presentation, transform)
 
     def _schedule_facts(self) -> None:
         session = self._session
@@ -399,6 +420,8 @@ class TransformStageController(QObject):
         self._cancel_frame_load()
         generation = next(self._frame_generations)
         self._frame_generation = generation
+        cancel_event = threading.Event()
+        self._frame_cancel_event = cancel_event
         transform = self._store.state.parameters.transform
         worker = FrameLoadWorker(
             session.workspace,
@@ -409,6 +432,7 @@ class TransformStageController(QObject):
             facts.delays_ms,
             generation,
             budget=self._cache_budget,
+            cancelled=cancel_event.is_set,
         )
         thread = QThread(self)
         worker.moveToThread(thread)
@@ -437,8 +461,23 @@ class TransformStageController(QObject):
         if self._player_canvas is not None:
             self._player_canvas.set_status_marker(message)
 
-    def _cancel_frame_load(self) -> None:
+    def _cancel_frame_load(self, *, wait: bool = False) -> None:
+        """Stop the in-flight frame load, if any, without blocking on it.
+
+        The worker checks ``_frame_cancel_event`` between frames (E23), so
+        setting it here lets a superseded load stop itself; ``thread.quit()``
+        alone cannot interrupt its running slot. Bumping the generation
+        (E24) means a load that finishes anyway -- it slipped past the
+        cancellation check, or was already queued on the Qt event loop --
+        cannot resurrect frames for a session this call is closing.
+        Only ``shutdown()`` passes ``wait=True``: the object is going away
+        and must not leave a thread running past it.
+        """
         self._debounce_timer.stop()
+        self._frame_generation = next(self._frame_generations)
+        if self._frame_cancel_event is not None:
+            self._frame_cancel_event.set()
+            self._frame_cancel_event = None
         thread = self._frame_thread
         self._frame_thread = None
         self._frame_worker = None
@@ -446,7 +485,8 @@ class TransformStageController(QObject):
             return
         try:
             thread.quit()
-            thread.wait(5000)
+            if wait:
+                thread.wait(5000)
         except RuntimeError:
             pass
 

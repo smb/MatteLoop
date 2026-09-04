@@ -19,6 +19,7 @@ this canvas as display-scaled ``QImage``s. Memory is bounded by
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from fractions import Fraction
 from pathlib import Path
@@ -40,6 +41,14 @@ from matteloop.ui.crop_presentation import CropPresentation
 
 PLAYER_CACHE_BUDGET_BYTES = 128 * 1024 * 1024
 PLAYER_MIN_DISPLAY_SIDE = 64
+
+
+class _FrameLoadCancelled(Exception):
+    """Raised internally to unwind ``_load_player_frames`` once superseded."""
+
+
+def _no_cancellation() -> bool:
+    return False
 
 
 class FrameReader(Protocol):
@@ -287,6 +296,7 @@ class FrameLoadWorker(QObject):
         generation: int,
         *,
         budget: int = PLAYER_CACHE_BUDGET_BYTES,
+        cancelled: Callable[[], bool] = _no_cancellation,
     ) -> None:
         super().__init__()
         self._workspace = workspace
@@ -297,6 +307,7 @@ class FrameLoadWorker(QObject):
         self._delays = delays
         self._generation = generation
         self._budget = budget
+        self._cancelled = cancelled
 
     @Slot()
     def run(self) -> None:
@@ -309,7 +320,10 @@ class FrameLoadWorker(QObject):
                 self._transform,
                 self._delays,
                 self._budget,
+                self._cancelled,
             )
+        except _FrameLoadCancelled:
+            pass
         except (OSError, UnidentifiedImageError):
             self.failed.emit("Cut frames could not be read", self._generation)
         else:
@@ -326,6 +340,7 @@ def _load_player_frames(
     transform: TransformSpec,
     delays: tuple[int, ...],
     budget: int,
+    cancelled: Callable[[], bool] = _no_cancellation,
 ) -> PlayerFrames:
     frame_count = manifest.frame_count
     display_size, cached = _fit_budget(frame_count, plan.output_size, budget)
@@ -339,6 +354,8 @@ def _load_player_frames(
     framed_images: list[QImage] = []
     transformed_images: list[QImage] = []
     for index in range(cached):
+        if cancelled():
+            raise _FrameLoadCancelled
         framed_qimage, transformed_qimage = _load_one_frame(
             workspace,
             manifest.frames[index],

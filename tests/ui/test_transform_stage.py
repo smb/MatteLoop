@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
+
+from PySide6.QtCore import Qt
 
 from matteloop.core.crop_state import CropChanged
 from matteloop.core.parameters import PaddingChanged, TransformChanged
@@ -307,6 +311,89 @@ def test_frame_load_succeeded_ignores_a_stale_generation(qtbot) -> None:
     controller.shutdown()
 
 
+def test_cancelling_a_frame_load_bumps_the_generation_so_a_queued_result_is_stale(
+    tmp_path, qtbot
+) -> None:
+    """``_cancel_frame_load`` used to leave ``_frame_generation`` untouched, so
+    a ``succeeded`` from the worker it just cancelled -- already queued on the
+    Qt event loop, or slipping past the cancellation check by a hair -- still
+    matched and reopened a session that ``close_session`` had just closed.
+    """
+    artifact = _seed_cut(tmp_path, "cancel-bumps-generation")
+    store = _FakeStore(AppState())
+    controller = TransformStageController(store)
+    canvas = ResultPlayerCanvas()
+    qtbot.addWidget(canvas)
+    group = TransformGroup(lambda _event: None)
+    qtbot.addWidget(group)
+    controller.attach(group, canvas)
+    controller.open_artifact(artifact)
+    qtbot.waitUntil(lambda: canvas.current_frame is not None, timeout=5000)
+    in_flight_generation = controller._frame_generation  # noqa: SLF001
+
+    controller.close_session()
+
+    stale = PlayerFrames(
+        key="stale", framed=(), transformed=(), delays_ms=(), cached=0, frame_count=0
+    )
+    controller._frame_load_succeeded(  # noqa: SLF001
+        stale, in_flight_generation
+    )
+
+    assert canvas._frames is None, (  # noqa: SLF001
+        "a load in flight when the session closed must not resurrect frames"
+    )
+    controller.shutdown()
+
+
+class _BlockingReader:
+    """Read every frame, but block until released -- so a load superseded
+    mid-flight would hang the caller if the supersede itself waited on it.
+    """
+
+    def __init__(self) -> None:
+        self.first_read_started = threading.Event()
+        self.release = threading.Event()
+        self._inner = _DirectFrameReader()
+
+    def read(self, workspace: CutWorkspace, frame: CutFrame):
+        self.first_read_started.set()
+        self.release.wait(5)
+        return self._inner.read(workspace, frame)
+
+
+def test_superseding_a_frame_load_does_not_block_the_gui_thread(
+    tmp_path, qtbot
+) -> None:
+    """``_cancel_frame_load`` did ``thread.quit(); thread.wait(5000)`` on
+    every supersede, but the worker checked no cancellation token, so
+    ``quit()`` could not interrupt its running slot -- the caller (the GUI
+    thread, on every ordinary crop edit) blocked for the rest of the
+    in-flight load.
+    """
+    artifact = _seed_cut(tmp_path, "supersede-non-blocking")
+    reader = _BlockingReader()
+    store = ReducerStore(_ready_state(tmp_path / "source.mp4"))
+    controller = TransformStageController(store, frame_reader=reader)
+    canvas = ResultPlayerCanvas()
+    qtbot.addWidget(canvas)
+    group = TransformGroup(lambda _event: None)
+    qtbot.addWidget(group)
+    controller.attach(group, canvas)
+
+    controller.open_artifact(artifact)
+    qtbot.waitUntil(lambda: controller.facts is not None, timeout=5000)
+    qtbot.waitUntil(reader.first_read_started.is_set, timeout=5000)
+
+    started = time.monotonic()
+    controller._start_frame_load()  # noqa: SLF001 -- supersedes the blocked load
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.0, "superseding a load must not wait on the in-flight worker"
+    reader.release.set()
+    controller.shutdown()
+
+
 # -- E33: crop-edit drags are debounced and skipped while editing -----------
 
 
@@ -358,6 +445,75 @@ def test_crop_edits_are_debounced_and_reuse_the_framed_cache(tmp_path, qtbot) ->
         first_key[1],
         first_key[4],
     ), "the framed cache's identity (cache_key, framing, display size) is unchanged"
+    controller.shutdown()
+
+
+# -- crop-edit presentation must stay live across the whole gesture --------
+
+
+def test_state_changed_refreshes_the_crop_edit_presentation(tmp_path, qtbot) -> None:
+    """`apply_presentation` in ``result_player.py`` is reached only via
+    ``set_crop_edit``, called only from ``_crop_edit_toggled`` -- so once
+    editing is on, ``canvas._presentation`` stayed at its toggle-time crop
+    forever. That is what made every nudge after the first a no-op (nudge_crop
+    kept starting from the same stale crop) and made a drag rectangle never
+    move on screen: the canvas painted `_geometry`, which is only rebuilt
+    inside `apply_presentation`.
+    """
+    artifact = _seed_cut(tmp_path, "presentation-refresh")
+    store = ReducerStore(_ready_state(tmp_path / "source.mp4"))
+    controller = TransformStageController(store)
+    canvas = ResultPlayerCanvas()
+    qtbot.addWidget(canvas)
+    group = TransformGroup(lambda _event: None)
+    qtbot.addWidget(group)
+    controller.attach(group, canvas)
+    controller.open_artifact(artifact)
+    qtbot.waitUntil(lambda: canvas.current_frame is not None, timeout=5000)
+    controller._crop_edit_toggled(True)  # noqa: SLF001
+    assert canvas._presentation is not None  # noqa: SLF001
+    assert canvas._presentation.crop == CropSpec(0, 0, 128, 128)  # noqa: SLF001
+
+    new_crop = CropSpec(10, 10, 50, 50)
+    store.dispatch(TransformChanged(TransformSpec(crop=new_crop)))
+
+    assert canvas._presentation is not None  # noqa: SLF001
+    assert canvas._presentation.crop == new_crop, (  # noqa: SLF001
+        "the canvas's crop-edit presentation must track every transform "
+        "change while editing, not just the crop it had when editing began"
+    )
+    controller.shutdown()
+
+
+def test_repeated_keyboard_nudges_are_cumulative_while_crop_editing(
+    tmp_path, qtbot
+) -> None:
+    """End-to-end version of the same defect: five arrow presses must move
+    the crop five source pixels, not emit the same one-pixel move five times.
+    """
+    artifact = _seed_cut(tmp_path, "cumulative-nudge")
+    store = ReducerStore(_ready_state(tmp_path / "source.mp4"))
+    controller = TransformStageController(store)
+    canvas = ResultPlayerCanvas()
+    qtbot.addWidget(canvas)
+    group = TransformGroup(lambda _event: None)
+    qtbot.addWidget(group)
+    controller.attach(group, canvas)
+    controller.open_artifact(artifact)
+    qtbot.waitUntil(lambda: canvas.current_frame is not None, timeout=5000)
+    store.dispatch(TransformChanged(TransformSpec(crop=CropSpec(50, 50, 20, 20))))
+    controller._crop_edit_toggled(True)  # noqa: SLF001
+    canvas.resize(200, 200)
+    canvas.show()
+    canvas.activateWindow()
+    canvas.setFocus()
+    qtbot.waitUntil(canvas.hasFocus, timeout=1000)
+
+    for _ in range(5):
+        qtbot.keyClick(canvas, Qt.Key.Key_Left)
+
+    final_crop = store.state.parameters.transform.crop
+    assert final_crop == CropSpec(45, 50, 20, 20)
     controller.shutdown()
 
 
