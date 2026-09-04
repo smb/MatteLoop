@@ -559,6 +559,47 @@ def test_superseding_a_frame_load_does_not_block_the_gui_thread(
     controller.shutdown()
 
 
+def test_trim_only_edit_does_not_reload_frames_or_lose_the_kept_range(
+    tmp_path, qtbot
+) -> None:
+    """A trim-only edit (first_frame/last_frame) was applied to the result
+    loop via ``set_kept_range`` and then wiped by ``_state_changed``
+    scheduling a needless ``_sync_player_frames`` reload -- ``set_frames``
+    resets ``canvas._kept`` to ``None`` (the full range) once that reload's
+    result lands, even though ``apply_transform`` only crops/resizes and the
+    rebuilt cache would be byte-identical to the one it replaced.
+    """
+    artifact = _seed_cut(tmp_path, "trim-only")
+    reader = _CountingReader()
+    store = ReducerStore(_ready_state(tmp_path / "source.mp4"))
+    controller = TransformStageController(store, frame_reader=reader)
+    canvas = ResultPlayerCanvas()
+    qtbot.addWidget(canvas)
+    group = TransformGroup(lambda _event: None)
+    qtbot.addWidget(group)
+    controller.attach(group, canvas)
+
+    controller.open_artifact(artifact)
+    qtbot.waitUntil(lambda: canvas.current_frame is not None, timeout=5000)
+    frame_count = artifact.manifest.frame_count
+    assert frame_count >= 2, "need room to trim off the first frame"
+    initial_reads = reader.calls
+
+    store.dispatch(TransformChanged(TransformSpec(first_frame=1)))
+
+    assert canvas._kept == range(1, frame_count)  # noqa: SLF001
+    assert canvas.current_frame == 1
+
+    qtbot.wait(500)  # long enough for the 250ms debounce to fire if scheduled
+
+    assert reader.calls == initial_reads, "a trim-only edit must never reload the cache"
+    assert canvas._kept == range(1, frame_count), (  # noqa: SLF001
+        "the trim must survive even if something still reloads the cache"
+    )
+    assert canvas.current_frame == 1
+    controller.shutdown()
+
+
 # -- E33: crop-edit drags are debounced and skipped while editing -----------
 
 
@@ -647,6 +688,48 @@ def test_state_changed_refreshes_the_crop_edit_presentation(tmp_path, qtbot) -> 
         "the canvas's crop-edit presentation must track every transform "
         "change while editing, not just the crop it had when editing began"
     )
+    controller.shutdown()
+
+
+def test_crop_edit_overlay_follows_a_framed_size_change(tmp_path, qtbot) -> None:
+    """``_facts_ready`` clamps the stored crop and stores the new
+    ``CutFacts``, but the only overlay refresh path,
+    ``_refresh_crop_edit_presentation``, otherwise only ran from
+    ``_state_changed`` reacting to the clamp's own ``TransformChanged`` --
+    at which point ``self._facts`` was still the OLD facts. A framing change
+    that does not need to clamp anything (crop already fits) never refreshed
+    the overlay at all, leaving it framed against a stale source size.
+    """
+    artifact = _seed_cut(tmp_path, "framed-size-change")
+    store = ReducerStore(_ready_state(tmp_path / "source.mp4"))
+    controller = TransformStageController(store)
+    canvas = ResultPlayerCanvas()
+    qtbot.addWidget(canvas)
+    group = TransformGroup(lambda _event: None)
+    qtbot.addWidget(group)
+    controller.attach(group, canvas)
+    controller.open_artifact(artifact)
+    qtbot.waitUntil(lambda: canvas.current_frame is not None, timeout=5000)
+    original_size = controller.facts.framed_size
+
+    controller._crop_edit_toggled(True)  # noqa: SLF001
+    assert canvas._presentation is not None  # noqa: SLF001
+    assert (canvas._presentation.width, canvas._presentation.height) == original_size  # noqa: SLF001
+
+    store.dispatch(PaddingChanged(10))
+    qtbot.waitUntil(
+        lambda: controller.facts is not None
+        and controller.facts.framed_size != original_size,
+        timeout=5000,
+    )
+    new_size = controller.facts.framed_size
+
+    assert canvas._presentation is not None  # noqa: SLF001
+    assert (canvas._presentation.width, canvas._presentation.height) == new_size, (  # noqa: SLF001
+        "the crop-edit overlay must follow the new framed size, not the one "
+        "it had when editing began"
+    )
+    assert canvas._presentation.crop == CropSpec(0, 0, *new_size)  # noqa: SLF001
     controller.shutdown()
 
 

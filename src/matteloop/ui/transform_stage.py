@@ -306,7 +306,12 @@ class TransformStageController(QObject):
             if self._session is not None:
                 self._schedule_facts()
         transform = parameters.transform
-        transform_changed = transform != self._last_transform
+        last_transform = self._last_transform
+        transform_changed = transform != last_transform
+        reload_relevant_changed = (
+            transform.crop != last_transform.crop
+            or transform.resize != last_transform.resize
+        )
         self._last_transform = transform
         facts = self._facts
         if self._player_canvas is not None and facts is not None:
@@ -316,7 +321,7 @@ class TransformStageController(QObject):
             if transform_changed and not framing_changed:
                 if crop_editing:
                     self._refresh_crop_edit_presentation(transform)
-                else:
+                elif reload_relevant_changed:
                     self._sync_player_frames(immediate=False)
 
     def _refresh_crop_edit_presentation(self, transform: TransformSpec) -> None:
@@ -374,6 +379,14 @@ class TransformStageController(QObject):
         self._plan = plan
         self._clamp_current_crop(facts)
         self._set_facts(facts)
+        if self._crop_edit_enabled:
+            # The clamp above may have already dispatched a TransformChanged
+            # that reached _state_changed while self._facts still held the
+            # OLD facts (_set_facts had not run yet) -- and a framing change
+            # that needs no clamp at all triggers no dispatch whatsoever.
+            # Either way, the overlay must be re-presented against the facts
+            # just stored, not whatever was live when editing began.
+            self._refresh_crop_edit_presentation(self._store.state.parameters.transform)
 
     @Slot(int)
     def _facts_failed(self, generation: int) -> None:
