@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 from PySide6.QtCore import QSettings, Qt
+from PySide6.QtWidgets import QAbstractSpinBox, QComboBox
 
 from matteloop.core.execution_providers import (
     COREML_EXECUTION_PROVIDER,
@@ -82,6 +83,7 @@ def test_inspector_disclosure_titles_preserve_literal_ampersands(qtbot) -> None:
         ("segmentation", "Segmentation", True),
         ("time_sampling", "Time & Sampling", True),
         ("crop_cleanup", "Crop & Cleanup", False),
+        ("transform", "Transform", False),
         ("output", "Output", True),
         ("workspace", "Workspace", False),
     ],
@@ -109,6 +111,34 @@ def test_inspector_disclosures_show_visual_and_spoken_state(
     )
     assert button.accessibleDescription() == (
         f"{title}: {'collapsed' if expanded else 'expanded'}"
+    )
+
+
+def test_transform_group_is_mounted_inside_its_disclosure_body(qtbot) -> None:
+    inspector = Inspector(_settings())
+    qtbot.addWidget(inspector)
+
+    _button, body = inspector.disclosures["transform"]
+
+    assert inspector.transform_group.parentWidget() is body
+
+
+def test_tab_widgets_include_the_transform_disclosure_and_group_in_order(
+    qtbot,
+) -> None:
+    inspector = Inspector(_settings())
+    qtbot.addWidget(inspector)
+
+    widgets = inspector.tab_widgets()
+    transform_button = inspector.disclosures["transform"][0]
+    crop_index = widgets.index(inspector.disclosures["crop_cleanup"][0])
+    transform_index = widgets.index(transform_button)
+    output_index = widgets.index(inspector.disclosures["output"][0])
+
+    assert crop_index < transform_index < output_index
+    group_widgets = inspector.transform_group.tab_widgets()
+    assert widgets[transform_index + 1 : transform_index + 1 + len(group_widgets)] == (
+        group_widgets
     )
 
 
@@ -232,3 +262,20 @@ def test_inspector_explains_invalid_output_filename_without_emitting_a_command(
     assert commands == []
     assert inspector.output_filename_edit.property("invalid") is True
     assert "single" in inspector.output_filename_edit.toolTip()
+
+
+def test_every_inspector_field_refuses_focus_from_the_wheel(qtbot) -> None:
+    """Every combo and spin box in the inspector, Transform panel included,
+    goes through compact_field: focus comes from a click or Tab only, so a
+    wheel tick over an unfocused field scrolls the inspector instead of
+    focusing and editing it."""
+    inspector = Inspector(_settings())
+    qtbot.addWidget(inspector)
+
+    fields = [
+        *inspector.findChildren(QComboBox),
+        *inspector.findChildren(QAbstractSpinBox),
+    ]
+
+    assert len(fields) >= 20
+    assert {field.focusPolicy() for field in fields} == {Qt.FocusPolicy.StrongFocus}

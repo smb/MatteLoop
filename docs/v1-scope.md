@@ -59,6 +59,7 @@ Nothing else gates V1. When that sentence is true end to end, V1 is done.
 | Accessibility | Full keyboard reachability, correct tab order, accessible names and values on **standard** widgets, no colour-only status. |
 | Persistence | `QSettings` primitives, window geometry, output directory. |
 | Cuts | Post-segmentation cuts are persisted, editable, selectable from a promoted cut-set picker, and reusable through Rebuild. **Scope reopened 2026-08-31:** re-rendering an edited clip otherwise repeats segmentation, including a 927 MiB model and 39 inferences, merely to re-encode. |
+| Transform | A finished cut can be trimmed to a frame range, cropped, and resized (explicit dimensions or a 7TV preset, with a keep/stretch/cover/pad mismatch policy) and re-encoded through Rebuild, without touching the stored cut frames or re-running segmentation. **Scope reopened 2026-09-04 (issue #25):** the transform is remembered per cut in a sidecar beside the cut directory, not in the manifest — the manifest modules are frozen and reject unknown keys, and a sidecar written inside the cut directory would invalidate the whole set for the picker. |
 
 ### Recorded design deviations
 

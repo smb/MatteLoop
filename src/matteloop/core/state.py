@@ -388,7 +388,7 @@ def reduce(state: AppState, event: Event) -> AppState:
         return AppState(
             source=SourceState.LOADING, source_id=event.source_id,
             source_request_id=event.request_id,
-            parameters=state.parameters,
+            parameters=replace(state.parameters, transform=specs.TransformSpec()),
             model_available=state.model_available,
             model_supports_render=state.model_supports_render,
             focus_target=FocusTarget.NONE,

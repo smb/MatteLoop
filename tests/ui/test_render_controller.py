@@ -10,7 +10,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QDesktopServices, QImage
 
 from matteloop.core.crop_state import CropChanged
-from matteloop.core.specs import CropSpec
+from matteloop.core.parameters import TransformChanged
+from matteloop.core.specs import CropSpec, TransformSpec
 from matteloop.core.state import (
     AppState,
     ArtifactState,
@@ -30,7 +31,7 @@ from matteloop.core.timeline import EndChanged, StartChanged
 from matteloop.core.webp import validate_webp
 from matteloop.jobs.context import CancellationState, JobContext, ProgressEvent
 from matteloop.jobs.render import ImmutableRgba, PreparedSegmentation, RenderArtifact
-from matteloop.jobs.workspace import CutWorkspace, WorkspaceLifecycle
+from matteloop.jobs.workspace import CutWorkspace, WorkspaceLifecycle, WorkspaceSummary
 from matteloop.ui.controller import SourceController
 from matteloop.ui.ports import (
     OpenOutputFolderRequested,
@@ -213,6 +214,46 @@ class MatchingCutsRuntime(FakeRenderRuntime):
     def find_matching_workspace(self, request, context):
         del request, context
         return self.workspace
+
+
+class RebuildRuntime(FakeRenderRuntime):
+    """Answers ``rebuild`` the way a matched-cut path requires."""
+
+    def rebuild(self, request, workspace, context):
+        del workspace, context
+        self.render_requests.append(request)
+        return type("Artifact", (), {"output_path": request.output.path})()
+
+
+@dataclass(frozen=True)
+class _RebuildManifest:
+    """Duck-typed stand-in exposing only what request_for_workspace reads."""
+
+    cache_key_inputs: dict[str, object]
+    source_path: str
+
+
+def _rebuild_manifest(source: Path) -> _RebuildManifest:
+    return _RebuildManifest(
+        cache_key_inputs={
+            "sampling": {
+                "start": {"numerator": 0, "denominator": 1},
+                "end": {"numerator": 2, "denominator": 1},
+                "fps": 15,
+            },
+            "crop": {"x": 0, "y": 0, "width": 128, "height": 128},
+            "model": {"id": "u2net"},
+            "edge_settings": {
+                "mode": "standard",
+                "alpha_matting": {
+                    "foreground_threshold": 240,
+                    "background_threshold": 10,
+                    "erode_size": 10,
+                },
+            },
+        },
+        source_path=str(source),
+    )
 
 
 class RecordingStore(ReducerStore):
@@ -558,6 +599,63 @@ def test_matching_cut_set_offers_three_choices_with_rebuild_default(
     )
     assert store.state.job.kind is None
     assert not runtime.render_requests
+    controller.shutdown()
+
+
+def test_artifact_ready_fires_with_the_workers_raw_artifact(tmp_path, qtbot) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"fixture")
+    runtime = FakeRenderRuntime()
+    store = RecordingStore(_current_state(source))
+    controller = SourceController(store, preview_runtime=runtime)
+    received: list[object] = []
+    controller.render_controller.artifact_ready.connect(received.append)
+
+    controller.dispatch(RenderVideoRequested())
+
+    qtbot.waitUntil(lambda: store.state.artifact is ArtifactState.VALID, timeout=5000)
+    assert len(received) == 1
+    assert received[0].output_path == runtime.render_requests[0].output.path
+    controller.shutdown()
+
+
+def test_use_this_set_restores_the_stored_transform_before_rebuilding(
+    tmp_path, qtbot
+) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"fixture")
+    cuts_root = tmp_path / ".matteloop-work" / "cuts"
+    workspace = CutWorkspace(
+        tmp_path,
+        tmp_path / ".matteloop-work",
+        cuts_root,
+        tmp_path / ".matteloop-work" / "scratch",
+        "a" * 64,
+        cuts_root / "source-aaaaaaaa",
+        WorkspaceLifecycle.PROMOTED,
+        None,
+        "source-aaaaaaaa",
+    )
+    manifest = _rebuild_manifest(source)
+    runtime = RebuildRuntime()
+    store = RecordingStore(_current_state(source))
+    controller = SourceController(store, preview_runtime=runtime)
+    restored: list[CutWorkspace] = []
+    restored_transform = TransformSpec(first_frame=2)
+
+    def restore(target: CutWorkspace) -> None:
+        restored.append(target)
+        store.dispatch(TransformChanged(restored_transform))
+
+    controller.render_controller.transform_restore = restore
+
+    controller.render_controller._use_workspace(  # noqa: SLF001
+        WorkspaceSummary(workspace, manifest, 0)
+    )
+
+    qtbot.waitUntil(lambda: len(runtime.render_requests) == 1, timeout=5000)
+    assert restored == [workspace]
+    assert runtime.render_requests[0].transform == restored_transform
     controller.shutdown()
 
 

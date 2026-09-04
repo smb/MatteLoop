@@ -33,6 +33,7 @@ class RenderWorker(QObject):
     finished = Signal(str)
     provider_ready = Signal(str)
     provider_notice = Signal(str)
+    artifact_ready = Signal(object)
 
     def __init__(
         self,
@@ -70,12 +71,13 @@ class RenderWorker(QObject):
                 artifact = rebuild(
                     self._request, self._rebuild_workspace, self._context
                 )
-            if not provider_emitted:
-                self._emit_provider_details()
             if self._context.terminal_state is JobTerminalState.RUNNING:
                 self._context.commit_if_not_cancelled(lambda: None)
             elif self._context.terminal_state is JobTerminalState.CANCEL_PENDING:
                 self._context.checkpoint("render")
+            self.artifact_ready.emit(artifact)
+            if not provider_emitted:
+                self._emit_provider_details()
             output_path = artifact.output_path
             if not isinstance(output_path, Path):
                 raise TypeError("render result did not contain an output path")

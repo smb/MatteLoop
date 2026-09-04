@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import QWidget
@@ -23,6 +25,7 @@ from matteloop.core.geometry import (
     SizeF,
     build_crop_geometry,
 )
+from matteloop.core.specs import CropSpec
 from matteloop.ui.crop_presentation import CropPresentation
 from matteloop.ui.preview_canvas import PreviewCanvas
 from matteloop.ui.theme import ACCENT_COLOR, CANVAS_COLOR, TEXT_COLOR
@@ -44,8 +47,15 @@ class CropCanvas(PreviewCanvas):
 
     command_requested = Signal(object)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__("Original", "original_canvas", parent)
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        title: str = "Original",
+        object_name: str = "original_canvas",
+        runtime_root: Path | None = None,
+    ) -> None:
+        super().__init__(title, object_name, parent, runtime_root=runtime_root)
         self.layout().setContentsMargins(0, 0, 0, 0)  # type: ignore[union-attr]
         self.status_label.hide()
         self.setMouseTracking(True)
@@ -206,8 +216,9 @@ class CropCanvas(PreviewCanvas):
         except ValueError:
             super().keyPressEvent(event)
             return
+        crop = self._constrain(crop, self._focused_target)
         if crop != self._presentation.crop:
-            self.command_requested.emit(CropChanged(crop))
+            self.command_requested.emit(self._crop_event(crop))
             self._announce_crop()
         event.accept()
 
@@ -241,8 +252,28 @@ class CropCanvas(PreviewCanvas):
             source_width=presentation.width,
             source_height=presentation.height,
         )
+        crop = self._constrain(crop, self._dragged)
         if self._presentation is None or crop != self._presentation.crop:
-            self.command_requested.emit(CropChanged(crop))
+            self.command_requested.emit(self._crop_event(crop))
+
+    def _constrain(self, crop: CropSpec, target: str) -> CropSpec:
+        """Re-fit a candidate crop before it is compared/emitted.
+
+        Identity by default; ``ResultPlayerCanvas`` overrides this to apply
+        an aspect lock.
+        """
+        return crop
+
+    def _crop_event(self, crop: CropSpec) -> object:
+        """Build the command to dispatch for a changed crop.
+
+        Default: ``CropChanged`` (the source crop). ``ResultPlayerCanvas``
+        overrides this to dispatch ``TransformChanged`` instead -- routing
+        both the drag site and ``keyPressEvent`` through this hook is what
+        keeps an arrow-key nudge on the result canvas from dispatching a
+        *source* crop change (edge case E30).
+        """
+        return CropChanged(crop)
 
     def _rebuild_geometry(
         self, *, focused: str | None = None, dragged: str | None = None
@@ -259,6 +290,7 @@ class CropCanvas(PreviewCanvas):
                 rotation=presentation.rotation,
                 pixel_aspect=presentation.pixel_aspect,
             )
+            reserved_bottom = max(0.0, self._reserved_bottom_space())
             self._geometry = build_crop_geometry(
                 state=CropGeometryState(
                     source_size=SizeF(
@@ -273,7 +305,10 @@ class CropCanvas(PreviewCanvas):
                     else (self._focused_target if self.hasFocus() else None),
                     dragged=dragged if dragged is not None else self._dragged,
                 ),
-                viewport=SizeF(max(1, self.width()), max(1, self.height())),
+                viewport=SizeF(
+                    max(1, self.width()),
+                    max(1.0, self.height() - reserved_bottom),
+                ),
                 dpr=float(self.devicePixelRatioF()),
             )
             transform = self._geometry.transform

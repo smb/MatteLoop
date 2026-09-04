@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 from collections.abc import Callable
 from pathlib import Path
 
@@ -91,3 +92,38 @@ def auto_fit_progress(
         )
 
     return report_frame, report_attempt
+
+
+def _map_output_os_error(error: OSError, detail: str) -> AppError:
+    if error.errno in {errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)}:
+        suffix = "disk quota or free space exhausted"
+        action = "free-disk-space"
+    elif error.errno in {errno.EACCES, errno.EPERM}:
+        suffix = "output location is not writable"
+        action = "choose-writable-output"
+    elif error.errno == getattr(errno, "EROFS", -1):
+        suffix = "output filesystem is read-only"
+        action = "choose-writable-output"
+    elif error.errno == errno.EEXIST:
+        suffix = "output target already exists"
+        action = "choose-collision-policy"
+    else:
+        suffix = f"{type(error).__name__}: {error}"
+        action = "retry-output"
+    return AppError(
+        ErrorCode.INVALID_OUTPUT,
+        "output",
+        "error.output.failed",
+        f"{detail}: {suffix}",
+        action,
+    )
+
+
+def _output_error(detail: str) -> AppError:
+    return AppError(
+        ErrorCode.INVALID_OUTPUT,
+        "output",
+        "error.output.failed",
+        detail,
+        "retry-output",
+    )

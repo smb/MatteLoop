@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from decimal import Decimal, InvalidOperation
 from fractions import Fraction
 from pathlib import Path
@@ -20,6 +20,7 @@ from matteloop.core.specs import (
     OutputSpec,
     SamplingSpec,
     SegmentationSpec,
+    TransformSpec,
     is_local_path_syntax,
 )
 
@@ -58,6 +59,7 @@ class ParameterState:
     output_filename: str | None = None
     max_mib: Decimal = Decimal("0")
     execution_provider: str = CPU_EXECUTION_PROVIDER
+    transform: TransformSpec = field(default_factory=TransformSpec)
 
     def __post_init__(self) -> None:
         if self.model_id not in V1_MODEL_IDS:
@@ -141,6 +143,11 @@ class OutputMaxSizeChanged:
     value: Decimal
 
 
+@dataclass(frozen=True, slots=True)
+class TransformChanged:
+    transform: TransformSpec
+
+
 ParameterEvent = (
     ModelChanged
     | EdgeModeChanged
@@ -153,6 +160,7 @@ ParameterEvent = (
     | OutputDirectoryChanged
     | OutputFilenameChanged
     | OutputMaxSizeChanged
+    | TransformChanged
 )
 
 
@@ -184,6 +192,8 @@ def reduce_parameters(state: AppState, event: ParameterEvent) -> AppState:
         return _reduce_output_filename(state, event)
     if isinstance(event, OutputMaxSizeChanged):
         return _reduce_output_max_size(state, event)
+    if isinstance(event, TransformChanged):
+        return _reduce_transform(state, event)
     return state
 
 
@@ -316,6 +326,18 @@ def _reduce_output_max_size(
     if updated == state.parameters:
         return state
     return replace(state, parameters=updated)
+
+
+def _reduce_transform(state: AppState, event: TransformChanged) -> AppState:
+    """Replace the transform in place; a transform never stales the preview."""
+    if (
+        not isinstance(event.transform, TransformSpec)
+        or event.transform == state.parameters.transform
+    ):
+        return state
+    return replace(
+        state, parameters=replace(state.parameters, transform=event.transform)
+    )
 
 
 def _invalidate(

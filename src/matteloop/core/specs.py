@@ -321,6 +321,203 @@ class FramingSpec:
         return stretched_width, padded_height
 
 
+class MismatchMode(StrEnum):
+    """How a resize reconciles a requested size with the source aspect ratio."""
+
+    KEEP = "keep"
+    STRETCH = "stretch"
+    COVER = "cover"
+    PAD = "pad"
+
+
+@dataclass(frozen=True)
+class ResizeSpec:
+    """A target pixel size and how to reconcile an aspect-ratio mismatch."""
+
+    width: int | None = None
+    height: int | None = None
+    mismatch: MismatchMode = MismatchMode.KEEP
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        if self.width is None and self.height is None:
+            raise ValidationError(
+                ErrorCode.INVALID_TRANSFORM,
+                "transform",
+                "resize requires at least one of width or height",
+            )
+        for name, value in (("width", self.width), ("height", self.height)):
+            if value is None:
+                continue
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or not MIN_FINAL_DIMENSION <= value <= MAX_FINAL_DIMENSION
+            ):
+                raise ValidationError(
+                    ErrorCode.INVALID_TRANSFORM,
+                    "transform",
+                    f"resize {name} must be an integer between "
+                    f"{MIN_FINAL_DIMENSION} and {MAX_FINAL_DIMENSION}",
+                )
+        if not isinstance(self.mismatch, MismatchMode):
+            raise ValidationError(
+                ErrorCode.INVALID_TRANSFORM,
+                "transform",
+                "mismatch must be a MismatchMode",
+            )
+
+
+@dataclass(frozen=True)
+class TransformSpec:
+    """A trim, crop, and resize applied to a finished cut, never to stored frames."""
+
+    first_frame: int = 0
+    last_frame: int | None = None
+    crop: CropSpec | None = None
+    resize: ResizeSpec | None = None
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        if (
+            not isinstance(self.first_frame, int)
+            or isinstance(self.first_frame, bool)
+            or self.first_frame < 0
+        ):
+            raise ValidationError(
+                ErrorCode.INVALID_TRANSFORM,
+                "transform",
+                "first_frame must be a non-negative integer",
+            )
+        if self.last_frame is not None and (
+            not isinstance(self.last_frame, int)
+            or isinstance(self.last_frame, bool)
+            or self.last_frame < self.first_frame
+        ):
+            raise ValidationError(
+                ErrorCode.INVALID_TRANSFORM,
+                "transform",
+                "last_frame must be null or an integer >= first_frame",
+            )
+        if self.crop is not None and not isinstance(self.crop, CropSpec):
+            raise ValidationError(
+                ErrorCode.INVALID_TRANSFORM,
+                "transform",
+                "crop must be null or a CropSpec",
+            )
+        if self.resize is not None and not isinstance(self.resize, ResizeSpec):
+            raise ValidationError(
+                ErrorCode.INVALID_TRANSFORM,
+                "transform",
+                "resize must be null or a ResizeSpec",
+            )
+
+    @property
+    def is_identity(self) -> bool:
+        return (
+            self.first_frame == 0
+            and self.last_frame is None
+            and self.crop is None
+            and self.resize is None
+        )
+
+    def kept_range(self, frame_count: int) -> range:
+        """Return the 0-based indices this transform keeps from *frame_count*."""
+        last = frame_count - 1 if self.last_frame is None else self.last_frame
+        return range(self.first_frame, last + 1)
+
+    def select_kept[T](self, items: tuple[T, ...]) -> tuple[T, ...]:
+        """Slice *items* (e.g. delays) to the frames this transform keeps."""
+        kept = self.kept_range(len(items))
+        return tuple(items[index] for index in kept)
+
+    def validate_for(
+        self, frame_count: int, framed_size: tuple[int, int]
+    ) -> tuple[int, int]:
+        """Validate against the cut and return the final (width, height)."""
+        self._validate_range(frame_count)
+        cropped_size = self._validate_crop(framed_size)
+        return self._validate_size(cropped_size)
+
+    def _validate_range(self, frame_count: int) -> None:
+        last = frame_count - 1 if self.last_frame is None else self.last_frame
+        if last >= frame_count:
+            raise ValidationError(
+                ErrorCode.INVALID_TRANSFORM,
+                "transform",
+                f"last_frame {last} exceeds the last stored frame "
+                f"{frame_count - 1}",
+            )
+        if self.first_frame > last:
+            raise ValidationError(
+                ErrorCode.INVALID_TRANSFORM,
+                "transform",
+                f"first_frame {self.first_frame} exceeds last_frame {last}",
+            )
+
+    def _validate_crop(self, framed_size: tuple[int, int]) -> tuple[int, int]:
+        if self.crop is None:
+            return framed_size
+        try:
+            self.crop.validate_for(*framed_size)
+        except ValidationError as error:
+            width, height = framed_size
+            raise ValidationError(
+                ErrorCode.INVALID_TRANSFORM,
+                "transform",
+                f"crop must be fully contained by the framed size "
+                f"{width}x{height}",
+            ) from error
+        return (self.crop.width, self.crop.height)
+
+    def _validate_size(self, cropped_size: tuple[int, int]) -> tuple[int, int]:
+        if self.resize is not None:
+            from matteloop.core.transform import resolve_resize
+
+            width, height = resolve_resize(cropped_size, self.resize).canvas
+            noun = "derived"
+        else:
+            width, height = cropped_size
+            noun = "crop" if self.crop is not None else "framed"
+        for axis, value in (("width", width), ("height", height)):
+            if value < MIN_FINAL_DIMENSION:
+                raise ValidationError(
+                    ErrorCode.INVALID_TRANSFORM,
+                    "transform",
+                    f"{noun} {axis} {value} is below the "
+                    f"{MIN_FINAL_DIMENSION} px minimum",
+                )
+            if value > MAX_FINAL_DIMENSION:
+                raise ValidationError(
+                    ErrorCode.INVALID_TRANSFORM,
+                    "transform",
+                    f"{noun} {axis} {value} exceeds the "
+                    f"{MAX_FINAL_DIMENSION} px maximum",
+                )
+        return width, height
+
+
+@dataclass(frozen=True)
+class SizePreset:
+    """One platform-named fixed output size offered in the resize preset combo."""
+
+    platform: str
+    label: str
+    width: int
+    height: int
+
+
+PLATFORM_SIZE_PRESETS: tuple[SizePreset, ...] = (
+    SizePreset("7TV", "128x128", 128, 128),
+    SizePreset("7TV", "256x128", 256, 128),
+    SizePreset("7TV", "384x128", 384, 128),
+)
+
+
 @dataclass(frozen=True)
 class OutputSpec:
     """Output naming, collision choice, and optional final-size limit."""
@@ -406,6 +603,7 @@ class RenderRequest:
     output: OutputSpec
     rebuild: bool = False
     regenerate: bool = False
+    transform: TransformSpec = field(default_factory=TransformSpec)
 
     def __post_init__(self) -> None:
         self.validate()
@@ -426,6 +624,7 @@ class RenderRequest:
         self.segmentation.validate()
         self.framing.validate()
         self.output.validate()
+        self.transform.validate()
         if not isinstance(self.rebuild, bool) or not isinstance(self.regenerate, bool):
             raise ValidationError(
                 ErrorCode.INVALID_RENDER_REQUEST,

@@ -1,0 +1,545 @@
+from __future__ import annotations
+
+import threading
+from fractions import Fraction
+from pathlib import Path
+
+import pytest
+from PySide6.QtCore import QRect, Qt
+from PySide6.QtGui import QImage
+from PySide6.QtWidgets import QApplication
+
+from matteloop.core.geometry import (
+    _MEDIA_INSET,
+    CropGeometryState,
+    RectF,
+    SizeF,
+    build_crop_geometry,
+)
+from matteloop.core.parameters import TransformChanged
+from matteloop.core.specs import CropSpec, FramingSpec, TransformSpec
+from matteloop.core.state import (
+    AppState,
+    JobKind,
+    SourceLoaded,
+    SourceLoadRequested,
+    reduce,
+)
+from matteloop.jobs.render import FilesystemWorkspacePort
+from matteloop.jobs.transform_stage import framing_plan
+from matteloop.ui.crop_presentation import CropPresentation
+from matteloop.ui.result_player import (
+    FrameLoadWorker,
+    PlayerFrames,
+    ResultPlayerCanvas,
+    _fit_budget,
+)
+from matteloop.ui.store import ReducerStore
+from matteloop.ui.theme import install_theme
+from matteloop.ui.transform_group import TransformGroup
+from matteloop.ui.transform_stage import TransformStageController, _DirectFrameReader
+from tests.jobs.render_support import (
+    FakeEncoder,
+    FakeSegmenter,
+    job,
+    render_service,
+    request,
+)
+
+
+def _presentation(crop: CropSpec) -> CropPresentation:
+    return CropPresentation(
+        source_id="cut",
+        width=128,
+        height=128,
+        coded_width=128,
+        coded_height=128,
+        rotation=0,
+        pixel_aspect=1.0,
+        crop=crop,
+    )
+
+
+def _player_frames(
+    frame_count: int, delays: tuple[int, ...], *, cached: int | None = None
+) -> PlayerFrames:
+    stored = cached if cached is not None else frame_count
+    framed = tuple(QImage(4, 4, QImage.Format.Format_RGBA8888) for _ in range(stored))
+    transformed = tuple(
+        QImage(4, 4, QImage.Format.Format_RGBA8888) for _ in range(stored)
+    )
+    return PlayerFrames(
+        key=("cut", (4, 4), None, None, (4, 4)),
+        framed=framed,
+        transformed=transformed,
+        delays_ms=delays,
+        cached=stored,
+        frame_count=frame_count,
+    )
+
+
+def _ready_state(path: Path) -> AppState:
+    loading = reduce(AppState(), SourceLoadRequested("source", "load"))
+
+    class _Metadata:
+        def __init__(self, path: Path) -> None:
+            self.path = path
+            self.width = 128
+            self.height = 128
+            self.duration = Fraction(2)
+            self.average_rate = Fraction(30)
+
+    return reduce(loading, SourceLoaded("source", "load", _Metadata(path)))
+
+
+def _seed_cut(tmp_path: Path, job_id: str = "seed", *, segmenter=None, encoder=None):
+    service = render_service(
+        segmenter=segmenter,
+        encoder=encoder,
+        workspace=FilesystemWorkspacePort(),
+    )
+    return service.render(request(tmp_path), job(tmp_path, job_id, JobKind.RENDER))
+
+
+class _ExplodingReader:
+    def read(self, workspace: object, frame: object) -> QImage:
+        del workspace, frame
+        raise OSError("boom")
+
+
+# -- canvas playback -----------------------------------------------------
+
+
+def test_canvas_shows_the_kept_range_start_and_wraps_on_the_timer(qtbot) -> None:
+    canvas = ResultPlayerCanvas()
+    qtbot.addWidget(canvas)
+    frames = _player_frames(4, (10, 10, 10, 10))
+
+    canvas.set_frames(frames)
+    canvas.set_kept_range(range(1, 4))
+
+    assert canvas.current_frame == 1
+    canvas.play()
+    qtbot.waitUntil(lambda: canvas.current_frame == 2, timeout=1000)
+    qtbot.waitUntil(lambda: canvas.current_frame == 3, timeout=1000)
+    qtbot.waitUntil(lambda: canvas.current_frame == 1, timeout=1000)
+    canvas.pause()
+    frozen = canvas.current_frame
+    qtbot.wait(60)
+    assert canvas.current_frame == frozen
+
+
+def test_new_kept_range_re_slices_without_a_new_playerframes(qtbot) -> None:
+    canvas = ResultPlayerCanvas()
+    qtbot.addWidget(canvas)
+    frames = _player_frames(4, (100, 100, 100, 100))
+    canvas.set_frames(frames)
+    canvas.set_kept_range(range(0, 4))
+    assert canvas.current_frame == 0
+
+    canvas.set_kept_range(range(2, 4))
+
+    assert canvas.current_frame == 2
+    assert canvas._frames is frames  # noqa: SLF001
+
+
+def test_frame_cache_swap_while_playing_does_not_stop_the_loop(qtbot) -> None:
+    """``set_frames`` paused unconditionally on every call, so a cache swap
+    while a session stays open (e.g. toggling "Edit crop" off, which
+    rebuilds the transformed cache) silently stopped a loop that was
+    already playing -- nothing then resumed it, since ``play()`` is only
+    ever called from the Play/Pause button toggle.
+    """
+    canvas = ResultPlayerCanvas()
+    qtbot.addWidget(canvas)
+    canvas.set_frames(_player_frames(4, (500, 500, 500, 500)))
+    canvas.play()
+    assert canvas.playing
+
+    canvas.set_frames(_player_frames(4, (500, 500, 500, 500)))
+
+    assert canvas.playing, "a cache swap while the session stays open must not pause"
+    assert canvas.play_button.text() == "Pause"
+
+
+def test_frame_cache_swap_preserves_an_already_applied_kept_range(qtbot) -> None:
+    """A cache swap must not drop a trim already applied via
+    ``set_kept_range`` -- ``set_frames`` used to reset ``self._kept`` to
+    ``None`` (the full range) on every call, including one that only swaps
+    in a rebuilt cache for the same open session.
+    """
+    canvas = ResultPlayerCanvas()
+    qtbot.addWidget(canvas)
+    canvas.set_frames(_player_frames(4, (100, 100, 100, 100)))
+    canvas.set_kept_range(range(1, 4))
+
+    canvas.set_frames(_player_frames(4, (100, 100, 100, 100)))
+
+    assert canvas._kept == range(1, 4), (  # noqa: SLF001
+        "a frame-cache swap must preserve an already-applied kept range"
+    )
+    assert canvas.current_frame == 1
+
+
+def test_play_button_hidden_without_frames_and_shown_with_them(qtbot) -> None:
+    canvas = ResultPlayerCanvas()
+    qtbot.addWidget(canvas)
+    canvas.show()
+    assert canvas.play_button.isHidden()
+
+    canvas.set_frames(_player_frames(2, (100, 100)))
+    assert not canvas.play_button.isHidden()
+
+    canvas.set_frames(None)
+    assert canvas.play_button.isHidden()
+
+
+def test_checkerboard_paints_whenever_the_player_holds_frames(qtbot) -> None:
+    """A Render can open the transform stage without a Preview ever having
+    run, leaving ``checkerboard`` (a PreviewState proxy) false while the
+    player shows a transparent cut-out. The canvas must not rely on that
+    property once it is actually holding frames to show."""
+    canvas = ResultPlayerCanvas()
+    qtbot.addWidget(canvas)
+    canvas.setProperty("checkerboard", False)
+    assert canvas._should_paint_checkerboard() is False  # noqa: SLF001
+
+    canvas.set_frames(_player_frames(2, (100, 100)))
+
+    assert canvas._should_paint_checkerboard() is True  # noqa: SLF001
+
+    canvas.set_frames(None)
+
+    assert canvas._should_paint_checkerboard() is False  # noqa: SLF001
+
+
+def test_play_button_text_and_accessible_name_track_playback_state(qtbot) -> None:
+    canvas = ResultPlayerCanvas()
+    qtbot.addWidget(canvas)
+    canvas.set_frames(_player_frames(3, (500, 500, 500)))
+    assert canvas.play_button.text() == "Play"
+    assert canvas.play_button.accessibleName() == "Play the result loop"
+
+    canvas.play()
+
+    assert canvas.play_button.text() == "Pause"
+    assert canvas.play_button.accessibleName() == "Pause the result loop"
+
+    canvas.pause()
+
+    assert canvas.play_button.text() == "Play"
+    assert canvas.play_button.accessibleName() == "Play the result loop"
+
+
+def test_session_displays_in_fit_mode_and_restores_cover(qtbot) -> None:
+    canvas = ResultPlayerCanvas()
+    qtbot.addWidget(canvas)
+    canvas.set_cover_frame(True)
+
+    canvas.set_frames(_player_frames(2, (100, 100)))
+    assert canvas._cover_frame is False  # noqa: SLF001
+
+    canvas.set_frames(None)
+    assert canvas._cover_frame is True  # noqa: SLF001
+
+
+def test_new_preview_image_pauses_and_a_repeated_call_is_ignored(qtbot) -> None:
+    canvas = ResultPlayerCanvas()
+    qtbot.addWidget(canvas)
+    canvas.set_frames(_player_frames(3, (500, 500, 500)))
+    canvas.play()
+    assert canvas.playing
+
+    preview = QImage(2, 2, QImage.Format.Format_RGBA8888)
+    canvas.set_presented_frame(preview, "placeholder")
+    assert not canvas.playing
+
+    canvas.play()
+    assert canvas.playing
+    canvas.set_presented_frame(preview, "placeholder")
+    assert canvas.playing
+
+
+def test_set_frames_shows_the_truncation_marker_when_cache_was_truncated(qtbot) -> None:
+    canvas = ResultPlayerCanvas()
+    qtbot.addWidget(canvas)
+    frames = _player_frames(10, tuple([100] * 4), cached=4)
+
+    canvas.set_frames(frames)
+
+    assert canvas.status_label.text() == "Previewing the first 4 of 10 frames"
+    assert not canvas.status_label.isHidden()
+
+    canvas.set_frames(_player_frames(4, (100, 100, 100, 100)))
+    assert canvas.status_label.text() == ""
+
+
+def test_keyboard_nudge_never_emits_a_source_crop_change(qtbot) -> None:
+    canvas = ResultPlayerCanvas()
+    qtbot.addWidget(canvas)
+    canvas.resize(200, 200)
+    canvas.set_frame(QImage(128, 128, QImage.Format.Format_RGBA8888))
+    presentation = _presentation(CropSpec(10, 10, 40, 20))
+    canvas.set_crop_edit(True, presentation, TransformSpec(first_frame=2))
+    canvas.show()
+    canvas.activateWindow()
+    canvas.setFocus()
+    qtbot.waitUntil(canvas.hasFocus, timeout=1000)
+    events: list[object] = []
+    canvas.command_requested.connect(events.append)
+
+    qtbot.keyClick(canvas, Qt.Key.Key_Left)
+
+    assert events, "the nudge should dispatch a command"
+    assert all(isinstance(event, TransformChanged) for event in events)
+    assert events[-1].transform.first_frame == 2
+    assert events[-1].transform.crop == CropSpec(9, 10, 40, 20)
+
+
+def test_aspect_lock_constrains_the_crop_before_dispatch(qtbot) -> None:
+    canvas = ResultPlayerCanvas()
+    qtbot.addWidget(canvas)
+    presentation = _presentation(CropSpec(0, 0, 40, 40))
+    canvas.set_crop_edit(True, presentation, TransformSpec())
+    canvas.set_aspect_lock(Fraction(2, 1))
+
+    constrained = canvas._constrain(  # noqa: SLF001
+        CropSpec(0, 0, 40, 60), "south_east"
+    )
+
+    assert Fraction(constrained.width, constrained.height) == Fraction(2, 1)
+
+
+def _button_overlaps(button: QRect, rect: object) -> bool:
+    """Whether *button* (canvas-local ``QRect``) intersects a geometry ``RectF``."""
+    return not (
+        button.x() + button.width() <= rect.left  # type: ignore[attr-defined]
+        or button.x() >= rect.right  # type: ignore[attr-defined]
+        or button.y() + button.height() <= rect.top  # type: ignore[attr-defined]
+        or button.y() >= rect.bottom  # type: ignore[attr-defined]
+    )
+
+
+def test_play_button_does_not_cover_the_bottom_right_crop_handle(qtbot) -> None:
+    """Regression for #25: the play button used to share the same
+    bottom-right corner as the crop overlay's ``south_east`` handle -- a
+    ``QPushButton`` accepts the press and never lets it reach
+    ``mousePressEvent``, so a drag starting on the covered half of the
+    handle was impossible, and the button painted over it besides.
+    """
+    application = QApplication.instance()
+    assert application is not None
+    original_style_sheet = application.styleSheet()
+    try:
+        install_theme(application)  # the real button size, not Qt's bare default
+        canvas = ResultPlayerCanvas()
+        qtbot.addWidget(canvas)
+        canvas.resize(430, 500)
+        canvas.show()
+        qtbot.wait(10)
+
+        canvas.set_frame(QImage(256, 256, QImage.Format.Format_RGBA8888))
+        canvas.set_frames(_player_frames(2, (100, 100)))
+        presentation = CropPresentation(
+            source_id="cut",
+            width=256,
+            height=256,
+            coded_width=256,
+            coded_height=256,
+            rotation=0,
+            pixel_aspect=1.0,
+            crop=CropSpec(0, 0, 256, 256),
+        )
+        canvas.set_crop_edit(True, presentation, TransformSpec())
+        qtbot.wait(10)
+
+        assert canvas.play_button.isVisible()
+        geometry = canvas._geometry  # noqa: SLF001
+        assert geometry is not None
+        button = canvas.play_button.geometry()
+
+        assert not _button_overlaps(button, geometry.visual["south_east"])
+        assert not _button_overlaps(button, geometry.pointer_hit["south_east"])
+    finally:
+        application.setStyleSheet(original_style_sheet)
+
+
+def test_media_fills_the_full_viewport_when_crop_edit_is_off(qtbot) -> None:
+    """The other half of #25's contract: the reservation only buys anything
+    while the crop overlay is active (its handles are the only thing a
+    covered corner could break), so once crop-edit is turned back off it
+    must not cost any visible preview area -- this is the stage that exists
+    to show the loop. Enters crop-edit first (so the layout margin this
+    canvas always carries is the real ``_MEDIA_INSET``, not the ``0`` a
+    presentation-less canvas never applies) and then leaves it again, the
+    same round trip the "Edit crop" toggle drives in the app.
+    """
+    application = QApplication.instance()
+    assert application is not None
+    original_style_sheet = application.styleSheet()
+    try:
+        install_theme(application)
+        canvas = ResultPlayerCanvas()
+        qtbot.addWidget(canvas)
+        canvas.resize(430, 500)
+        canvas.show()
+        qtbot.wait(10)
+
+        canvas.set_frame(QImage(256, 256, QImage.Format.Format_RGBA8888))
+        canvas.set_frames(_player_frames(2, (100, 100)))
+        presentation = CropPresentation(
+            source_id="cut",
+            width=256,
+            height=256,
+            coded_width=256,
+            coded_height=256,
+            rotation=0,
+            pixel_aspect=1.0,
+            crop=CropSpec(0, 0, 256, 256),
+        )
+        canvas.set_crop_edit(True, presentation, TransformSpec())
+        qtbot.wait(10)
+        assert canvas._reserved_bottom_space() > 0.0  # noqa: SLF001 -- sanity
+
+        canvas.set_crop_edit(False, None, TransformSpec())
+        qtbot.wait(10)
+
+        assert canvas.play_button.isVisible()
+        assert canvas._reserved_bottom_space() == 0.0  # noqa: SLF001
+
+        pixmap = canvas.pixmap()
+        assert pixmap is not None and not pixmap.isNull()
+
+        # Full, unreserved inset viewport: what the media occupies with no
+        # bottom reservation at all -- only ``_MEDIA_INSET`` on every side.
+        expected = build_crop_geometry(
+            state=CropGeometryState(
+                source_size=SizeF(256, 256),
+                crop=RectF(0, 0, 256, 256),
+                inset=_MEDIA_INSET,
+            ),
+            viewport=SizeF(canvas.width(), canvas.height()),
+            dpr=float(canvas.devicePixelRatioF()),
+        )
+        content = expected.transform.content_rect
+        assert pixmap.width() == pytest.approx(content.width, abs=1.0)
+        assert pixmap.height() == pytest.approx(content.height, abs=1.0)
+    finally:
+        application.setStyleSheet(original_style_sheet)
+
+
+# -- budget math -----------------------------------------------------------
+
+
+def test_fit_budget_shrinks_the_display_size_before_truncating_frames() -> None:
+    display_size, cached = _fit_budget(10, (1000, 1000), 10_000_000)
+    assert cached == 10
+    assert display_size[0] < 1000
+
+
+def test_fit_budget_truncates_frames_once_the_floor_is_hit() -> None:
+    display_size, cached = _fit_budget(1000, (1000, 1000), 200_000)
+    assert display_size == (64, 64)
+    assert 1 <= cached < 1000
+
+
+# -- worker failure (E23) ---------------------------------------------------
+
+
+def test_frame_load_worker_reports_unreadable_frames(tmp_path) -> None:
+    artifact = _seed_cut(tmp_path, "worker-fail")
+    manifest = artifact.manifest
+    plan = framing_plan((manifest.width, manifest.height), None, FramingSpec())
+    worker = FrameLoadWorker(
+        artifact.cut_workspace,
+        manifest,
+        _ExplodingReader(),
+        plan,
+        TransformSpec(),
+        (100,) * manifest.frame_count,
+        1,
+    )
+    failures: list[str] = []
+    worker.failed.connect(lambda message, _generation: failures.append(message))
+    worker.run()
+
+    assert failures == ["Cut frames could not be read"]
+
+
+class _CancelAfterFirstReadReader:
+    """Read normally, but signal cancellation once the first frame is read --
+    simulating a supersede that lands while the worker is mid-load."""
+
+    def __init__(self, cancel_after: threading.Event) -> None:
+        self._cancel_after = cancel_after
+        self.calls = 0
+        self._inner = _DirectFrameReader()
+
+    def read(self, workspace: object, frame: object) -> QImage:
+        self.calls += 1
+        image = self._inner.read(workspace, frame)
+        self._cancel_after.set()
+        return image
+
+
+def test_frame_load_worker_stops_early_once_cancelled(tmp_path) -> None:
+    """A superseded load must stop reading further stored frames instead of
+    running to completion -- otherwise cancelling it cannot be fast, only
+    delayed until the whole in-flight load finishes.
+    """
+    artifact = _seed_cut(tmp_path, "worker-cancel")
+    manifest = artifact.manifest
+    assert manifest.frame_count >= 2, "need a second frame that must never load"
+    plan = framing_plan((manifest.width, manifest.height), None, FramingSpec())
+    cancelled = threading.Event()
+    reader = _CancelAfterFirstReadReader(cancelled)
+    worker = FrameLoadWorker(
+        artifact.cut_workspace,
+        manifest,
+        reader,
+        plan,
+        TransformSpec(),
+        (100,) * manifest.frame_count,
+        1,
+        cancelled=cancelled.is_set,
+    )
+    outcomes: list[str] = []
+    worker.succeeded.connect(lambda *_a: outcomes.append("succeeded"))
+    worker.failed.connect(lambda *_a: outcomes.append("failed"))
+
+    worker.run()
+
+    assert reader.calls == 1, "the worker must stop before reading the next frame"
+    assert outcomes == [], "a cancelled load must not report success or failure"
+
+
+# -- AC 9: zero segmentation, zero encoder calls during playback ------------
+
+
+def test_playback_never_calls_segmentation_or_the_encoder(tmp_path, qtbot) -> None:
+    segmenter = FakeSegmenter()
+    encoder = FakeEncoder()
+    artifact = _seed_cut(tmp_path, "ac9", segmenter=segmenter, encoder=encoder)
+
+    store = ReducerStore(_ready_state(tmp_path / "source.mp4"))
+    controller = TransformStageController(store)
+    canvas = ResultPlayerCanvas()
+    qtbot.addWidget(canvas)
+    group = TransformGroup(lambda _event: None)
+    qtbot.addWidget(group)
+    controller.attach(group, canvas)
+
+    controller.open_artifact(artifact)
+    qtbot.waitUntil(lambda: canvas.current_frame is not None, timeout=5000)
+
+    segment_calls = len(segmenter.calls)
+    encode_calls = len(encoder.calls)
+
+    canvas.play()
+    for _ in range(6):
+        canvas._advance()  # noqa: SLF001
+    canvas.pause()
+
+    assert len(segmenter.calls) == segment_calls
+    assert len(encoder.calls) == encode_calls
+    controller.shutdown()

@@ -51,6 +51,7 @@ from matteloop.jobs.source import (
     probe_source,
 )
 from matteloop.paths import model_cache_root
+from matteloop.ui.crop_canvas import CropCanvas
 from matteloop.ui.model_manager import ModelManagerController, ModelRemovalService
 from matteloop.ui.ports import (
     ChooseVideoRequested,
@@ -70,6 +71,8 @@ from matteloop.ui.preferences import persist_parameters
 from matteloop.ui.preview_controller import PreviewController, PreviewRuntime
 from matteloop.ui.render_controller import RenderController
 from matteloop.ui.timeline import SourceFrameWorker
+from matteloop.ui.transform_group import TransformGroup
+from matteloop.ui.transform_stage import TransformStageController
 
 VIDEO_FILE_FILTER = "Video files (*.mp4 *.mov *.webm *.mkv)"
 _THREAD_SHUTDOWN_TIMEOUT_MS = 5000
@@ -188,6 +191,12 @@ class SourceController(QObject):
             parent=self,
         )
         self._model_manager = self._build_model_manager()
+        self._transform_stage = TransformStageController(store, parent=self)
+        self._render_controller.artifact_ready.connect(
+            self._transform_stage.open_artifact
+        )
+        self._render_controller.transform_restore = self._transform_stage.restore_for
+        self._render_controller.open_cut_key = self._open_cut_key
         self._preview_controller.provider_ready.connect(self._provider_ready)
         self._render_controller.provider_ready.connect(self._provider_ready)
         self._working_provider = store.state.parameters.execution_provider
@@ -228,6 +237,28 @@ class SourceController(QObject):
     def render_controller(self) -> RenderController:
         """Expose the render command owner for lifecycle and UI integration tests."""
         return self._render_controller
+
+    @property
+    def transform_stage(self) -> TransformStageController:
+        """Expose the cut-session owner for lifecycle and UI integration tests."""
+        return self._transform_stage
+
+    def _open_cut_key(self) -> str | None:
+        """Name the cut the Transform group currently edits, if any.
+
+        The rebuild path asks this before restoring a matched cut's stored
+        transform, so that an unsaved edit to the cut on screen wins. The
+        stage owns the session -- it opens one per artifact and closes it
+        when the source is reloaded -- so it is asked rather than mirrored.
+        """
+        session = self._transform_stage.session
+        return None if session is None else session.workspace.cache_key
+
+    def attach_transform_stage(
+        self, group: TransformGroup, canvas: CropCanvas | None
+    ) -> None:
+        """Wire the inspector's Transform group (and, later, the result canvas)."""
+        self._transform_stage.attach(group, canvas)
 
     @property
     def model_options(self) -> tuple[tuple[str, bool], ...]:
@@ -299,6 +330,7 @@ class SourceController(QObject):
         for thread, _worker in tuple(self._frame_threads):
             thread.wait(_THREAD_SHUTDOWN_TIMEOUT_MS)
         self._model_manager.close()
+        self._transform_stage.shutdown()
         self._render_controller.shutdown()
         self._preview_controller.shutdown()
         threads = tuple(self._threads.items())

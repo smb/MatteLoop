@@ -40,16 +40,9 @@ _UI_FALLBACKS = "'Helvetica Neue', 'Segoe UI', 'DejaVu Sans'"
 _MONO_FALLBACKS = "'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono'"
 
 
-def install_theme(
-    application: QApplication, *, runtime_root: Path | None = None
-) -> bool:
-    """Install the approved palette and return whether every bundled font loaded."""
-    loaded = load_packaged_fonts(runtime_root=runtime_root)
-    base_font = QFont(UI_FONT, 10)
-    if not loaded:
-        base_font.setStyleHint(QFont.StyleHint.SansSerif)
-    application.setFont(base_font)
-    application.setStyleSheet(
+def _surface_stylesheet() -> str:
+    """Backgrounds and separators of the fixed window furniture."""
+    return (
         f"""
         QWidget {{ background: {BACKGROUND_COLOR}; color: {TEXT_COLOR};
                   font-family: '{UI_FONT}', {_UI_FALLBACKS}; font-size: 10pt; }}
@@ -59,6 +52,14 @@ def install_theme(
         QWidget#inspector {{ background: {INSPECTOR_COLOR};
                              border-left: 1px solid {DIVIDER_COLOR}; }}
         QWidget#inspector_content {{ background: {INSPECTOR_COLOR}; }}
+        """
+    )
+
+
+def _control_stylesheet() -> str:
+    """Buttons, text entries and their focus and disabled states."""
+    return (
+        f"""
         QPushButton {{ background: {CONTROL_COLOR}; border: 1px solid {DIVIDER_COLOR};
                        border-radius: 4px; min-height: 40px; padding: 0 12px; }}
         QPushButton:hover {{ border-color: {HOVER_COLOR}; }}
@@ -74,6 +75,21 @@ def install_theme(
             min-height: 32px; padding: 0 8px;
             selection-background-color: {ACCENT_COLOR}; }}
         QComboBox::drop-down {{ border: 0; width: 28px; }}
+        QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {{
+            width: 24px; border: 0; background: transparent;
+            subcontrol-origin: border; subcontrol-position: top right;
+        }}
+        QAbstractSpinBox::up-button {{ height: 16px; top: 0px; }}
+        QAbstractSpinBox::down-button {{ height: 16px; bottom: 0px;
+            subcontrol-position: bottom right; }}
+        """
+    )
+
+
+def _status_stylesheet() -> str:
+    """Status colours, the mono role, tool buttons and scroll areas."""
+    return (
+        f"""
         QLabel#result_canvas[status='stale'] {{ color: {WARNING_COLOR}; }}
         QLabel#result_canvas[status='error'] {{ color: {ERROR_COLOR}; }}
         QLabel#result_canvas[checkerboard='true'] {{
@@ -84,6 +100,7 @@ def install_theme(
         QPushButton[primaryAction='true'] {{ background: {ACCENT_COLOR};
             color: {PRIMARY_ACTION_TEXT_COLOR}; border-color: {ACCENT_COLOR}; }}
         QLabel[secondary='true'] {{ color: {SECONDARY_COLOR}; }}
+        QLabel[heading='true'] {{ font-weight: 600; }}
         QLabel[mono='true'], QAbstractSpinBox[mono='true'], QLineEdit[mono='true'] {{
             font-family: '{MONO_FONT}', {_MONO_FALLBACKS};
         }}
@@ -98,6 +115,28 @@ def install_theme(
         QScrollArea {{ border: 0; background: {INSPECTOR_COLOR}; }}
         """
     )
+
+
+def _stylesheet() -> str:
+    """Return the palette stylesheet applied by :func:`install_theme`.
+
+    Split by role so no single function carries the whole sheet: it grows
+    every time a control needs a rule, and G6 caps what one function may
+    hold.
+    """
+    return _surface_stylesheet() + _control_stylesheet() + _status_stylesheet()
+
+
+def install_theme(
+    application: QApplication, *, runtime_root: Path | None = None
+) -> bool:
+    """Install the approved palette and return whether every bundled font loaded."""
+    loaded = load_packaged_fonts(runtime_root=runtime_root)
+    base_font = QFont(UI_FONT, 10)
+    if not loaded:
+        base_font.setStyleHint(QFont.StyleHint.SansSerif)
+    application.setFont(base_font)
+    application.setStyleSheet(_stylesheet())
     return loaded
 
 

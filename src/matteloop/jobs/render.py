@@ -23,7 +23,6 @@ import importlib
 import os
 import shutil
 import stat
-import tempfile
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
@@ -70,10 +69,17 @@ from matteloop.core.webp import (
     validate_webp,
 )
 from matteloop.jobs.context import JobContext, JobTerminalState
-from matteloop.jobs.encoding import auto_fit_progress, auto_fit_webp
+from matteloop.jobs.encoding import (
+    _map_output_os_error,
+    _output_error,
+    auto_fit_progress,
+    auto_fit_webp,
+)
 from matteloop.jobs.models.cache_fs import BoundDirectoryCloseError, UnsafeCacheError
 from matteloop.jobs.protocol import PROTOCOL_VERSION, SegmentOptions, SegmentRequest
 from matteloop.jobs.source import DecodedFrame, SourceInfo, decode_frame, probe_source
+from matteloop.jobs.transform_stage import framing_plan, stage_encoder_frames
+from matteloop.jobs.transform_store import store_transform
 from matteloop.jobs.workspace import (
     AdvisoryFileLock,
     CutFrame,
@@ -1336,53 +1342,19 @@ class RenderService:
         *,
         rebuilt: bool,
     ) -> RenderArtifact:
-        if request.framing.trim and union is None:
-            raise ValidationError(
-                ErrorCode.INVALID_FRAMING,
-                "framing",
-                "range-wide alpha union contains no visible pixels at this threshold",
-            )
-        plan = FramingPlan(
-            (manifest.width, manifest.height),
-            global_bounds=union if request.framing.trim else None,
-            padding=request.framing.padding,
-            stretch_x=request.framing.stretch_x,
-        )
+        plan = framing_plan((manifest.width, manifest.height), union, request.framing)
         tracker.include_size(plan.output_size)
         scratch = private.path.parent
-        framed_directory = scratch / "framed-inputs"
-        try:
-            framed_directory.mkdir(exist_ok=False)
-        except OSError as error:
-            raise _map_output_os_error(
-                error, "cannot create framed input directory"
-            ) from error
-        framed_paths: list[Path] = []
-        for index in range(manifest.frame_count):
-            context.set_frame_context(
-                index + 1,
-                manifest.frame_count,
-                overall=context.overall_progress,
-            )
-            context.checkpoint("framing")
-            cut = self._workspace.read_cut(private, index, tracker)
-            try:
-                framed = apply_framing(cut, plan)
-                tracker.register(framed)
-            finally:
-                cut.close()
-                del cut
-            try:
-                path = framed_directory / f"frame-{index:06d}.png"
-                _persist_framed_png(path, framed)
-                framed_paths.append(path)
-            finally:
-                framed.close()
-                del framed
-            context.progress(
-                "Framing", index + 1, total=manifest.frame_count,
-                detail=f"Frame {index + 1} of {manifest.frame_count}",
-            )
+        framed_paths, delays = stage_encoder_frames(
+            partial(self._workspace.read_cut, private),
+            manifest.frame_count,
+            plan,
+            request.transform,
+            delays,
+            scratch / "framed-inputs",
+            tracker,
+            context,
+        )
         candidate = self._output_publisher.candidate_path(
             request.output.path, context.job_id, scratch
         )
@@ -1392,7 +1364,7 @@ class RenderService:
         published = False
         publish_error: BaseException | None = None
         try:
-            frame_count = manifest.frame_count
+            frame_count = len(framed_paths)
             overall = context.overall_progress or (0, frame_count)
             stage = "Auto-fit" if request.output.max_bytes is not None else "Encode"
             overall_for_encode = (
@@ -1451,13 +1423,14 @@ class RenderService:
                 None,
                 notes,
             )
+            store_transform(durable, request.transform, notes)
         assert summary is not None
         return RenderArtifact(
             output_path,
             artifact_fingerprint,
             durable,
             manifest,
-            manifest.frame_count,
+            len(framed_paths),
             summary.width,
             summary.height,
             summary.file_size,
@@ -1638,40 +1611,6 @@ def _union_bounds(
         max(current.right, added.right),
         max(current.bottom, added.bottom),
     )
-
-
-def _persist_framed_png(path: Path, image: Image.Image) -> None:
-    temporary: Path | None = None
-    primary: BaseException | None = None
-    try:
-        descriptor, raw = tempfile.mkstemp(
-            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-        )
-        os.close(descriptor)
-        temporary = Path(raw)
-        image.save(temporary, format="PNG")
-        with temporary.open("rb+") as encoded:  # Windows _commit needs write
-            os.fsync(encoded.fileno())
-        os.replace(temporary, path)
-        temporary = None
-    except OSError as error:
-        wrapped = _map_output_os_error(error, "cannot persist framed PNG")
-        primary = wrapped
-        raise wrapped from error
-    except ValueError as error:
-        wrapped = _output_error(f"cannot persist framed PNG: {error}")
-        primary = wrapped
-        raise wrapped from error
-    except BaseException as error:
-        primary = error
-        raise
-    finally:
-        if temporary is not None:
-            try:
-                temporary.unlink()
-            except OSError as error:
-                if primary is not None:
-                    primary.add_note(f"additional framed-PNG cleanup failure: {error}")
 
 
 def _cleanup_stage(
@@ -2903,36 +2842,3 @@ def _is_sha256(value: object) -> bool:
     )
 
 
-def _map_output_os_error(error: OSError, detail: str) -> AppError:
-    if error.errno in {errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)}:
-        suffix = "disk quota or free space exhausted"
-        action = "free-disk-space"
-    elif error.errno in {errno.EACCES, errno.EPERM}:
-        suffix = "output location is not writable"
-        action = "choose-writable-output"
-    elif error.errno == getattr(errno, "EROFS", -1):
-        suffix = "output filesystem is read-only"
-        action = "choose-writable-output"
-    elif error.errno == errno.EEXIST:
-        suffix = "output target already exists"
-        action = "choose-collision-policy"
-    else:
-        suffix = f"{type(error).__name__}: {error}"
-        action = "retry-output"
-    return AppError(
-        ErrorCode.INVALID_OUTPUT,
-        "output",
-        "error.output.failed",
-        f"{detail}: {suffix}",
-        action,
-    )
-
-
-def _output_error(detail: str) -> AppError:
-    return AppError(
-        ErrorCode.INVALID_OUTPUT,
-        "output",
-        "error.output.failed",
-        detail,
-        "retry-output",
-    )

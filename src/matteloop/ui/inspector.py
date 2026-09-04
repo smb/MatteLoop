@@ -61,7 +61,7 @@ from matteloop.ui.compact_widgets import (
     compact_field,
 )
 from matteloop.ui.crop_presentation import CropPresentation
-from matteloop.ui.inspector_disclosure import configure_disclosure
+from matteloop.ui.inspector_disclosure import configure_disclosure, read_bool
 from matteloop.ui.parameter_presentation import (
     ParameterPresentation,
     decimal_from_widget_value,
@@ -69,11 +69,13 @@ from matteloop.ui.parameter_presentation import (
 )
 from matteloop.ui.ports import OutputDirectoryRequested
 from matteloop.ui.source_presentation import format_source_file_size
+from matteloop.ui.transform_group import TransformGroup
 
 _DISCLOSURES = (
     ("segmentation", "Segmentation", True),
     ("time_sampling", "Time & Sampling", True),
     ("crop_cleanup", "Crop & Cleanup", False),
+    ("transform", "Transform", False),
     ("output", "Output", True),
     ("workspace", "Workspace", False),
 )
@@ -141,6 +143,7 @@ class Inspector(QFrame):
         self.manage_workspaces = QPushButton("Manage Workspaces…")
         self.manage_workspaces.setObjectName("manage_workspaces")
         self.manage_workspaces.setAccessibleName("Manage Workspaces…")
+        self.transform_group = TransformGroup(self.command_requested.emit)
         for key, title, default in _DISCLOSURES:
             section = self._section(key, title, default)
             content_layout.addWidget(section)
@@ -592,13 +595,15 @@ class Inspector(QFrame):
         if key == "crop_cleanup":
             body_layout.addWidget(self._cleanup_controls())
             body_layout.addWidget(self._crop_controls())
+        if key == "transform":
+            body_layout.addWidget(self.transform_group)
         if key == "output":
             body_layout.addWidget(self._output_controls())
         if key == "workspace":
             body_layout.addWidget(self.edited_cut_recovery)
             body_layout.addWidget(self.rebuild_button)
             body_layout.addWidget(self.manage_workspaces)
-        checked = self._read_bool(f"inspector/{key}", default)
+        checked = read_bool(self._settings, f"inspector/{key}", default)
         configure_disclosure(button, key, title, checked)
         body.setVisible(checked)
         button.toggled.connect(body.setVisible)
@@ -737,6 +742,8 @@ class Inspector(QFrame):
             self.alpha_threshold_spinbox,
             self.padding_spinbox,
             self.stretch_spinbox,
+            self.disclosures["transform"][0],
+            *self.transform_group.tab_widgets(),
             self.disclosures["output"][0],
             self.output_directory_button,
             self.output_filename_edit,
@@ -767,14 +774,6 @@ class Inspector(QFrame):
         workspace_body.setVisible(workspace_button.isChecked())
         workspace_button.style().unpolish(workspace_button)
         workspace_button.style().polish(workspace_button)
-
-    def show_workspace_attention(self, visible: bool) -> None:
-        """Compatibility wrapper for older callers."""
-        self.set_workspace_state(visible, visible)
-
-    def _read_bool(self, name: str, default: bool) -> bool:
-        value = self._settings.value(name, default)
-        return value if type(value) is bool else default
 
     def _set_provider_options(self, model_id: str) -> None:
         if self._provider_model_id == model_id and self.provider_picker.count():

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
@@ -12,15 +12,20 @@ import matteloop.core.specs as core_specs
 from matteloop.core.errors import ErrorCode, ValidationError
 from matteloop.core.specs import (
     MAX_ALPHA_MATTING_ERODE_SIZE,
+    MAX_FINAL_DIMENSION,
+    MIN_FINAL_DIMENSION,
     AlphaMattingSpec,
     CollisionPolicy,
     CropSpec,
     EdgeMode,
     FramingSpec,
+    MismatchMode,
     OutputSpec,
     RenderRequest,
+    ResizeSpec,
     SamplingSpec,
     SegmentationSpec,
+    TransformSpec,
 )
 
 
@@ -536,3 +541,130 @@ def test_source_validation_combines_duration_crop_and_final_dimensions(
         too_long.validate_for_source(128, 128, Fraction(1))
 
     assert exc.value.code is ErrorCode.INVALID_SAMPLING
+
+
+def test_transform_spec_default_is_identity() -> None:
+    transform = TransformSpec()
+
+    assert transform.is_identity is True
+    assert transform.first_frame == 0
+    assert transform.last_frame is None
+    assert transform.crop is None
+    assert transform.resize is None
+
+
+def test_resize_spec_rejects_both_axes_none() -> None:
+    with pytest.raises(ValidationError) as exc:
+        ResizeSpec()
+
+    assert exc.value.code is ErrorCode.INVALID_TRANSFORM
+
+
+@pytest.mark.parametrize(
+    "width", [MIN_FINAL_DIMENSION - 1, MAX_FINAL_DIMENSION + 1]
+)
+def test_resize_spec_rejects_width_outside_final_dimension_bounds(
+    width: int,
+) -> None:
+    with pytest.raises(ValidationError) as exc:
+        ResizeSpec(width=width, height=None)
+
+    assert exc.value.code is ErrorCode.INVALID_TRANSFORM
+
+
+def test_resize_spec_accepts_a_single_axis_with_the_keep_default() -> None:
+    resize = ResizeSpec(width=256)
+
+    assert resize.height is None
+    assert resize.mismatch is MismatchMode.KEEP
+
+
+def test_transform_spec_validate_for_rejects_last_frame_past_the_stored_count() -> (
+    None
+):
+    transform = TransformSpec(first_frame=0, last_frame=9)
+
+    with pytest.raises(ValidationError) as exc:
+        transform.validate_for(8, (128, 128))
+
+    assert exc.value.code is ErrorCode.INVALID_TRANSFORM
+    assert "9" in exc.value.technical_detail
+    assert "7" in exc.value.technical_detail
+
+
+def test_transform_spec_validate_for_rejects_a_crop_outside_the_framed_size() -> None:
+    transform = TransformSpec(crop=CropSpec(x=0, y=0, width=200, height=200))
+
+    with pytest.raises(ValidationError) as exc:
+        transform.validate_for(4, (128, 128))
+
+    assert exc.value.code is ErrorCode.INVALID_TRANSFORM
+
+
+def test_transform_spec_validate_for_returns_the_final_canvas_size() -> None:
+    transform = TransformSpec(crop=CropSpec(x=0, y=0, width=150, height=128))
+
+    assert transform.validate_for(4, (256, 128)) == (150, 128)
+
+
+def test_transform_spec_validate_for_rejects_a_derived_height_too_small() -> None:
+    transform = TransformSpec(resize=ResizeSpec(width=128, height=None))
+
+    with pytest.raises(ValidationError) as exc:
+        transform.validate_for(4, (512, 128))
+
+    assert exc.value.code is ErrorCode.INVALID_TRANSFORM
+    assert "128" in exc.value.technical_detail
+    assert "32" in exc.value.technical_detail
+
+
+def test_transform_spec_validate_for_rejects_a_derived_width_too_small() -> None:
+    transform = TransformSpec(resize=ResizeSpec(width=None, height=128))
+
+    with pytest.raises(ValidationError) as exc:
+        transform.validate_for(4, (128, 512))
+
+    assert exc.value.code is ErrorCode.INVALID_TRANSFORM
+    assert "128" in exc.value.technical_detail
+    assert "32" in exc.value.technical_detail
+
+
+def test_transform_spec_validate_for_rejects_a_crop_only_final_canvas_too_small() -> (
+    None
+):
+    """Bounds apply to the final canvas, not just the crop rectangle in isolation."""
+    transform = TransformSpec(crop=CropSpec(x=0, y=0, width=100, height=100))
+
+    with pytest.raises(ValidationError) as exc:
+        transform.validate_for(4, (256, 256))
+
+    assert exc.value.code is ErrorCode.INVALID_TRANSFORM
+    assert "128" in exc.value.technical_detail
+
+
+def test_transform_spec_validate_for_accepts_a_keep_resize_limited_by_short_axis() -> (
+    None
+):
+    transform = TransformSpec(
+        resize=ResizeSpec(width=256, height=128, mismatch=MismatchMode.KEEP)
+    )
+
+    assert transform.validate_for(4, (256, 256)) == (128, 128)
+
+
+def test_render_request_default_transform_is_identity(tmp_path: Path) -> None:
+    request = valid_render_request(tmp_path)
+
+    assert request.transform == TransformSpec()
+
+
+def test_render_request_replace_validates_a_new_transform(tmp_path: Path) -> None:
+    request = valid_render_request(tmp_path)
+
+    updated = replace(request, transform=TransformSpec(first_frame=2, last_frame=5))
+    assert updated.transform.first_frame == 2
+
+    with pytest.raises(ValidationError) as exc:
+        replace(request, transform=TransformSpec(first_frame=5, last_frame=2))
+
+    assert exc.value.code is ErrorCode.INVALID_TRANSFORM

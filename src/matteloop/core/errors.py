@@ -13,6 +13,7 @@ class ErrorCode(StrEnum):
     INVALID_CROP = "invalid_crop"
     INVALID_SEGMENTATION = "invalid_segmentation"
     INVALID_FRAMING = "invalid_framing"
+    INVALID_TRANSFORM = "invalid_transform"
     INVALID_OUTPUT = "invalid_output"
     INVALID_RENDER_REQUEST = "invalid_render_request"
     INVALID_FINAL_DIMENSIONS = "invalid_final_dimensions"

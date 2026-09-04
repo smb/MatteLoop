@@ -111,6 +111,7 @@ def request_for_workspace(
         framing=base.framing,
         output=base.output,
         rebuild=True,
+        transform=base.transform,
     )
 
 

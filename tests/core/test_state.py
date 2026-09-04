@@ -4,6 +4,8 @@ from dataclasses import FrozenInstanceError, dataclass
 
 import pytest
 
+from matteloop.core.parameters import TransformChanged
+from matteloop.core.specs import CropSpec, TransformSpec
 from matteloop.core.state import (
     AppState,
     ArtifactResult,
@@ -827,3 +829,24 @@ def test_state_and_nested_job_are_immutable() -> None:
         state.source = SourceState.EMPTY  # type: ignore[misc]
     with pytest.raises(FrozenInstanceError):
         state.job.stage = "Encode"  # type: ignore[misc]
+
+
+def test_loading_a_new_source_resets_the_transform_but_keeps_other_parameters() -> None:
+    non_identity_transform = TransformSpec(
+        first_frame=2, last_frame=5, crop=CropSpec(0, 0, 64, 64)
+    )
+    with_transform = reduce(
+        ready_state(), TransformChanged(non_identity_transform)
+    )
+    assert with_transform.parameters.transform == non_identity_transform
+
+    loading_next_source = reduce(
+        with_transform,
+        SourceLoadRequested(source_id="replacement", request_id="load-2"),
+    )
+
+    assert loading_next_source.parameters.transform == TransformSpec()
+    assert loading_next_source.parameters.fps == with_transform.parameters.fps
+    assert loading_next_source.parameters.model_id == with_transform.parameters.model_id
+    assert loading_next_source.parameters.trim == with_transform.parameters.trim
+    assert loading_next_source.parameters.padding == with_transform.parameters.padding

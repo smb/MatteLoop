@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import QSizePolicy, QToolButton
+
+
+def read_bool(settings: QSettings, name: str, default: bool) -> bool:
+    """Read a settings value expected to be an exact bool, degrading to default."""
+    value = settings.value(name, default)
+    return value if type(value) is bool else default
 
 
 def configure_disclosure(
