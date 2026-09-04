@@ -576,6 +576,7 @@ def test_actual_tab_order_skips_hidden_widgets_and_reaches_success_actions(
         value.manage_models_button,
         value.inspector.disclosures["time_sampling"][0],
         value.inspector.disclosures["crop_cleanup"][0],
+        value.inspector.disclosures["transform"][0],
         value.inspector.disclosures["output"][0],
         value.inspector.disclosures["workspace"][0],
         value.edited_cut_recovery,

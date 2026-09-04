@@ -82,6 +82,7 @@ def test_inspector_disclosure_titles_preserve_literal_ampersands(qtbot) -> None:
         ("segmentation", "Segmentation", True),
         ("time_sampling", "Time & Sampling", True),
         ("crop_cleanup", "Crop & Cleanup", False),
+        ("transform", "Transform", False),
         ("output", "Output", True),
         ("workspace", "Workspace", False),
     ],
@@ -109,6 +110,34 @@ def test_inspector_disclosures_show_visual_and_spoken_state(
     )
     assert button.accessibleDescription() == (
         f"{title}: {'collapsed' if expanded else 'expanded'}"
+    )
+
+
+def test_transform_group_is_mounted_inside_its_disclosure_body(qtbot) -> None:
+    inspector = Inspector(_settings())
+    qtbot.addWidget(inspector)
+
+    _button, body = inspector.disclosures["transform"]
+
+    assert inspector.transform_group.parentWidget() is body
+
+
+def test_tab_widgets_include_the_transform_disclosure_and_group_in_order(
+    qtbot,
+) -> None:
+    inspector = Inspector(_settings())
+    qtbot.addWidget(inspector)
+
+    widgets = inspector.tab_widgets()
+    transform_button = inspector.disclosures["transform"][0]
+    crop_index = widgets.index(inspector.disclosures["crop_cleanup"][0])
+    transform_index = widgets.index(transform_button)
+    output_index = widgets.index(inspector.disclosures["output"][0])
+
+    assert crop_index < transform_index < output_index
+    group_widgets = inspector.transform_group.tab_widgets()
+    assert widgets[transform_index + 1 : transform_index + 1 + len(group_widgets)] == (
+        group_widgets
     )
 
 
