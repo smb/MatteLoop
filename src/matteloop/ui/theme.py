@@ -74,6 +74,13 @@ def install_theme(
             min-height: 32px; padding: 0 8px;
             selection-background-color: {ACCENT_COLOR}; }}
         QComboBox::drop-down {{ border: 0; width: 28px; }}
+        QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {{
+            width: 24px; border: 0; background: transparent;
+            subcontrol-origin: border; subcontrol-position: top right;
+        }}
+        QAbstractSpinBox::up-button {{ height: 16px; top: 0px; }}
+        QAbstractSpinBox::down-button {{ height: 16px; bottom: 0px;
+            subcontrol-position: bottom right; }}
         QLabel#result_canvas[status='stale'] {{ color: {WARNING_COLOR}; }}
         QLabel#result_canvas[status='error'] {{ color: {ERROR_COLOR}; }}
         QLabel#result_canvas[checkerboard='true'] {{

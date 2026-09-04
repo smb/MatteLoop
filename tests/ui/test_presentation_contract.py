@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QSettings
+from PySide6.QtWidgets import QApplication, QSpinBox, QStyle, QStyleOptionSpinBox
 
 from matteloop.core.crop_state import CropChanged, CropToggleChanged, ResetCrop
 from matteloop.core.errors import AppError, ErrorCode
@@ -32,7 +33,7 @@ from matteloop.core.state import (
 from matteloop.ui.crop_presentation import CropPresentation
 from matteloop.ui.inspector import Inspector
 from matteloop.ui.presenter import present
-from matteloop.ui.theme import load_packaged_fonts
+from matteloop.ui.theme import install_theme, load_packaged_fonts
 
 _SOURCE_ERROR_CASES = [
     (ErrorCode.SOURCE_NOT_LOCAL, "Open a video stored on this Mac."),
@@ -188,6 +189,46 @@ def test_missing_packaged_fonts_fall_back_honestly(tmp_path: Path) -> None:
     (tmp_path / "resources").mkdir()
     (tmp_path / "resources" / "model-manifest.json").write_text("{}", encoding="utf-8")
     assert not load_packaged_fonts(runtime_root=tmp_path)
+
+
+def test_spinbox_arrow_buttons_meet_minimum_target_size(qtbot) -> None:
+    application = QApplication.instance()
+    assert application is not None
+    original_style_sheet = application.styleSheet()
+    original_font = application.font()
+    try:
+        install_theme(application)
+        spinbox = QSpinBox()
+        qtbot.addWidget(spinbox)
+        spinbox.resize(280, 32)
+        spinbox.show()
+
+        option = QStyleOptionSpinBox()
+        spinbox.initStyleOption(option)
+        style = spinbox.style()
+        up_rect = style.subControlRect(
+            QStyle.ComplexControl.CC_SpinBox,
+            option,
+            QStyle.SubControl.SC_SpinBoxUp,
+            spinbox,
+        )
+        down_rect = style.subControlRect(
+            QStyle.ComplexControl.CC_SpinBox,
+            option,
+            QStyle.SubControl.SC_SpinBoxDown,
+            spinbox,
+        )
+
+        # WCAG's minimum target size is 24x24; the arrows are a stacked pair
+        # splitting the control's height, so 24px wide is the achievable bar.
+        assert up_rect.width() >= 24
+        assert down_rect.width() >= 24
+        assert up_rect.height() + down_rect.height() >= 24
+        assert up_rect.x() + up_rect.width() <= spinbox.width()
+        assert down_rect.x() + down_rect.width() <= spinbox.width()
+    finally:
+        application.setStyleSheet(original_style_sheet)
+        application.setFont(original_font)
 
 
 def test_inspector_uses_defaults_for_malformed_disclosure_settings(qtbot) -> None:
