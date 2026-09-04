@@ -77,12 +77,14 @@ class CutSession:
     fps: int
 
 
-class _CutFactsWorker(QObject):
-    """Recompute one ``CutFacts`` off the GUI thread (facts can decode frames).
+class _CutFactsCancelled(Exception):
+    """Unwinds ``_iter_stored_frames`` once cancelled."""
 
-    Also resolves the ``FramingPlan`` behind that ``CutFacts.framed_size`` --
-    the player's frame loader needs the whole plan (task C2), not just its
-    output size, to call ``apply_framing`` per stored frame.
+
+class _CutFactsWorker(QObject):
+    """Recompute one ``CutFacts`` off the GUI thread; also resolves the
+    ``FramingPlan`` the player's frame loader needs (task C2) to call
+    ``apply_framing`` per stored frame.
     """
 
     succeeded = Signal(object, object, int)
@@ -90,24 +92,24 @@ class _CutFactsWorker(QObject):
     finished = Signal()
 
     def __init__(
-        self,
-        session: CutSession,
-        framing: FramingSpec,
-        frame_reader: FrameReader,
-        generation: int,
+        self, session: CutSession, framing: FramingSpec, frame_reader: FrameReader,
+        generation: int, cancelled: Callable[[], bool] = lambda: False,
     ) -> None:
         super().__init__()
         self._session = session
         self._framing = framing
         self._frame_reader = frame_reader
         self._generation = generation
+        self._cancelled = cancelled
 
     @Slot()
     def run(self) -> None:
         try:
             facts, plan = _compute_facts(
-                self._session, self._framing, self._frame_reader
+                self._session, self._framing, self._frame_reader, self._cancelled
             )
+        except _CutFactsCancelled:
+            pass
         except Exception:
             self.failed.emit(self._generation)
         else:
@@ -144,6 +146,7 @@ class TransformStageController(QObject):
         self._current_generation = 0
         self._thread: QThread | None = None
         self._worker: _CutFactsWorker | None = None
+        self._facts_cancel_event: threading.Event | None = None
         self._framing = _framing_from_parameters(store.state.parameters)
         self._last_transform: TransformSpec = store.state.parameters.transform
         self._player_frames: PlayerFrames | None = None
@@ -227,7 +230,7 @@ class TransformStageController(QObject):
         # would otherwise clear _frame_thread and leave nothing here to join.
         self._cancel_frame_load(wait=True)
         self.close_session()
-        self._join_worker()
+        self._join_worker(wait=True)
 
     @property
     def session(self) -> CutSession | None:
@@ -336,7 +339,10 @@ class TransformStageController(QObject):
         self._join_worker()
         generation = next(self._generations)
         self._current_generation = generation
-        worker = _CutFactsWorker(session, self._framing, self._frame_reader, generation)
+        cancel = self._facts_cancel_event = threading.Event()
+        worker = _CutFactsWorker(
+            session, self._framing, self._frame_reader, generation, cancel.is_set
+        )
         thread = QThread(self)
         worker.moveToThread(thread)
         worker.succeeded.connect(self._facts_ready)
@@ -398,7 +404,10 @@ class TransformStageController(QObject):
         self.facts_changed.emit(facts)
         self._sync_player_frames(immediate=True)
 
-    def _join_worker(self) -> None:
+    def _join_worker(self, *, wait: bool = False) -> None:
+        if self._facts_cancel_event is not None:
+            self._facts_cancel_event.set()
+            self._facts_cancel_event = None
         thread = self._thread
         self._thread = None
         self._worker = None
@@ -406,7 +415,8 @@ class TransformStageController(QObject):
             return
         try:
             thread.quit()
-            thread.wait(5000)
+            if wait:
+                thread.wait(5000)
         except RuntimeError:
             pass
 
@@ -539,11 +549,13 @@ def _fps_from_manifest(manifest: CutManifest) -> int:
 
 
 def _compute_facts(
-    session: CutSession, framing: FramingSpec, frame_reader: FrameReader
+    session: CutSession, framing: FramingSpec, frame_reader: FrameReader,
+    cancelled: Callable[[], bool] = lambda: False,
 ) -> tuple[CutFacts, FramingPlan]:
     manifest = session.manifest
     source_size = (manifest.width, manifest.height)
-    union = _resolve_union(session, framing, frame_reader) if framing.trim else None
+    trim = framing.trim
+    union = _resolve_union(session, framing, frame_reader, cancelled) if trim else None
     plan = framing_plan(source_size, union, framing)
     delays = webp_delays(manifest.frame_count, session.fps)
     facts = CutFacts(
@@ -557,7 +569,8 @@ def _compute_facts(
 
 
 def _resolve_union(
-    session: CutSession, framing: FramingSpec, frame_reader: FrameReader
+    session: CutSession, framing: FramingSpec, frame_reader: FrameReader,
+    cancelled: Callable[[], bool] = lambda: False,
 ) -> PixelBounds:
     metadata = session.manifest.union_metadata
     if metadata is not None:
@@ -569,14 +582,17 @@ def _resolve_union(
             left, top, right, bottom = metadata.bounds
             return PixelBounds(left, top, right, bottom)
     return union_alpha_bounds(
-        _iter_stored_frames(session, frame_reader), framing.alpha_threshold
+        _iter_stored_frames(session, frame_reader, cancelled), framing.alpha_threshold
     )
 
 
 def _iter_stored_frames(
-    session: CutSession, frame_reader: FrameReader
+    session: CutSession, frame_reader: FrameReader,
+    cancelled: Callable[[], bool] = lambda: False,
 ) -> Iterator[Image.Image]:
     for frame in session.manifest.frames:
+        if cancelled():
+            raise _CutFactsCancelled
         image = frame_reader.read(session.workspace, frame)
         try:
             yield image

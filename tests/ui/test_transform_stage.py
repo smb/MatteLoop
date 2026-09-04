@@ -6,13 +6,20 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 
+from PIL import Image
 from PySide6.QtCore import Qt
 
 from matteloop.core.crop_state import CropChanged
-from matteloop.core.parameters import PaddingChanged, TransformChanged
+from matteloop.core.parameters import (
+    AlphaThresholdChanged,
+    GlobalTrimChanged,
+    PaddingChanged,
+    TransformChanged,
+)
 from matteloop.core.specs import CropSpec, FramingSpec, TransformSpec
 from matteloop.core.state import (
     AppState,
@@ -204,6 +211,86 @@ def test_shutdown_joins_the_facts_worker_and_clears_the_session(
     assert controller.session is None
     assert controller.facts is None
     assert controller._thread is None  # noqa: SLF001
+
+
+class _StallFirstReadReader:
+    """Read the first stored frame normally but hold it open until told to
+    proceed -- this is what proves the facts worker is genuinely mid-decode,
+    not merely fast, by the time ``shutdown()`` lands on it.
+    """
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.calls = 0
+        self._inner = _DirectFrameReader()
+
+    def read(self, workspace: CutWorkspace, frame: CutFrame) -> Image.Image:
+        self.calls += 1
+        if self.calls == 1:
+            self.started.set()
+            self.release.wait(5)
+        return self._inner.read(workspace, frame)
+
+
+def test_shutdown_cancels_a_live_facts_computation_instead_of_waiting_for_it(
+    tmp_path, qtbot
+) -> None:
+    """Regression pin for CI run 33856558458 (job "test (ui)", segfault, exit
+    139, reproduced 3/3 on macOS): ``open_artifact`` sets ``self._session``
+    synchronously and only schedules the facts worker afterwards, so a
+    ``qtbot.waitUntil(lambda: controller.session is not None)`` in the caller
+    can return while the worker is still decoding frames for the trim union.
+    ``QThread.quit()`` cannot interrupt a running slot, so before this fix
+    ``shutdown()`` waited out the *whole* decode; on Linux/offscreen CI the
+    worker thread segfaulted mid-decode instead of finishing it.
+
+    This can only pin the *behaviour* -- that a cancelled worker stops
+    between frames and delivers no facts -- not the segfault itself: it does
+    not reproduce on Windows, so this test cannot prove or disprove it. CI is
+    the only real verifier of the crash fix.
+
+    Deterministic rather than timing-dependent: the reader blocks the first
+    read on a real ``threading.Event`` and only releases it once the
+    controller's cancel token is observed set, so the assertions depend on
+    that ordering, not on wall-clock guesses.
+    """
+    artifact = _seed_cut(tmp_path, "seed-facts-cancel")
+    assert artifact.manifest.frame_count >= 2, "need a frame that must never decode"
+
+    store = ReducerStore(_ready_state(tmp_path / "source.mp4"))
+    reader = _StallFirstReadReader()
+    controller = TransformStageController(store, frame_reader=reader)
+    store.dispatch(GlobalTrimChanged(True))
+    # A mismatched threshold: the render's cached union metadata must be
+    # skipped so _resolve_union actually decodes the stored frames.
+    store.dispatch(AlphaThresholdChanged(Decimal("50")))
+
+    controller.open_artifact(artifact)
+    assert reader.started.wait(5), "the facts worker never reached the first frame"
+    cancel_event = controller._facts_cancel_event  # noqa: SLF001
+    assert cancel_event is not None
+    worker = controller._worker  # noqa: SLF001
+    assert worker is not None
+    outcomes: list[str] = []
+    worker.succeeded.connect(lambda *_a: outcomes.append("succeeded"))
+    worker.failed.connect(lambda *_a: outcomes.append("failed"))
+
+    def _release_once_cancelled() -> None:
+        cancel_event.wait(5)
+        reader.release.set()
+
+    releaser = threading.Thread(target=_release_once_cancelled)
+    releaser.start()
+
+    controller.shutdown()
+    releaser.join(timeout=5)
+
+    assert not releaser.is_alive(), "the releaser thread must not hang"
+    assert reader.calls == 1, "must not decode the second frame once cancelled"
+    qtbot.wait(50)  # pump the event loop so a queued signal would land here
+    assert outcomes == [], "a cancelled worker must not report succeeded or failed"
+    assert controller.facts is None
 
 
 def test_attach_wires_the_canvas_command_requested_to_the_store(qtbot) -> None:
