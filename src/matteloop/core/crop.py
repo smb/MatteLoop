@@ -131,7 +131,9 @@ def fit_crop_aspect(
     elif target in _CORNER_HANDLES:
         fitted = _fit_corner(crop, ratio, target)
     elif target in _EDGE_HANDLES:
-        fitted = _fit_edge(crop, ratio, target)
+        fitted = _fit_edge(
+            crop, ratio, target, source_width=source_width, source_height=source_height
+        )
     else:
         raise ValueError("unknown crop interaction target")
     return clamp_crop(fitted, source_width, source_height)
@@ -166,15 +168,35 @@ def _fit_corner(crop: CropSpec, ratio: Fraction, target: str) -> CropSpec:
     return CropSpec(x, y, new_width, new_height)
 
 
-def _fit_edge(crop: CropSpec, ratio: Fraction, target: str) -> CropSpec:
+def _fit_edge(
+    crop: CropSpec,
+    ratio: Fraction,
+    target: str,
+    *,
+    source_width: int,
+    source_height: int,
+) -> CropSpec:
     width, height = crop.width, crop.height
     if target in {"east", "west"}:
-        new_height = max(1, _rhu(Fraction(width) / ratio))
-        y = crop.y + _rhu(Fraction(height - new_height, 2))
+        new_height = max(1, min(source_height, _rhu(Fraction(width) / ratio)))
+        y = _bounded_centered_origin(crop.y, height, new_height, source_height)
         return CropSpec(crop.x, y, width, new_height)
-    new_width = max(1, _rhu(Fraction(height) * ratio))
-    x = crop.x + _rhu(Fraction(width - new_width, 2))
+    new_width = max(1, min(source_width, _rhu(Fraction(height) * ratio)))
+    x = _bounded_centered_origin(crop.x, width, new_width, source_width)
     return CropSpec(x, crop.y, new_width, height)
+
+
+def _bounded_centered_origin(
+    origin: int, old_size: int, new_size: int, extent: int
+) -> int:
+    """Re-centre a resized edge on its old midpoint, clamped inside *extent*.
+
+    Growing the perpendicular axis around the centre can otherwise place the
+    new origin outside [0, extent - new_size] and CropSpec would reject it
+    before `fit_crop_aspect`'s later clamp_crop ever runs.
+    """
+    proposed = origin + _rhu(Fraction(old_size - new_size, 2))
+    return min(max(proposed, 0), max(0, extent - new_size))
 
 
 def _validate_ratio(ratio: Fraction) -> None:

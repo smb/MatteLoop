@@ -124,6 +124,25 @@ def test_fit_crop_aspect_on_an_edge_recentres_the_perpendicular_axis() -> None:
     assert fitted.width == 3 * fitted.height
 
 
+def test_fit_crop_aspect_on_an_edge_at_the_top_clamps_instead_of_raising() -> None:
+    # Growing the width of a crop pinned to the top edge (y=0) demands a much
+    # taller box under this ratio; naive centring would push y negative and
+    # CropSpec's own validation would raise before clamp_crop ever runs.
+    fitted = fit_crop_aspect(
+        CropSpec(0, 0, 6, 5),
+        Fraction(1, 2),
+        "east",
+        source_width=20,
+        source_height=20,
+    )
+
+    assert fitted.x >= 0
+    assert fitted.y >= 0
+    assert fitted.x + fitted.width <= 20
+    assert fitted.y + fitted.height <= 20
+    assert fitted.width == 6
+
+
 def test_fit_crop_aspect_leaves_a_body_move_unchanged() -> None:
     crop = CropSpec(2, 3, 6, 5)
 
