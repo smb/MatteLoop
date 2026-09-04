@@ -21,15 +21,17 @@ from matteloop.core.parameters import (
     PaddingChanged,
     ParameterState,
     StretchChanged,
+    TransformChanged,
     parameters_from_values,
 )
-from matteloop.core.specs import EdgeMode
+from matteloop.core.specs import EdgeMode, TransformSpec
 from matteloop.core.state import (
     AppState,
     PreviewRequested,
     PreviewResult,
     PreviewState,
     PreviewSucceeded,
+    RenderRequested,
     SourceLoaded,
     SourceLoadRequested,
     reduce,
@@ -172,6 +174,43 @@ def test_invalid_parameter_events_leave_reducer_state_unchanged() -> None:
         OutputMaxSizeChanged(Decimal("-1")),
     ):
         assert reduce(state, event) is state
+
+
+def test_transform_changed_replaces_transform_without_invalidating_preview() -> None:
+    state = _current()
+    transform = TransformSpec(first_frame=1, last_frame=3)
+
+    changed = reduce(state, TransformChanged(transform))
+
+    assert changed.parameters.transform == transform
+    assert changed.preview is PreviewState.CURRENT
+    assert changed.stale_category is None
+
+
+def test_transform_changed_is_ignored_when_the_value_is_unchanged() -> None:
+    state = _current()
+
+    assert reduce(state, TransformChanged(TransformSpec())) is state
+
+
+def test_transform_changed_is_ignored_while_a_job_runs() -> None:
+    running = reduce(_ready(), RenderRequested("job", "req"))
+
+    assert running.job.phase.value != "idle"
+    assert (
+        reduce(running, TransformChanged(TransformSpec(first_frame=2))) is running
+    )
+
+
+def test_parameter_state_default_transform_is_identity() -> None:
+    assert ParameterState().transform == TransformSpec()
+    assert ParameterState().transform.is_identity
+
+
+def test_parameters_from_values_yields_an_identity_transform() -> None:
+    parameters = parameters_from_values({"fps": "60"})
+
+    assert parameters.transform == TransformSpec()
 
 
 def test_invalid_saved_values_fall_back_independently() -> None:

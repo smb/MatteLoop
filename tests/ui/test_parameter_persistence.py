@@ -11,7 +11,7 @@ from matteloop.core.execution_providers import (
     ProviderOption,
 )
 from matteloop.core.parameters import OutputFilenameChanged, ParameterState
-from matteloop.core.specs import EdgeMode
+from matteloop.core.specs import CropSpec, EdgeMode, TransformSpec
 from matteloop.core.state import AppState, SourceState
 from matteloop.ui.controller import SourceController
 from matteloop.ui.preferences import load_parameters, persist_parameters
@@ -55,6 +55,18 @@ def test_parameter_preferences_round_trip_as_qsettings_primitives() -> None:
     )
 
     assert actual == expected
+
+
+def test_persist_parameters_writes_no_transform_key() -> None:
+    settings = _settings()
+    non_identity = ParameterState(
+        transform=TransformSpec(first_frame=1, crop=CropSpec(0, 0, 4, 4))
+    )
+
+    persist_parameters(settings, non_identity)
+
+    assert settings.value("parameters/transform") is None
+    assert "transform" not in settings.allKeys()
 
 
 def test_unavailable_saved_provider_falls_back_to_the_available_cpu_choice() -> None:

@@ -143,6 +143,11 @@ class OutputMaxSizeChanged:
     value: Decimal
 
 
+@dataclass(frozen=True, slots=True)
+class TransformChanged:
+    transform: TransformSpec
+
+
 ParameterEvent = (
     ModelChanged
     | EdgeModeChanged
@@ -155,6 +160,7 @@ ParameterEvent = (
     | OutputDirectoryChanged
     | OutputFilenameChanged
     | OutputMaxSizeChanged
+    | TransformChanged
 )
 
 
@@ -186,6 +192,8 @@ def reduce_parameters(state: AppState, event: ParameterEvent) -> AppState:
         return _reduce_output_filename(state, event)
     if isinstance(event, OutputMaxSizeChanged):
         return _reduce_output_max_size(state, event)
+    if isinstance(event, TransformChanged):
+        return _reduce_transform(state, event)
     return state
 
 
@@ -318,6 +326,18 @@ def _reduce_output_max_size(
     if updated == state.parameters:
         return state
     return replace(state, parameters=updated)
+
+
+def _reduce_transform(state: AppState, event: TransformChanged) -> AppState:
+    """Replace the transform in place; a transform never stales the preview."""
+    if (
+        not isinstance(event.transform, TransformSpec)
+        or event.transform == state.parameters.transform
+    ):
+        return state
+    return replace(
+        state, parameters=replace(state.parameters, transform=event.transform)
+    )
 
 
 def _invalidate(
