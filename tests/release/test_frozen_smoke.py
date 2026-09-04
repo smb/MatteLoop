@@ -82,12 +82,15 @@ def test_native_smoke_resolves_every_v1_session_class_without_weights(
     catalog = ModelCatalog.load_resource()
     classes = load_rembg_session_classes()
     for model_id in V1_MODEL_IDS:
-        assert _resolve_rembg_session_class(
-            model_id,
-            classes,
-            catalog.rembg_version,
-            catalog.rembg_version,
-        ) is not None
+        assert (
+            _resolve_rembg_session_class(
+                model_id,
+                classes,
+                catalog.rembg_version,
+                catalog.rembg_version,
+            )
+            is not None
+        )
 
 
 def test_smoke_result_contract_is_typed_and_immutable() -> None:
@@ -554,23 +557,18 @@ def test_native_bundle_includes_project_license_notices() -> None:
     assert "--include-data-files=legal/GPL-3.0.txt=GPL-3.0.txt" in args
     assert "--include-data-files=legal/LGPL-3.0.txt=LGPL-3.0.txt" in args
     assert (
-        "--include-data-files=legal/QT-PYSIDE-LGPL-NOTICE.md="
-        "QT-PYSIDE-LGPL-NOTICE.md"
+        "--include-data-files=legal/QT-PYSIDE-LGPL-NOTICE.md=QT-PYSIDE-LGPL-NOTICE.md"
     ) in args
     assert "--include-data-files=legal/RELINK.md=RELINK.md" in args
 
 
 def test_distributed_legal_files_preserve_the_measured_macos_floor() -> None:
     relink = (REPOSITORY_ROOT / "legal" / "RELINK.md").read_text(encoding="utf-8")
-    notices = (REPOSITORY_ROOT / "THIRD_PARTY_NOTICES.md").read_text(
-        encoding="utf-8"
-    )
+    notices = (REPOSITORY_ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
 
     for document in (" ".join(relink.split()), " ".join(notices.split())):
         assert "complete app requires macOS 15" in document
-        assert (
-            "custom media FFmpeg/libwebp dylibs retain a 13.0 minimum" in document
-        )
+        assert "custom media FFmpeg/libwebp dylibs retain a 13.0 minimum" in document
         assert "not been launched on an actual macOS 15 host" in document
         assert "delivered app targets macOS 13.0" not in document
         assert "actual macOS 13 host" not in document
@@ -904,3 +902,45 @@ def test_release_packaging_keeps_lgpl_sources_out_of_the_application_zip(
     ).stdout.split()
     assert "MatteLoop.dist/matteloop.exe" in archived
     assert not [name for name in archived if "sources" in name]
+
+
+def test_every_workflow_shell_script_parses() -> None:
+    """A `run:` block that cannot be parsed fails its step on every platform.
+
+    bash reads the whole script before it runs a line, so an unterminated
+    quote in a branch that only Windows takes still kills the step on macOS.
+    That shipped once: the compile-cache report lost the closing quote of a
+    command substitution, every native build failed after producing its
+    bundle, and the artifact upload was skipped.
+    """
+    workflows = sorted((REPOSITORY_ROOT / ".github" / "workflows").glob("*.yml"))
+    assert workflows, "no workflows found"
+    checked_any = False
+    for path in workflows:
+        try:
+            workflow = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            # Only release.yml is written as JSON, which YAML accepts. The
+            # others need a YAML parser this project does not depend on.
+            continue
+        checked_any = True
+        for job_name, job in workflow["jobs"].items():
+            for index, step in enumerate(job.get("steps", [])):
+                script = step.get("run")
+                if script is None:
+                    continue
+                shell = step.get("shell", "bash")
+                if shell not in {"bash", "sh"}:
+                    continue
+                checked = subprocess.run(
+                    [shell, "-n"],
+                    input=script,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                assert checked.returncode == 0, (
+                    f"{path.name} {job_name} step {index} "
+                    f"({step.get('name', 'unnamed')}): {checked.stderr.strip()}"
+                )
+    assert checked_any, "no JSON-shaped workflow was checked"

@@ -127,7 +127,7 @@
           "name": "Report compile cache statistics",
           "if": "always()",
           "shell": "bash",
-          "run": "set +e\nif [ \"$RUNNER_OS\" = \"Windows\" ]; then\n  nuitka_cache=\"$HOME/AppData/Local/Nuitka/Nuitka/Cache\"\nelif [ \"$RUNNER_OS\" = \"macOS\" ]; then\n  nuitka_cache=\"$HOME/Library/Caches/Nuitka\"\nelse\n  nuitka_cache=\"$HOME/.cache/Nuitka\"\nfi\necho \"Nuitka cache: $nuitka_cache\"\ndu -sh \"$nuitka_cache\" 2>/dev/null || true\nif [ \"$RUNNER_OS\" = \"Windows\" ]; then\n  ccache_bin=\"$(find \"$nuitka_cache\" -type f -iname 'ccache.exe' -print -quit 2>/dev/null || true)\n  if [ -n \"$ccache_bin\" ]; then\n    \"$ccache_bin\" -s || true\n  else\n    echo \"ccache not found\"\n  fi\nelif command -v ccache >/dev/null; then\n  ccache -s || true\nelse\n  echo \"ccache not found\"\nfi\ntrue"
+          "run": "set +e\nif [ \"$RUNNER_OS\" = \"Windows\" ]; then\n  nuitka_cache=\"$HOME/AppData/Local/Nuitka/Nuitka/Cache\"\nelif [ \"$RUNNER_OS\" = \"macOS\" ]; then\n  nuitka_cache=\"$HOME/Library/Caches/Nuitka\"\nelse\n  nuitka_cache=\"$HOME/.cache/Nuitka\"\nfi\necho \"Nuitka cache: $nuitka_cache\"\ndu -sh \"$nuitka_cache\" 2>/dev/null || true\nif [ \"$RUNNER_OS\" = \"Windows\" ]; then\n  ccache_bin=\"$(find \"$nuitka_cache\" -type f -iname 'ccache.exe' -print -quit 2>/dev/null || true)\"\n  if [ -n \"$ccache_bin\" ]; then\n    \"$ccache_bin\" -s || true\n  else\n    echo \"ccache not found\"\n  fi\nelif command -v ccache >/dev/null; then\n  ccache -s || true\nelse\n  echo \"ccache not found\"\nfi\ntrue"
         },
         {
           "name": "Save media build stack cache",
