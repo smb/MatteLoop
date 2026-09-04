@@ -174,6 +174,8 @@ class TransformStageController(QObject):
         group.aspect_lock_changed.connect(self._aspect_lock_changed)
         if canvas is not None:
             canvas.command_requested.connect(self._store.dispatch)
+        if self._player_canvas is not None:
+            self._player_canvas.playhead_changed.connect(group.set_playhead_frame)
         group.set_cut(self._facts)
         self._sync_player_frames(immediate=True)
 

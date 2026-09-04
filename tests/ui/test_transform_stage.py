@@ -359,3 +359,20 @@ def test_crop_edits_are_debounced_and_reuse_the_framed_cache(tmp_path, qtbot) ->
         first_key[4],
     ), "the framed cache's identity (cache_key, framing, display size) is unchanged"
     controller.shutdown()
+
+
+def test_attach_wires_the_players_playhead_to_the_groups_use_playhead_buttons(
+    qtbot,
+) -> None:
+    store = _FakeStore(AppState())
+    controller = TransformStageController(store)
+    canvas = ResultPlayerCanvas()
+    qtbot.addWidget(canvas)
+    group = TransformGroup(lambda _event: None)
+    qtbot.addWidget(group)
+
+    controller.attach(group, canvas)
+    canvas.playhead_changed.emit(7)
+
+    assert group._playhead == 7  # noqa: SLF001
+    controller.shutdown()
