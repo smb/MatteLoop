@@ -31,7 +31,7 @@ from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QPushButton, QWidget
 
 from matteloop.core.crop import fit_crop_aspect
-from matteloop.core.geometry import FramingPlan, apply_framing
+from matteloop.core.geometry import _MEDIA_INSET, FramingPlan, apply_framing
 from matteloop.core.parameters import TransformChanged
 from matteloop.core.specs import CropSpec, TransformSpec
 from matteloop.core.transform import apply_transform
@@ -41,6 +41,7 @@ from matteloop.ui.crop_presentation import CropPresentation
 
 PLAYER_CACHE_BUDGET_BYTES = 128 * 1024 * 1024
 PLAYER_MIN_DISPLAY_SIDE = 64
+_PLAY_BUTTON_CLEARANCE_GAP = 8.0
 
 _PLAY_TEXT = "Play"
 _PLAY_ACCESSIBLE_NAME = "Play the result loop"
@@ -137,6 +138,8 @@ class ResultPlayerCanvas(CropCanvas):
             self._playhead_index = None
             self.set_status_marker(None)
             self.set_frame(None)
+            self._rebuild_geometry()
+            self.update()
             return
         if not had_session:
             self._cover_before_session = self._cover_frame
@@ -144,10 +147,12 @@ class ResultPlayerCanvas(CropCanvas):
             self._kept = None
         self._frames = frames
         self.play_button.show()
+        self._rebuild_geometry()
         playable = self._playable()
         self._playhead_index = playable.start if playable else None
         self._update_truncation_marker(frames)
         self._show_current_frame()
+        self.update()
 
     def set_kept_range(self, kept: range) -> None:
         """Re-slice playback to *kept* without reloading either cache."""
@@ -165,11 +170,24 @@ class ResultPlayerCanvas(CropCanvas):
         presentation: CropPresentation | None,
         transform: TransformSpec | None = None,
     ) -> None:
-        """Toggle between the crop overlay (framed frames) and the result loop."""
+        """Toggle between the crop overlay (framed frames) and the result loop.
+
+        ``_reserved_bottom_space`` depends on ``_crop_edit`` (#25: the
+        reservation only buys anything while the crop handles exist to be
+        covered), so every toggle can change it and both the crop geometry
+        and the displayed media need recomputing either way -- not just when
+        entering, where ``apply_presentation`` already calls
+        ``_rebuild_geometry`` for the fresh presentation. Leaving passes
+        ``presentation=None``, which ``apply_presentation`` handles by
+        clearing ``_geometry`` directly rather than through
+        ``_rebuild_geometry``, so it is re-run explicitly here on both edges.
+        """
         self._crop_edit = enabled
         self._transform = transform if transform is not None else TransformSpec()
         self.apply_presentation(presentation, active=enabled, editable=enabled)
+        self._rebuild_geometry()
         self._show_current_frame()
+        self.update()
 
     def set_aspect_lock(self, ratio: Fraction | None) -> None:
         self._aspect_lock = ratio
@@ -251,6 +269,37 @@ class ResultPlayerCanvas(CropCanvas):
         preview state.
         """
         return super()._should_paint_checkerboard() or self._frames is not None
+
+    def _reserved_bottom_space(self) -> float:
+        """Keep the play button's footprint clear of the crop handles (#25)
+        while crop-edit is active: the button is a plain layout child
+        aligned to the bottom-right corner, so without this the crop
+        geometry built against the media is centred straight through it, and
+        a drag starting on the covered half of the bottom-right handle never
+        reaches ``mousePressEvent`` -- the button consumes the click first.
+
+        Gated on ``_crop_edit``, not just button visibility: the handles
+        this protects only exist while the crop overlay is active
+        (``CropCanvas.paintEvent`` returns early otherwise, and there is
+        nothing to hit-test), so outside crop-edit the reservation would
+        only shrink the visible loop for nothing.
+
+        The button sits ``_MEDIA_INSET`` above the widget's bottom edge (the
+        layout margin ``_rebuild_geometry`` applies), on top of its own
+        height. Pointer/touch hit targets are expanded right up to whatever
+        viewport they are given (by design -- it is what keeps a crop
+        dragged flush with the true canvas edge reachable), so reserving
+        only the button's height would still let an expanded hit target
+        reach past the button's top edge; folding the same inset in here
+        keeps that expansion inside the button's actual top edge too.
+        """
+        if not self._crop_edit or not self.play_button.isVisible():
+            return 0.0
+        return (
+            _MEDIA_INSET
+            + self.play_button.sizeHint().height()
+            + _PLAY_BUTTON_CLEARANCE_GAP
+        )
 
     # -- playback internals ---------------------------------------------
 

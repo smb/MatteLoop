@@ -190,6 +190,16 @@ class PreviewCanvas(QLabel):
         """
         return self.property("checkerboard") is True
 
+    def _reserved_bottom_space(self) -> float:
+        """Widget-space height, in px, kept clear at the bottom of the media.
+
+        Zero by default -- the media fills the full inset viewport. A canvas
+        that overlays a control at the bottom (``ResultPlayerCanvas``'s play
+        button) overrides this so the media, and any crop geometry built
+        against it, never sits under that control (#25).
+        """
+        return 0.0
+
     def paintEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         if self._should_paint_checkerboard():
             painter = QPainter(self)
@@ -211,8 +221,12 @@ class PreviewCanvas(QLabel):
         if self._frame is None:
             return
         margins = self.layout().contentsMargins()  # type: ignore[union-attr]
+        reserved = max(0, round(self._reserved_bottom_space()))
         content = self.contentsRect().adjusted(
-            margins.left(), margins.top(), -margins.right(), -margins.bottom()
+            margins.left(),
+            margins.top(),
+            -margins.right(),
+            -margins.bottom() - reserved,
         )
         size = QSize(max(1, content.width()), max(1, content.height()))
         pixmap = QPixmap.fromImage(self._frame).scaled(
@@ -231,7 +245,23 @@ class PreviewCanvas(QLabel):
                 size.width(),
                 size.height(),
             )
-        self.setPixmap(pixmap)
+        if reserved <= 0:
+            self.setPixmap(pixmap)
+            return
+        # Reserved space is asymmetric (bottom-only), so the media can no
+        # longer rely on QLabel's own AlignCenter: that centres within the
+        # full widget, which would centre the shrunk pixmap over the reserved
+        # strip too instead of leaving it clear. Compose it into a
+        # widget-sized transparent pixmap at the position it belongs, so
+        # QLabel has nothing left to re-centre.
+        positioned = QPixmap(self.size())
+        positioned.fill(Qt.GlobalColor.transparent)
+        x = content.x() + max(0, (content.width() - pixmap.width()) // 2)
+        y = content.y() + max(0, (content.height() - pixmap.height()) // 2)
+        painter = QPainter(positioned)
+        painter.drawPixmap(x, y, pixmap)
+        painter.end()
+        self.setPixmap(positioned)
 
 
 class PreviewStage(QFrame):

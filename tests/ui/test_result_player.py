@@ -4,9 +4,18 @@ import threading
 from fractions import Fraction
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+import pytest
+from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QImage
+from PySide6.QtWidgets import QApplication
 
+from matteloop.core.geometry import (
+    _MEDIA_INSET,
+    CropGeometryState,
+    RectF,
+    SizeF,
+    build_crop_geometry,
+)
 from matteloop.core.parameters import TransformChanged
 from matteloop.core.specs import CropSpec, FramingSpec, TransformSpec
 from matteloop.core.state import (
@@ -26,6 +35,7 @@ from matteloop.ui.result_player import (
     _fit_budget,
 )
 from matteloop.ui.store import ReducerStore
+from matteloop.ui.theme import install_theme
 from matteloop.ui.transform_group import TransformGroup
 from matteloop.ui.transform_stage import TransformStageController, _DirectFrameReader
 from tests.jobs.render_support import (
@@ -298,6 +308,124 @@ def test_aspect_lock_constrains_the_crop_before_dispatch(qtbot) -> None:
     )
 
     assert Fraction(constrained.width, constrained.height) == Fraction(2, 1)
+
+
+def _button_overlaps(button: QRect, rect: object) -> bool:
+    """Whether *button* (canvas-local ``QRect``) intersects a geometry ``RectF``."""
+    return not (
+        button.x() + button.width() <= rect.left  # type: ignore[attr-defined]
+        or button.x() >= rect.right  # type: ignore[attr-defined]
+        or button.y() + button.height() <= rect.top  # type: ignore[attr-defined]
+        or button.y() >= rect.bottom  # type: ignore[attr-defined]
+    )
+
+
+def test_play_button_does_not_cover_the_bottom_right_crop_handle(qtbot) -> None:
+    """Regression for #25: the play button used to share the same
+    bottom-right corner as the crop overlay's ``south_east`` handle -- a
+    ``QPushButton`` accepts the press and never lets it reach
+    ``mousePressEvent``, so a drag starting on the covered half of the
+    handle was impossible, and the button painted over it besides.
+    """
+    application = QApplication.instance()
+    assert application is not None
+    original_style_sheet = application.styleSheet()
+    try:
+        install_theme(application)  # the real button size, not Qt's bare default
+        canvas = ResultPlayerCanvas()
+        qtbot.addWidget(canvas)
+        canvas.resize(430, 500)
+        canvas.show()
+        qtbot.wait(10)
+
+        canvas.set_frame(QImage(256, 256, QImage.Format.Format_RGBA8888))
+        canvas.set_frames(_player_frames(2, (100, 100)))
+        presentation = CropPresentation(
+            source_id="cut",
+            width=256,
+            height=256,
+            coded_width=256,
+            coded_height=256,
+            rotation=0,
+            pixel_aspect=1.0,
+            crop=CropSpec(0, 0, 256, 256),
+        )
+        canvas.set_crop_edit(True, presentation, TransformSpec())
+        qtbot.wait(10)
+
+        assert canvas.play_button.isVisible()
+        geometry = canvas._geometry  # noqa: SLF001
+        assert geometry is not None
+        button = canvas.play_button.geometry()
+
+        assert not _button_overlaps(button, geometry.visual["south_east"])
+        assert not _button_overlaps(button, geometry.pointer_hit["south_east"])
+    finally:
+        application.setStyleSheet(original_style_sheet)
+
+
+def test_media_fills_the_full_viewport_when_crop_edit_is_off(qtbot) -> None:
+    """The other half of #25's contract: the reservation only buys anything
+    while the crop overlay is active (its handles are the only thing a
+    covered corner could break), so once crop-edit is turned back off it
+    must not cost any visible preview area -- this is the stage that exists
+    to show the loop. Enters crop-edit first (so the layout margin this
+    canvas always carries is the real ``_MEDIA_INSET``, not the ``0`` a
+    presentation-less canvas never applies) and then leaves it again, the
+    same round trip the "Edit crop" toggle drives in the app.
+    """
+    application = QApplication.instance()
+    assert application is not None
+    original_style_sheet = application.styleSheet()
+    try:
+        install_theme(application)
+        canvas = ResultPlayerCanvas()
+        qtbot.addWidget(canvas)
+        canvas.resize(430, 500)
+        canvas.show()
+        qtbot.wait(10)
+
+        canvas.set_frame(QImage(256, 256, QImage.Format.Format_RGBA8888))
+        canvas.set_frames(_player_frames(2, (100, 100)))
+        presentation = CropPresentation(
+            source_id="cut",
+            width=256,
+            height=256,
+            coded_width=256,
+            coded_height=256,
+            rotation=0,
+            pixel_aspect=1.0,
+            crop=CropSpec(0, 0, 256, 256),
+        )
+        canvas.set_crop_edit(True, presentation, TransformSpec())
+        qtbot.wait(10)
+        assert canvas._reserved_bottom_space() > 0.0  # noqa: SLF001 -- sanity
+
+        canvas.set_crop_edit(False, None, TransformSpec())
+        qtbot.wait(10)
+
+        assert canvas.play_button.isVisible()
+        assert canvas._reserved_bottom_space() == 0.0  # noqa: SLF001
+
+        pixmap = canvas.pixmap()
+        assert pixmap is not None and not pixmap.isNull()
+
+        # Full, unreserved inset viewport: what the media occupies with no
+        # bottom reservation at all -- only ``_MEDIA_INSET`` on every side.
+        expected = build_crop_geometry(
+            state=CropGeometryState(
+                source_size=SizeF(256, 256),
+                crop=RectF(0, 0, 256, 256),
+                inset=_MEDIA_INSET,
+            ),
+            viewport=SizeF(canvas.width(), canvas.height()),
+            dpr=float(canvas.devicePixelRatioF()),
+        )
+        content = expected.transform.content_rect
+        assert pixmap.width() == pytest.approx(content.width, abs=1.0)
+        assert pixmap.height() == pytest.approx(content.height, abs=1.0)
+    finally:
+        application.setStyleSheet(original_style_sheet)
 
 
 # -- budget math -----------------------------------------------------------

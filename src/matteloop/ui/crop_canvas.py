@@ -290,6 +290,7 @@ class CropCanvas(PreviewCanvas):
                 rotation=presentation.rotation,
                 pixel_aspect=presentation.pixel_aspect,
             )
+            reserved_bottom = max(0.0, self._reserved_bottom_space())
             self._geometry = build_crop_geometry(
                 state=CropGeometryState(
                     source_size=SizeF(
@@ -304,7 +305,10 @@ class CropCanvas(PreviewCanvas):
                     else (self._focused_target if self.hasFocus() else None),
                     dragged=dragged if dragged is not None else self._dragged,
                 ),
-                viewport=SizeF(max(1, self.width()), max(1, self.height())),
+                viewport=SizeF(
+                    max(1, self.width()),
+                    max(1.0, self.height() - reserved_bottom),
+                ),
                 dpr=float(self.devicePixelRatioF()),
             )
             transform = self._geometry.transform
