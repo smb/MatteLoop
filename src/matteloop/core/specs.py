@@ -155,7 +155,7 @@ class CropSpec:
 
 @dataclass(frozen=True)
 class AlphaMattingSpec:
-    """Pinned rembg 2.0.72 alpha-matting options."""
+    """Pinned rembg 2.0.75 alpha-matting options."""
 
     foreground_threshold: int = 240
     background_threshold: int = 10

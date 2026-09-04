@@ -60,6 +60,46 @@ Verification for every change:
 uv run ruff check . && uv run mypy src && QT_QPA_PLATFORM=offscreen uv run pytest -q
 ```
 
+## Bumping `rembg` (REQUIRED — all of it, or segmentation dies silently)
+
+The pinned rembg version is not one number. It names the model cache namespace
+and is compared at three independent gates, so a partial bump leaves the app
+installable, green in CI, and unable to segment a single frame. That is not
+hypothetical: #18 moved the runtime 2.0.72 → 2.0.75 and nothing else, and every
+preview and render on `main` failed with a bare `EOFError` until #24 — the cause
+reached neither the UI nor the log (issue #22).
+
+Change all of these together:
+
+1. `pyproject.toml` — `rembg[cpu]==<new>`, then `uv lock`.
+2. `resources/model-manifest.json` — `rembg_version`.
+3. `resources/model-manifest.json` — append the **old** version to
+   `obsolete_rembg_versions`. This is the step that gets forgotten. The cache
+   directory is named after the pin, so every bump orphans every downloaded
+   weight (up to 972 MiB each, 15 models), and that list is the only record
+   those directories exist: without it the model manager cannot show, re-fetch
+   or delete them, and the disk cost is invisible and permanent.
+
+   **Append — never replace.** The list is cumulative over every version this
+   tool has ever shipped, because a user may be upgrading from any of them. A
+   bump to 2.0.80 makes it `["2.0.72", "2.0.75"]`; dropping an entry strands the
+   weights of everyone who skipped a release, with no way back to them from the
+   UI. Never migrate or rename weight directories — the namespace is the
+   integrity boundary.
+4. `resources/model-provenance.json` — `rembg_version` and every
+   `upstream_checksum_source` path, after re-deriving each `upstream_checksum`
+   from the new `rembg/sessions/*.py`. Only paths and version strings may
+   change. A checksum that moved upstream is a supply-chain event, not a
+   rename: stop and report it rather than committing the new value.
+5. `src/matteloop/core/fingerprints.py` — `REMBG_VERSION`. `jobs/render.py`
+   compares this at every render and raises `INVALID_SEGMENTATION` on drift.
+6. `src/matteloop/jobs/models/catalog.py` — `_PINNED_REMBG_VERSION`.
+7. `docs/building.md` — the locked-build version list.
+
+The coupling test in `tests/jobs/models/test_catalog.py` fails when the
+installed runtime and the manifest pin disagree. It is a floor, not a
+substitute for this list: it cannot see steps 3, 4 or 7.
+
 ## Working on issues (REQUIRED)
 
 Work that answers a GitHub issue goes onto its own branch and into a pull

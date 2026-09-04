@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -191,9 +192,7 @@ class ModelSessionManager:
             self._active_result = result
             return result
 
-    def fetch(
-        self, model_id: str, progress: ProgressCallback | None = None
-    ) -> Path:
+    def fetch(self, model_id: str, progress: ProgressCallback | None = None) -> Path:
         """Download and verify one weight without starting a session for it.
 
         prepare() also launches the segmentation client, which is wrong for
@@ -270,6 +269,18 @@ class ModelSessionManager:
                     else close_error
                 )
                 raise mapped from cause
+
+    def remove_obsolete_versions(self) -> int:
+        with self._lock:
+            self._require_open()
+            removed = 0
+            for version in self._catalog.obsolete_rembg_versions:
+                version_path = self._cache_root / version
+                if not version_path.is_dir() or version_path.is_symlink():
+                    continue
+                shutil.rmtree(version_path)
+                removed += 1
+            return removed
 
     def close(self) -> None:
         with self._lock:

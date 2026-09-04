@@ -549,7 +549,7 @@ def test_cut_key_uses_a_canonical_versioned_json_schema(tmp_path: Path) -> None:
             "model": {"id": "birefnet-portrait", "weight_sha256": MODEL_SHA},
             "orientation_color_version": "orientation-color-v1",
             "pipeline_schema_version": "pipeline-v1",
-            "rembg_version": "2.0.72",
+            "rembg_version": "2.0.75",
             "sampling": {
                 "end": {"denominator": 10, "numerator": 9},
                 "fps": 30,
@@ -600,7 +600,7 @@ def test_preview_identity_tracks_weight_runtime_and_pipeline_versions(
         Fraction(1, 5),
         source_fingerprint=SOURCE_SHA,
         model_weight_sha256=MODEL_SHA,
-        rembg_version="2.0.72",
+        rembg_version="2.0.75",
         pipeline_schema_version="pipeline-v1",
     )
 
@@ -609,7 +609,7 @@ def test_preview_identity_tracks_weight_runtime_and_pipeline_versions(
         Fraction(1, 5),
         source_fingerprint=SOURCE_SHA,
         model_weight_sha256=MODEL_SHA,
-        rembg_version="2.0.72",
+        rembg_version="2.0.75",
         pipeline_schema_version="pipeline-v1",
     )
     assert baseline != preview_fingerprint(
@@ -617,7 +617,7 @@ def test_preview_identity_tracks_weight_runtime_and_pipeline_versions(
         Fraction(1, 5),
         source_fingerprint=SOURCE_SHA,
         model_weight_sha256="ac" * 32,
-        rembg_version="2.0.72",
+        rembg_version="2.0.75",
         pipeline_schema_version="pipeline-v1",
     )
     assert baseline != preview_fingerprint(
@@ -633,7 +633,7 @@ def test_preview_identity_tracks_weight_runtime_and_pipeline_versions(
         Fraction(1, 5),
         source_fingerprint=SOURCE_SHA,
         model_weight_sha256=MODEL_SHA,
-        rembg_version="2.0.72",
+        rembg_version="2.0.75",
         pipeline_schema_version="pipeline-v2",
     )
 
@@ -651,7 +651,7 @@ def test_preview_identity_rejects_malformed_prepared_identities(
 ) -> None:
     identities: dict[str, object] = {
         "model_weight_sha256": MODEL_SHA,
-        "rembg_version": "2.0.72",
+        "rembg_version": "2.0.75",
         "pipeline_schema_version": "pipeline-v1",
     }
     identities[field] = value

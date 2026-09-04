@@ -125,7 +125,7 @@ class FakeRenderRuntime(PreviewRuntime):
         del extras, context
         self.prepare_count += 1
         return PreparedSegmentation(
-            FakeSegmenter(), model_id, "ab" * 32, "2.0.72", frozenset({"standard"})
+            FakeSegmenter(), model_id, "ab" * 32, "2.0.75", frozenset({"standard"})
         )
 
     def preview(self, request, playhead, context):
@@ -197,7 +197,7 @@ class ServiceRenderRuntime(FakeRenderRuntime):
                 FakeSegmenter(),
                 "birefnet-portrait",
                 "ab" * 32,
-                "2.0.72",
+                "2.0.75",
                 frozenset({"standard"}),
             ),
             request,
@@ -476,18 +476,18 @@ def test_render_without_preview_defaults_to_preview_first(tmp_path, qtbot) -> No
         "Render anyway",
         "Cancel",
     ]
-    assert sum(
-        isinstance(event, RenderPreflightRequested) for event in store.events
-    ) == 1
+    assert (
+        sum(isinstance(event, RenderPreflightRequested) for event in store.events) == 1
+    )
 
     qtbot.mouseClick(dialog.buttons()[0], Qt.MouseButton.LeftButton)
     qtbot.waitUntil(lambda: store.state.preview is PreviewState.CURRENT, timeout=5000)
     assert store.state.job.phase.value == "idle"
     assert runtime.prepare_count == 1
     assert not runtime.render_requests
-    assert sum(
-        isinstance(event, RenderPreflightDismissed) for event in store.events
-    ) == 1
+    assert (
+        sum(isinstance(event, RenderPreflightDismissed) for event in store.events) == 1
+    )
     controller.shutdown()
 
 

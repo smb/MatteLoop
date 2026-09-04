@@ -66,7 +66,7 @@ def _cache_inputs(*, source: str = "a" * 64) -> dict[str, object]:
         },
         "crop": {"x": 0, "y": 0, "width": 8, "height": 6},
         "model": {"id": "birefnet-portrait", "weight_sha256": "b" * 64},
-        "rembg_version": "2.0.72",
+        "rembg_version": "2.0.75",
         "pipeline_schema_version": "pipeline-v1",
         "orientation_color_version": "orientation-color-v1",
         "edge_settings": {
@@ -196,7 +196,6 @@ def _rewrite_frame(path: Path, color: tuple[int, int, int, int]) -> None:
     os.replace(temporary, path)
 
 
-
 def _open_handle_count(process) -> int:  # type: ignore[no-untyped-def]
     """Count what the platform exposes: fds on POSIX, handles on Windows.
 
@@ -207,6 +206,7 @@ def _open_handle_count(process) -> int:  # type: ignore[no-untyped-def]
     if hasattr(process, "num_fds"):
         return int(process.num_fds())
     return int(process.num_handles())
+
 
 def test_discard_staged_set_removes_only_the_private_candidate(tmp_path: Path) -> None:
     durable = _promoted(tmp_path, job_id="old")
@@ -2226,10 +2226,7 @@ def test_local_filesystem_policy_degrades_for_nonlocal_and_unknown_storage(
     tmp_path: Path,
 ) -> None:
     assert (
-        workspace_module._locality_fallback(
-            tmp_path, probe=lambda _bound: True
-        )
-        is None
+        workspace_module._locality_fallback(tmp_path, probe=lambda _bound: True) is None
     )
     nonlocal_fallback = workspace_module._locality_fallback(
         tmp_path, probe=lambda _bound: False
@@ -2240,9 +2237,7 @@ def test_local_filesystem_policy_degrades_for_nonlocal_and_unknown_storage(
     def undecidable(_bound: workspace_module._BoundDirectory) -> bool:
         raise OSError("injected unsupported probe")
 
-    unknown_fallback = workspace_module._locality_fallback(
-        tmp_path, probe=undecidable
-    )
+    unknown_fallback = workspace_module._locality_fallback(tmp_path, probe=undecidable)
     assert unknown_fallback is not None
     assert unknown_fallback.reason == "locality-unknown"
     assert workspace_module._windows_drive_type_is_local(2) is True

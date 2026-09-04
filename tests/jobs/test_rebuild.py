@@ -36,7 +36,7 @@ def test_rebuild_never_probes_hashes_decodes_or_segments_source(tmp_path) -> Non
         segmenter,
         "birefnet-portrait",
         "ab" * 32,
-        "2.0.72",
+        "2.0.75",
         frozenset({"standard"}),
     )
     first = RenderService(

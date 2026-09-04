@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "rembg_version": "2.0.72",
+  "rembg_version": "2.0.75",
   "recorded_at": "2026-08-29",
   "qualification_status": "fail-closed-pending-official-release-live-qualification",
   "qualification_owner": "Task 17 release qualification",
@@ -17,7 +17,7 @@
       "witness_size": 175997641,
       "witness_trust_status": "secondary-lfs-metadata-witness-not-official-release-byte-proof",
       "upstream_checksum": "md5:60024c5c889badc19c04ad937298a77b",
-      "upstream_checksum_source": "rembg-2.0.72/rembg/sessions/u2net.py",
+      "upstream_checksum_source": "rembg-2.0.75/rembg/sessions/u2net.py",
       "upstream_checksum_status": "declared-in-pinned-source-not-release-published-sha256"
     },
     {
@@ -32,7 +32,7 @@
       "witness_size": 4574861,
       "witness_trust_status": "secondary-lfs-metadata-witness-not-official-release-byte-proof",
       "upstream_checksum": "md5:8e83ca70e441ab06c318d82300c84806",
-      "upstream_checksum_source": "rembg-2.0.72/rembg/sessions/u2netp.py",
+      "upstream_checksum_source": "rembg-2.0.75/rembg/sessions/u2netp.py",
       "upstream_checksum_status": "declared-in-pinned-source-not-release-published-sha256"
     },
     {
@@ -47,7 +47,7 @@
       "witness_size": 175997641,
       "witness_trust_status": "secondary-lfs-metadata-witness-not-official-release-byte-proof",
       "upstream_checksum": "md5:c09ddc2e0104f800e3e1bb4652583d1f",
-      "upstream_checksum_source": "rembg-2.0.72/rembg/sessions/u2net_human_seg.py",
+      "upstream_checksum_source": "rembg-2.0.75/rembg/sessions/u2net_human_seg.py",
       "upstream_checksum_status": "declared-in-pinned-source-not-release-published-sha256"
     },
     {
@@ -62,7 +62,7 @@
       "witness_size": 176194565,
       "witness_trust_status": "secondary-lfs-metadata-witness-not-official-release-byte-proof",
       "upstream_checksum": "md5:2434d1f3cb744e0e49386c906e5a08bb",
-      "upstream_checksum_source": "rembg-2.0.72/rembg/sessions/u2net_cloth_seg.py",
+      "upstream_checksum_source": "rembg-2.0.75/rembg/sessions/u2net_cloth_seg.py",
       "upstream_checksum_status": "declared-in-pinned-source-not-release-published-sha256"
     },
     {
@@ -77,7 +77,7 @@
       "witness_size": 44173029,
       "witness_trust_status": "secondary-lfs-metadata-witness-not-official-release-byte-proof",
       "upstream_checksum": "md5:55e59e0d8062d2f5d013f4725ee84782",
-      "upstream_checksum_source": "rembg-2.0.72/rembg/sessions/silueta.py",
+      "upstream_checksum_source": "rembg-2.0.75/rembg/sessions/silueta.py",
       "upstream_checksum_status": "declared-in-pinned-source-not-release-published-sha256"
     },
     {
@@ -92,7 +92,7 @@
       "witness_size": 178648008,
       "witness_trust_status": "secondary-lfs-metadata-witness-not-official-release-byte-proof",
       "upstream_checksum": "md5:fc16ebd8b0c10d971d3513d564d01e29",
-      "upstream_checksum_source": "rembg-2.0.72/rembg/sessions/dis_general_use.py",
+      "upstream_checksum_source": "rembg-2.0.75/rembg/sessions/dis_general_use.py",
       "upstream_checksum_status": "declared-in-pinned-source-not-release-published-sha256"
     },
     {
@@ -107,7 +107,7 @@
       "witness_size": 176069933,
       "witness_trust_status": "secondary-lfs-metadata-witness-not-official-release-byte-proof",
       "upstream_checksum": "md5:6f184e756bb3bd901c8849220a83e38e",
-      "upstream_checksum_source": "rembg-2.0.72/rembg/sessions/dis_anime.py",
+      "upstream_checksum_source": "rembg-2.0.75/rembg/sessions/dis_anime.py",
       "upstream_checksum_status": "declared-in-pinned-source-not-release-published-sha256"
     },
     {
@@ -122,7 +122,7 @@
       "witness_size": 972666916,
       "witness_trust_status": "secondary-lfs-metadata-witness-not-official-release-byte-proof",
       "upstream_checksum": "md5:7a35a0141cbbc80de11d9c9a28f52697",
-      "upstream_checksum_source": "rembg-2.0.72/rembg/sessions/birefnet_general.py",
+      "upstream_checksum_source": "rembg-2.0.75/rembg/sessions/birefnet_general.py",
       "upstream_checksum_status": "declared-in-pinned-source-not-release-published-sha256"
     },
     {
@@ -137,7 +137,7 @@
       "witness_size": 224005088,
       "witness_trust_status": "secondary-lfs-metadata-witness-not-official-release-byte-proof",
       "upstream_checksum": "md5:4fab47adc4ff364be1713e97b7e66334",
-      "upstream_checksum_source": "rembg-2.0.72/rembg/sessions/birefnet_general_lite.py",
+      "upstream_checksum_source": "rembg-2.0.75/rembg/sessions/birefnet_general_lite.py",
       "upstream_checksum_status": "declared-in-pinned-source-not-release-published-sha256"
     },
     {
@@ -152,7 +152,7 @@
       "witness_size": 972666916,
       "witness_trust_status": "secondary-lfs-metadata-witness-not-official-release-byte-proof",
       "upstream_checksum": "md5:c3a64a6abf20250d090cd055f12a3b67",
-      "upstream_checksum_source": "rembg-2.0.72/rembg/sessions/birefnet_portrait.py",
+      "upstream_checksum_source": "rembg-2.0.75/rembg/sessions/birefnet_portrait.py",
       "upstream_checksum_status": "declared-in-pinned-source-not-release-published-sha256"
     },
     {
@@ -167,7 +167,7 @@
       "witness_size": 972666916,
       "witness_trust_status": "secondary-lfs-metadata-witness-not-official-release-byte-proof",
       "upstream_checksum": "md5:2d4d44102b446f33a4ebb2e56c051f2b",
-      "upstream_checksum_source": "rembg-2.0.72/rembg/sessions/birefnet_dis.py",
+      "upstream_checksum_source": "rembg-2.0.75/rembg/sessions/birefnet_dis.py",
       "upstream_checksum_status": "declared-in-pinned-source-not-release-published-sha256"
     },
     {
@@ -182,7 +182,7 @@
       "witness_size": 972666916,
       "witness_trust_status": "secondary-lfs-metadata-witness-not-official-release-byte-proof",
       "upstream_checksum": "md5:c017ade5de8a50ff0fd74d790d268dda",
-      "upstream_checksum_source": "rembg-2.0.72/rembg/sessions/birefnet_hrsod.py",
+      "upstream_checksum_source": "rembg-2.0.75/rembg/sessions/birefnet_hrsod.py",
       "upstream_checksum_status": "declared-in-pinned-source-not-release-published-sha256"
     },
     {
@@ -197,7 +197,7 @@
       "witness_size": 972666916,
       "witness_trust_status": "secondary-lfs-metadata-witness-not-official-release-byte-proof",
       "upstream_checksum": "md5:f6d0d21ca89d287f17e7afe9f5fd3b45",
-      "upstream_checksum_source": "rembg-2.0.72/rembg/sessions/birefnet_cod.py",
+      "upstream_checksum_source": "rembg-2.0.75/rembg/sessions/birefnet_cod.py",
       "upstream_checksum_status": "declared-in-pinned-source-not-release-published-sha256"
     },
     {
@@ -212,7 +212,7 @@
       "witness_size": 972666916,
       "witness_trust_status": "secondary-lfs-metadata-witness-not-official-release-byte-proof",
       "upstream_checksum": "md5:33e726a2136a3d59eb0fdf613e31e3e9",
-      "upstream_checksum_source": "rembg-2.0.72/rembg/sessions/birefnet_massive.py",
+      "upstream_checksum_source": "rembg-2.0.75/rembg/sessions/birefnet_massive.py",
       "upstream_checksum_status": "declared-in-pinned-source-not-release-published-sha256"
     },
     {
@@ -227,7 +227,7 @@
       "witness_size": 1024331469,
       "witness_trust_status": "secondary-lfs-metadata-witness-not-official-release-byte-proof",
       "upstream_checksum": "sha256:5b486f08200f513f460da46dd701db5fbb47d79b4be4b708a19444bcd4e79958",
-      "upstream_checksum_source": "rembg-2.0.72/rembg/sessions/bria_rmbg.py",
+      "upstream_checksum_source": "rembg-2.0.75/rembg/sessions/bria_rmbg.py",
       "upstream_checksum_status": "declared-in-pinned-source-not-independently-live-qualified"
     }
   ]

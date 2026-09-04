@@ -760,7 +760,7 @@ def test_render_samples_half_open_range_and_uses_private_encoder_inputs(
             segmenter,
             "birefnet-portrait",
             "ab" * 32,
-            "2.0.72",
+            "2.0.75",
             frozenset({"standard"}),
         ),
         workspace=FilesystemWorkspacePort(),
@@ -1216,8 +1216,7 @@ def test_render_keeps_decode_working_set_bounded_across_60_frames(tmp_path) -> N
     never a dependable guard for that either.
     """
     frames = [
-        Image.new("RGB", (256, 256), (index % 256, 40, 90))
-        for index in range(60)
+        Image.new("RGB", (256, 256), (index % 256, 40, 90)) for index in range(60)
     ]
     source_path = make_video(tmp_path / "synthetic-memory.mp4", frames, Fraction(30))
     for frame in frames:
@@ -1235,8 +1234,7 @@ def test_render_keeps_decode_working_set_bounded_across_60_frames(tmp_path) -> N
     def progress(event: ProgressEvent) -> None:
         if event.stage == "render-cut" and event.completed in {10, 60}:
             live[event.completed] = sum(
-                isinstance(candidate, av.VideoFrame)
-                for candidate in gc.get_objects()
+                isinstance(candidate, av.VideoFrame) for candidate in gc.get_objects()
             )
 
     artifact = render_service(

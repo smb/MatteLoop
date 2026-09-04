@@ -175,7 +175,7 @@ def binding(
         segmenter,
         "birefnet-portrait",
         "ab" * 32,
-        "2.0.72",
+        "2.0.75",
         supported,
     )
 

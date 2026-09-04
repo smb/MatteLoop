@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import importlib.metadata
 import json
 from dataclasses import FrozenInstanceError, fields, replace
 
 import pytest
 
 from matteloop.core.errors import AppError, ErrorCode
+from matteloop.core.fingerprints import REMBG_VERSION
 from matteloop.jobs.models.catalog import (
     ClothCategory,
     ExecutionClass,
@@ -52,10 +54,59 @@ def _model(payload: dict[str, object], model_id: str) -> dict[str, object]:
 def test_manifest_contains_exact_approved_catalog_and_default() -> None:
     catalog = ModelCatalog.load_resource()
 
-    assert catalog.rembg_version == "2.0.72"
+    assert catalog.rembg_version == "2.0.75"
+    assert catalog.obsolete_rembg_versions == ("2.0.72",)
     assert catalog.default_id == "birefnet-portrait"
     assert set(catalog.ids) == APPROVED_IDS
     assert len(catalog.ids) == len(APPROVED_IDS)
+
+
+def test_manifest_pin_matches_the_installed_rembg_distribution() -> None:
+    catalog = ModelCatalog.load_resource()
+
+    assert catalog.rembg_version == REMBG_VERSION
+    assert catalog.rembg_version == importlib.metadata.version("rembg")
+
+
+def test_manifest_without_obsolete_versions_remains_compatible() -> None:
+    payload = _manifest()
+    del payload["obsolete_rembg_versions"]
+
+    catalog = _load(payload)
+
+    assert catalog.obsolete_rembg_versions == ()
+
+
+@pytest.mark.parametrize(
+    "obsolete_versions",
+    [
+        ["2.0.75"],
+        ["2.0.72", "2.0.72"],
+        ["2.0.72", 2],
+        ["2.0.75."],
+        ["2.0.75 "],
+        ["../x"],
+        ["a/b"],
+        ["a\\b"],
+        ["C:"],
+        [""],
+        ["not-a-version"],
+        ["."],
+        [".."],
+        ["/"],
+        ["\\"],
+    ],
+)
+def test_manifest_rejects_invalid_obsolete_rembg_versions(
+    obsolete_versions: object,
+) -> None:
+    payload = _manifest()
+    payload["obsolete_rembg_versions"] = obsolete_versions
+
+    with pytest.raises(AppError) as exc:
+        _load(payload)
+
+    assert exc.value.code is ErrorCode.MODEL_MANIFEST_INVALID
 
 
 def test_local_catalog_metadata_is_pinned_and_deeply_immutable() -> None:
@@ -495,7 +546,7 @@ def test_each_local_pin_has_honest_auditable_provenance() -> None:
         assert len(revision) == 40
         assert all(character in "0123456789abcdef" for character in revision)
         assert str(entry["upstream_checksum_source"]).startswith(
-            "rembg-2.0.72/rembg/sessions/"
+            "rembg-2.0.75/rembg/sessions/"
         )
         assert str(entry["upstream_checksum_status"]).startswith(
             "declared-in-pinned-source-"
