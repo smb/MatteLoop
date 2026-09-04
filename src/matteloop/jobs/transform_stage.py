@@ -14,6 +14,7 @@ never re-saved with different bytes than before this stage existed.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import tempfile
 from collections.abc import Callable
@@ -21,6 +22,7 @@ from pathlib import Path
 
 from PIL import Image
 
+from matteloop.core.crop import clamp_crop
 from matteloop.core.errors import ErrorCode, ValidationError
 from matteloop.core.geometry import FramingPlan, PixelBounds, apply_framing
 from matteloop.core.rgba import RgbaOwnershipTracker
@@ -64,7 +66,18 @@ def stage_encoder_frames(
     the frames in ``transform.kept_range(frame_count)`` are staged; the
     returned delays are ``transform.select_kept(delays)`` — a slice of the
     full grid, never a recomputation.
+
+    A crop stored while the framed size was larger — more padding, or a cut
+    set promoted from a different video — is clamped to the current framed
+    size here rather than rejected: this is the same ``clamp_crop`` the UI
+    applies once cache facts arrive, so the encoded output matches what the
+    UI later shows, and it covers rebuild, plain render, and trim paths that
+    a UI-side clamp alone cannot reach.
     """
+    if transform.crop is not None:
+        transform = dataclasses.replace(
+            transform, crop=clamp_crop(transform.crop, *plan.output_size)
+        )
     final_size = transform.validate_for(frame_count, plan.output_size)
     tracker.include_size(final_size)
     try:
