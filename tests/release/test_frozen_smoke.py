@@ -904,3 +904,45 @@ def test_release_packaging_keeps_lgpl_sources_out_of_the_application_zip(
     ).stdout.split()
     assert "MatteLoop.dist/matteloop.exe" in archived
     assert not [name for name in archived if "sources" in name]
+
+
+def test_every_workflow_shell_script_parses() -> None:
+    """A `run:` block that cannot be parsed fails its step on every platform.
+
+    bash reads the whole script before it runs a line, so an unterminated
+    quote in a branch that only Windows takes still kills the step on macOS.
+    That shipped once: the compile-cache report lost the closing quote of a
+    command substitution, every native build failed after producing its
+    bundle, and the artifact upload was skipped.
+    """
+    workflows = sorted((REPOSITORY_ROOT / ".github" / "workflows").glob("*.yml"))
+    assert workflows, "no workflows found"
+    checked_any = False
+    for path in workflows:
+        try:
+            workflow = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            # Only release.yml is written as JSON, which YAML accepts. The
+            # others need a YAML parser this project does not depend on.
+            continue
+        checked_any = True
+        for job_name, job in workflow["jobs"].items():
+            for index, step in enumerate(job.get("steps", [])):
+                script = step.get("run")
+                if script is None:
+                    continue
+                shell = step.get("shell", "bash")
+                if shell not in {"bash", "sh"}:
+                    continue
+                checked = subprocess.run(
+                    [shell, "-n"],
+                    input=script,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                assert checked.returncode == 0, (
+                    f"{path.name} {job_name} step {index} "
+                    f"({step.get('name', 'unnamed')}): {checked.stderr.strip()}"
+                )
+    assert checked_any, "no JSON-shaped workflow was checked"
