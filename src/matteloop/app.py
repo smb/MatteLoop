@@ -71,6 +71,7 @@ def _run_gui() -> int:
         provider_options=provider_options,
     )
     controller.set_dialog_parent(window)
+    controller.attach_transform_stage(window.inspector.transform_group, None)
     application.aboutToQuit.connect(controller.shutdown)
     window.show()
     return application.exec()

@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QMessageBox, QWidget
 from matteloop.core.errors import AppError, ErrorCode
 from matteloop.core.specs import RenderRequest
 from matteloop.jobs.models.catalog import ModelCatalog
+from matteloop.jobs.transform_store import discard_transform
 from matteloop.jobs.workspace import CutWorkspace, WorkspaceSummary, delete_workspace
 from matteloop.ui.workspace_dialog import WorkspacePickerDialog
 
@@ -61,6 +62,7 @@ class WorkspacePickerController:
             return
         try:
             delete_workspace(value.workspace, allow_pinned=allow_pinned)
+            discard_transform(value.workspace)
         except AppError as error:
             if error.code is not ErrorCode.CUT_WORKSPACE_PINNED or allow_pinned:
                 QMessageBox.warning(
@@ -71,6 +73,7 @@ class WorkspacePickerController:
                 return
             try:
                 delete_workspace(value.workspace, allow_pinned=True)
+                discard_transform(value.workspace)
             except AppError:
                 return
         request = self._request_factory()

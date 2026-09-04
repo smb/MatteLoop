@@ -33,6 +33,7 @@ class RenderWorker(QObject):
     finished = Signal(str)
     provider_ready = Signal(str)
     provider_notice = Signal(str)
+    artifact_ready = Signal(object)
 
     def __init__(
         self,
@@ -70,6 +71,7 @@ class RenderWorker(QObject):
                 artifact = rebuild(
                     self._request, self._rebuild_workspace, self._context
                 )
+            self.artifact_ready.emit(artifact)
             if not provider_emitted:
                 self._emit_provider_details()
             if self._context.terminal_state is JobTerminalState.RUNNING:

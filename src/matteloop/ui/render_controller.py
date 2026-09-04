@@ -88,6 +88,7 @@ class RenderController(QObject):
 
     provider_ready = Signal(str)
     provider_notice = Signal(str)
+    artifact_ready = Signal(object)
 
     def __init__(
         self,
@@ -123,6 +124,7 @@ class RenderController(QObject):
         self._probe_request: RenderRequest | None = None
         self._workspace_picker: WorkspacePickerController | None = None
         self._active_workspace: CutWorkspace | None = None
+        self.transform_restore: Callable[[CutWorkspace], None] | None = None
         self._closed = False
 
     @property
@@ -435,6 +437,8 @@ class RenderController(QObject):
     def _use_workspace(self, value: object) -> None:
         if not isinstance(value, WorkspaceSummary):
             return
+        if self.transform_restore is not None:
+            self.transform_restore(value.workspace)
         request = self._current_request()
         if request is None:
             return
@@ -571,6 +575,7 @@ class RenderController(QObject):
         worker.notification.connect(self._notification)
         worker.provider_ready.connect(self._provider_ready)
         worker.provider_notice.connect(self._provider_notice)
+        worker.artifact_ready.connect(self.artifact_ready.emit)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(lambda job_id=job_id: self._thread_finished(job_id))
