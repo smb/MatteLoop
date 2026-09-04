@@ -10,6 +10,7 @@ from typing import Any
 
 import numpy as np
 
+from matteloop.core.errors import AppError, ErrorCode
 from matteloop.jobs.protocol import (
     CONTROL_JOB_ID,
     MAX_PROTOCOL_MESSAGE_BYTES,
@@ -29,8 +30,15 @@ from matteloop.jobs.protocol import (
 def fake_segmentation_child(connection: Connection, model_spec: object) -> None:
     config = model_spec if type(model_spec) is dict else {}
     mode = str(config.get("mode", "success"))
+    if mode == "startup-crash":
+        connection.close()
+        return
+    if mode == "startup-wrong-pid":
+        ready_process_id = os.getpid() + 1
+    else:
+        ready_process_id = os.getpid()
     ready = encode_child_message(
-        WorkerReady(PROTOCOL_VERSION, CONTROL_JOB_ID, os.getpid())
+        WorkerReady(PROTOCOL_VERSION, CONTROL_JOB_ID, ready_process_id)
     )
     if mode == "startup-version":
         ready = ready.replace(b'"protocol_version":2', b'"protocol_version":999')
@@ -137,6 +145,27 @@ def fake_segmentation_child(connection: Connection, model_spec: object) -> None:
 
 def _send(connection: Connection, message: CancelAck | SegmentFailure) -> None:
     connection.send_bytes(encode_child_message(message))
+
+
+def preparation_failure_child(connection: Connection, model_spec: object) -> None:
+    from matteloop.jobs import segmentation_host
+
+    config = model_spec if type(model_spec) is dict else {}
+    mode = str(config.get("mode", "runtime-error"))
+
+    def fail(_model_spec: dict[str, object]) -> object:
+        if mode == "app-error":
+            raise AppError(
+                ErrorCode.MODEL_CACHE_UNSAFE,
+                "model-cache",
+                "error.model.cache-unsafe",
+                "provider import failed",
+                "retry-model-preparation",
+            )
+        raise RuntimeError("provider import failed")
+
+    segmentation_host._create_rembg_session = fail
+    segmentation_host.segmentation_process_main(connection, model_spec)
 
 
 def unpicklable_model_spec() -> dict[str, Any]:

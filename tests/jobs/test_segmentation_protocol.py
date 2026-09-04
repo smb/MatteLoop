@@ -51,6 +51,7 @@ from matteloop.jobs.segmentation_host import (
 )
 from tests.jobs.fake_segmentation_child import (
     fake_segmentation_child,
+    preparation_failure_child,
     unpicklable_model_spec,
 )
 
@@ -145,6 +146,22 @@ def test_protocol_dataclasses_are_frozen_and_round_trip_through_byte_codec() -> 
     )
     with pytest.raises((AttributeError, TypeError)):
         messages[0].job_id = "changed"  # type: ignore[misc]
+
+
+def test_control_job_segment_failure_round_trips_through_byte_codec() -> None:
+    failure = SegmentFailure(
+        PROTOCOL_VERSION,
+        CONTROL_JOB_ID,
+        CONTROL_JOB_ID,
+        AppError(
+            ErrorCode.MODEL_PREPARATION_INVALID,
+            "model-session",
+            "error.model.preparation-invalid",
+            "provider import failed",
+            "retry-model-preparation",
+        ).to_primitives(),
+    )
+    assert decode_child_message(encode_child_message(failure)) == failure
 
 
 @pytest.mark.parametrize(
@@ -533,6 +550,61 @@ def test_startup_version_mismatch_is_not_running() -> None:
         segmentation.start()
     assert exc.value.code is ErrorCode.SEGMENTATION_PROTOCOL_MISMATCH
     assert not segmentation.is_running
+
+
+def test_startup_preparation_app_error_reaches_parent() -> None:
+    segmentation = SegmentationClient(
+        {"mode": "app-error"}, child_target=preparation_failure_child
+    )
+    try:
+        with pytest.raises(AppError) as exc:
+            segmentation.start()
+    finally:
+        segmentation.close()
+    assert exc.value.code is ErrorCode.MODEL_CACHE_UNSAFE
+    assert exc.value.technical_detail == "provider import failed"
+    assert exc.value.code is not ErrorCode.SEGMENTATION_PROCESS_CRASHED
+    assert "EOFError" not in exc.value.technical_detail
+
+
+def test_startup_preparation_runtime_error_is_wrapped_for_parent() -> None:
+    segmentation = SegmentationClient(
+        {"mode": "runtime-error"}, child_target=preparation_failure_child
+    )
+    try:
+        with pytest.raises(AppError) as exc:
+            segmentation.start()
+    finally:
+        segmentation.close()
+    assert exc.value.code is ErrorCode.MODEL_PREPARATION_INVALID
+    assert "RuntimeError" in exc.value.technical_detail
+
+
+def test_startup_child_without_acknowledgement_keeps_crash_error() -> None:
+    segmentation = client("startup-crash")
+    try:
+        with pytest.raises(AppError) as exc:
+            segmentation.start()
+    finally:
+        segmentation.close()
+    assert exc.value.code is ErrorCode.SEGMENTATION_PROCESS_CRASHED
+    assert (
+        exc.value.technical_detail
+        == "segmentation process connection closed unexpectedly: EOFError: "
+    )
+
+
+def test_startup_rejects_worker_ready_from_another_process() -> None:
+    segmentation = client("startup-wrong-pid")
+    try:
+        with pytest.raises(AppError) as exc:
+            segmentation.start()
+    finally:
+        segmentation.close()
+    assert exc.value.code is ErrorCode.SEGMENTATION_PROTOCOL_MISMATCH
+    assert exc.value.technical_detail == (
+        "child startup acknowledgement identity mismatch"
+    )
 
 
 def test_start_boundary_cleans_dead_child_and_old_slot_before_new_spawn() -> None:
