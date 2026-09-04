@@ -2,17 +2,14 @@
 
 ``ParameterState`` has room for a ``TransformSpec`` (D4) but nothing in
 ``AppState`` names a cut workspace, and ``core/state.py`` is frozen. This
-controller fills that gap: it tracks a ``CutSession`` from the render
-worker's raw artifact, recomputes the cut-derived ``CutFacts`` the
-``TransformGroup`` readout needs whenever a framing-relevant parameter
-changes, and restores a cut's stored transform before "Use this set"
-rebuilds it (E17).
+controller tracks a ``CutSession`` from the render worker's raw artifact,
+recomputes the cut-derived ``CutFacts`` the ``TransformGroup`` readout needs
+whenever a framing-relevant parameter changes, and restores a cut's stored
+transform before "Use this set" rebuilds it (E17).
 
-The session deliberately does not cache a ``FramingSpec`` (T6): the current
-framing always comes from ``store.state.parameters``, read fresh on every
-recomputation, so a padding/trim/stretch edit is what re-derives the framed
-size a stale crop is clamped against (E14) -- caching it here would let the
-two drift.
+It deliberately does not cache a ``FramingSpec`` (T6): framing always comes
+from ``store.state.parameters``, read fresh each recomputation, so an edit
+re-derives the framed size a stale crop is clamped against (E14).
 """
 
 from __future__ import annotations
@@ -59,8 +56,7 @@ class FrameReader(Protocol):
 
 class _DirectFrameReader:
     """Open a stored frame straight off disk -- never through
-    ``CutWorkspace.read_promoted_cut``, which rescans the whole cut per call.
-    """
+    ``read_promoted_cut``, which rescans the whole cut per call."""
 
     def read(self, workspace: CutWorkspace, frame: CutFrame) -> Image.Image:
         with Image.open(workspace.path / frame.filename) as opened:
@@ -83,9 +79,7 @@ class _CutFactsCancelled(Exception):
 
 class _CutFactsWorker(QObject):
     """Recompute one ``CutFacts`` off the GUI thread; also resolves the
-    ``FramingPlan`` the player's frame loader needs (task C2) to call
-    ``apply_framing`` per stored frame.
-    """
+    ``FramingPlan`` the player's frame loader needs (C2) to apply per frame."""
 
     succeeded = Signal(object, object, int)
     failed = Signal(int)
@@ -147,6 +141,9 @@ class TransformStageController(QObject):
         self._thread: QThread | None = None
         self._worker: _CutFactsWorker | None = None
         self._facts_cancel_event: threading.Event | None = None
+        # Superseded pairs stay referenced until genuinely finished -- see
+        # _join_worker / _cancel_frame_load.
+        self._retiring: list[tuple[QThread, QObject]] = []
         self._framing = _framing_from_parameters(store.state.parameters)
         self._last_transform: TransformSpec = store.state.parameters.transform
         self._player_frames: PlayerFrames | None = None
@@ -169,8 +166,7 @@ class TransformStageController(QObject):
 
         ``main_window.py`` only wires ``command_requested`` for the timeline,
         the original canvas, and the inspector (D5) -- a fourth widget needs
-        its own connection, which is what this method is for.
-        """
+        its own connection, wired here."""
         self._group = group
         self._canvas = canvas
         self._player_canvas = canvas if isinstance(canvas, ResultPlayerCanvas) else None
@@ -196,12 +192,11 @@ class TransformStageController(QObject):
         self._schedule_facts()
 
     def restore_for(self, workspace: CutWorkspace) -> None:
-        """Dispatch the cut's stored transform before a rebuild request is built.
+        """Dispatch the cut's stored transform before a rebuild request.
 
         Clamps the crop when facts for this exact cut are already known
-        (E14); otherwise dispatches the raw stored spec and lets the facts
-        recomputation triggered by the rebuild's own ``open_artifact`` clamp
-        it -- never blocks this call on decoding the cut's frames.
+        (E14); otherwise the rebuild's own ``open_artifact`` clamps it --
+        this call never blocks on decoding the cut's frames.
         """
         transform = load_transform(workspace)
         facts = self._facts
@@ -225,12 +220,17 @@ class TransformStageController(QObject):
         if self._unsubscribe is not None:
             unsubscribe, self._unsubscribe = self._unsubscribe, None
             unsubscribe()
-        # Join the frame loader before close_session(): it also cancels the
-        # frame load (via _sync_player_frames), but without waiting, which
-        # would otherwise clear _frame_thread and leave nothing here to join.
+        # Join the frame loader before close_session() clears _frame_thread
+        # via _sync_player_frames's own (non-waiting) cancel.
         self._cancel_frame_load(wait=True)
         self.close_session()
         self._join_worker(wait=True)
+        for thread, _worker in self._retiring:
+            try:
+                thread.wait(5000)  # bounded: a deadlocked retiree can't hang shutdown
+            except RuntimeError:
+                pass
+        self._retiring.clear()
 
     @property
     def session(self) -> CutSession | None:
@@ -320,11 +320,10 @@ class TransformStageController(QObject):
                     self._sync_player_frames(immediate=False)
 
     def _refresh_crop_edit_presentation(self, transform: TransformSpec) -> None:
-        """Re-apply the crop-edit presentation for *transform* without the
+        """Re-apply the crop-edit presentation for *transform*, skipping the
         frame reload ``_sync_player_frames`` would trigger (E33): the canvas
-        overlay and its focus/drag geometry only ever refresh inside
-        ``apply_presentation``, so a stale presentation between commands is
-        what stalls a drag mid-gesture and repeats a nudge's first pixel.
+        overlay only refreshes inside ``apply_presentation``, so a stale
+        presentation stalls a drag and repeats a nudge's first pixel.
         """
         canvas = self._player_canvas
         if canvas is None:
@@ -358,14 +357,8 @@ class TransformStageController(QObject):
 
     @Slot()
     def _facts_thread_finished(self) -> None:
-        """Drop the dangling references once the facts worker's thread ends.
-
-        Connected ahead of ``thread.deleteLater`` (Qt invokes slots on one
-        signal in connection order), so by the time ``deleteLater`` frees
-        the C++ ``QThread`` object, ``_join_worker`` already has nothing to
-        find and never calls ``quit()``/``wait()`` on it. The ``sender()``
-        check guards against a superseded thread's queued ``finished``
-        clearing a newer thread that ``_schedule_facts`` has since started.
+        """Null the current-thread refs once genuinely finished -- always
+        safe by then, unlike a supersede (see ``_retire``).
         """
         if self.sender() is self._thread:
             self._thread = None
@@ -405,18 +398,29 @@ class TransformStageController(QObject):
         self._sync_player_frames(immediate=True)
 
     def _join_worker(self, *, wait: bool = False) -> None:
+        """Detach the current facts worker/thread -- see ``_retire``."""
         if self._facts_cancel_event is not None:
             self._facts_cancel_event.set()
             self._facts_cancel_event = None
-        thread = self._thread
-        self._thread = None
-        self._worker = None
+        thread, self._thread = self._thread, None
+        worker, self._worker = self._worker, None
+        self._retire(thread, worker, wait=wait)
+
+    def _retire(
+        self, thread: QThread | None, worker: QObject | None, *, wait: bool
+    ) -> None:
+        """Quit *thread*; wait bounded if *wait*, else retire the pair (a
+        drop before it starts/finishes risks the SIGSEGV this guards
+        against). Also prunes retirees that have finished."""
+        self._retiring = [p for p in self._retiring if not _thread_is_finished(p[0])]
         if thread is None:
             return
         try:
             thread.quit()
             if wait:
                 thread.wait(5000)
+            elif worker is not None:
+                self._retiring.append((thread, worker))
         except RuntimeError:
             pass
 
@@ -475,11 +479,7 @@ class TransformStageController(QObject):
 
     @Slot()
     def _frame_thread_finished(self) -> None:
-        """Mirror ``_facts_thread_finished`` for the player's frame loader:
-        clear the dangling references before ``deleteLater`` (connected
-        right after) frees the ``QThread`` out from under
-        ``_cancel_frame_load``.
-        """
+        """Mirror ``_facts_thread_finished`` for the frame loader."""
         if self.sender() is self._frame_thread:
             self._frame_thread = None
             self._frame_worker = None
@@ -503,30 +503,20 @@ class TransformStageController(QObject):
         """Stop the in-flight frame load, if any, without blocking on it.
 
         The worker checks ``_frame_cancel_event`` between frames (E23), so
-        setting it here lets a superseded load stop itself; ``thread.quit()``
+        setting it here lets a superseded load stop itself -- ``quit()``
         alone cannot interrupt its running slot. Bumping the generation
-        (E24) means a load that finishes anyway -- it slipped past the
-        cancellation check, or was already queued on the Qt event loop --
-        cannot resurrect frames for a session this call is closing.
-        Only ``shutdown()`` passes ``wait=True``: the object is going away
-        and must not leave a thread running past it.
+        (E24) means a load that slips past cancellation cannot resurrect
+        frames for a session this call is closing. Only ``shutdown()``
+        passes ``wait=True``; otherwise the pair is retired -- see ``_retire``.
         """
         self._debounce_timer.stop()
         self._frame_generation = next(self._frame_generations)
         if self._frame_cancel_event is not None:
             self._frame_cancel_event.set()
             self._frame_cancel_event = None
-        thread = self._frame_thread
-        self._frame_thread = None
-        self._frame_worker = None
-        if thread is None:
-            return
-        try:
-            thread.quit()
-            if wait:
-                thread.wait(5000)
-        except RuntimeError:
-            pass
+        thread, self._frame_thread = self._frame_thread, None
+        worker, self._frame_worker = self._frame_worker, None
+        self._retire(thread, worker, wait=wait)
 
 
 def _framing_from_parameters(parameters: ParameterState) -> FramingSpec:
@@ -536,6 +526,16 @@ def _framing_from_parameters(parameters: ParameterState) -> FramingSpec:
         parameters.padding,
         parameters.stretch_x,
     )
+
+
+def _thread_is_finished(thread: QThread) -> bool:
+    """A ``RuntimeError`` means the QThread's C++ object was already
+    collected -- itself proof the thread is done.
+    """
+    try:
+        return thread.isFinished()
+    except RuntimeError:
+        return True
 
 
 def _fps_from_manifest(manifest: CutManifest) -> int:

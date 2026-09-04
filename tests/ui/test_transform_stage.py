@@ -293,6 +293,84 @@ def test_shutdown_cancels_a_live_facts_computation_instead_of_waiting_for_it(
     assert controller.facts is None
 
 
+class _StallEveryReadReader:
+    """Read every stored frame, but block on every call until released --
+    this is what lets a supersede be provoked while the superseded worker
+    is genuinely mid-decode, deterministically rather than by timing.
+    """
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self._inner = _DirectFrameReader()
+
+    def read(self, workspace: CutWorkspace, frame: CutFrame) -> Image.Image:
+        self.started.set()
+        self.release.wait(5)
+        return self._inner.read(workspace, frame)
+
+
+def test_superseding_the_facts_worker_retires_it_until_its_thread_finishes(
+    tmp_path, qtbot
+) -> None:
+    """Pins the SIGSEGV fix (CI run 33856558458; devbox measurement 9-10/20
+    failures with a core dump inside ``QThread::started`` emission): a
+    superseded worker/thread pair must stay referenced by the controller
+    until the thread genuinely finishes, never dropped at supersede time --
+    dropping it before the thread has started (or finished) is what let Qt
+    activate ``started`` on an already-collected receiver.
+
+    Deterministic: the reader blocks every read on a real
+    ``threading.Event``, so the assertions depend on that ordering, not on
+    wall-clock guesses.
+    """
+    artifact = _seed_cut(tmp_path, "seed-retire")
+    store = ReducerStore(_ready_state(tmp_path / "source.mp4"))
+    reader = _StallEveryReadReader()
+    controller = TransformStageController(store, frame_reader=reader)
+    # A mismatched threshold: the render's cached union metadata must be
+    # skipped so _resolve_union actually decodes the stored frames.
+    store.dispatch(GlobalTrimChanged(True))
+    store.dispatch(AlphaThresholdChanged(Decimal("50")))
+
+    controller.open_artifact(artifact)
+    assert reader.started.wait(5), "the facts worker never reached the first frame"
+    retiring_thread = controller._thread  # noqa: SLF001
+    retiring_worker = controller._worker  # noqa: SLF001
+    assert retiring_thread is not None
+    assert retiring_worker is not None
+
+    controller._schedule_facts()  # noqa: SLF001 -- supersede while still blocked
+
+    assert controller._thread is not retiring_thread  # noqa: SLF001
+    assert not retiring_thread.isFinished(), (
+        "a superseded thread must stay referenced until it genuinely finishes"
+    )
+    assert (retiring_thread, retiring_worker) in controller._retiring  # noqa: SLF001
+
+    # A plain busy-wait, not qtbot.wait/waitUntil: spinning the Qt event
+    # loop here could process the retired thread's queued `finished` ->
+    # `deleteLater`, and isFinished() on an already-deleted QThread raises
+    # RuntimeError -- exactly the class of access this fix guards against
+    # in production code (see `_thread_is_finished`). Polling without
+    # spinning the loop keeps the C++ object alive so this check stays
+    # safe while still being a real completion condition, not a fixed sleep.
+    reader.release.set()
+    deadline = time.monotonic() + 5
+    while not retiring_thread.isFinished() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert retiring_thread.isFinished(), "the superseded thread never finished"
+    assert (retiring_thread, retiring_worker) in controller._retiring, (  # noqa: SLF001
+        "a finished retiree must stay put until something prunes the list"
+    )
+
+    controller.shutdown()
+
+    assert controller._retiring == []  # noqa: SLF001
+    assert controller._thread is None  # noqa: SLF001
+    assert controller._worker is None  # noqa: SLF001
+
+
 def test_attach_wires_the_canvas_command_requested_to_the_store(qtbot) -> None:
     store = _FakeStore(AppState())
     controller = TransformStageController(store)
