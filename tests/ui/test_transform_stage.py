@@ -780,3 +780,68 @@ def test_attach_wires_the_players_playhead_to_the_groups_use_playhead_buttons(
 
     assert group._playhead == 7  # noqa: SLF001
     controller.shutdown()
+
+
+# -- a cut session must not outlive the source it belongs to ---------------
+
+
+def test_loading_a_different_source_closes_the_open_cut_session(
+    tmp_path, qtbot
+) -> None:
+    """Trigger: a cut open for a 440x444 clip, a transform set, then a
+    1920x1080 file loaded. ``SourceLoadRequested`` resets the transform but
+    left ``_session``/``_facts`` in place, so the reset read as an ordinary
+    edit: it reloaded frames from the previous cut, the Transform controls
+    stayed live on the previous cut's framed size, and a render started in
+    that state would have cut a 440x444 corner out of the new video --
+    ``clamp_crop`` only intervenes when the crop no longer fits.
+    """
+    artifact = _seed_cut(tmp_path, "source-swap")
+    reader = _CountingReader()
+    store = ReducerStore(_ready_state(tmp_path / "source.mp4"))
+    controller = TransformStageController(store, frame_reader=reader)
+    canvas = ResultPlayerCanvas()
+    qtbot.addWidget(canvas)
+    group = TransformGroup(lambda _event: None)
+    qtbot.addWidget(group)
+    controller.attach(group, canvas)
+
+    controller.open_artifact(artifact)
+    qtbot.waitUntil(lambda: canvas.current_frame is not None, timeout=5000)
+    frame_count = artifact.manifest.frame_count
+    store.dispatch(TransformChanged(TransformSpec(crop=CropSpec(0, 0, 64, 64))))
+    qtbot.waitUntil(lambda: reader.calls >= 2 * frame_count, timeout=5000)
+    reads_before = reader.calls
+
+    store.dispatch(SourceLoadRequested("other-source", "load-2"))
+
+    assert controller.session is None
+    assert controller.facts is None
+    assert canvas.current_frame is None
+    qtbot.wait(500)  # longer than the 250ms crop-edit debounce
+    assert reader.calls == reads_before, (
+        "no frame may be read from a cut whose source is no longer loaded"
+    )
+    controller.shutdown()
+
+
+def test_reloading_the_same_source_leaves_the_open_cut_session_intact(
+    tmp_path, qtbot
+) -> None:
+    """The source identity decides, not the event: a state change that keeps
+    ``source_id`` must leave a healthy session alone. (The shell mints a fresh
+    id per file dialog, so re-opening the same file does close the session.)
+    """
+    artifact = _seed_cut(tmp_path, "same-source")
+    store = ReducerStore(_ready_state(tmp_path / "source.mp4"))
+    controller = TransformStageController(store)
+
+    controller.open_artifact(artifact)
+    qtbot.waitUntil(lambda: controller.facts is not None, timeout=5000)
+    facts = controller.facts
+
+    store.dispatch(SourceLoadRequested("source", "load-2"))
+
+    assert controller.session is not None
+    assert controller.facts == facts
+    controller.shutdown()

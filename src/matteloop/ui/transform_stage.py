@@ -146,6 +146,7 @@ class TransformStageController(QObject):
         self._retiring: list[tuple[QThread, QObject]] = []
         self._framing = _framing_from_parameters(store.state.parameters)
         self._last_transform: TransformSpec = store.state.parameters.transform
+        self._source_id: str | None = store.state.source_id
         self._player_frames: PlayerFrames | None = None
         self._frame_generations = count(1)
         self._frame_generation = 0
@@ -298,6 +299,10 @@ class TransformStageController(QObject):
     # -- facts recomputation -------------------------------------------
 
     def _state_changed(self, state: AppState) -> None:
+        if state.source_id != self._source_id:
+            self._source_id = state.source_id
+            self._source_changed(state.parameters)
+            return
         parameters = state.parameters
         framing = _framing_from_parameters(parameters)
         framing_changed = framing != self._framing
@@ -323,6 +328,20 @@ class TransformStageController(QObject):
                     self._refresh_crop_edit_presentation(transform)
                 elif reload_relevant_changed:
                     self._sync_player_frames(immediate=False)
+
+    def _source_changed(self, parameters: ParameterState) -> None:
+        """Close the open cut: it belongs to a file that is no longer loaded.
+
+        ``SourceLoadRequested`` resets the transform, which the edit path in
+        ``_state_changed`` would otherwise read as an ordinary edit and answer
+        by reloading the previous cut's frames -- and the retained facts would
+        keep the Transform controls live on the previous cut's framed size,
+        which ``clamp_crop`` cannot catch while the stale crop still fits
+        inside the new source.
+        """
+        self.close_session()
+        self._framing = _framing_from_parameters(parameters)
+        self._last_transform = parameters.transform
 
     def _refresh_crop_edit_presentation(self, transform: TransformSpec) -> None:
         """Re-apply the crop-edit presentation for *transform*, skipping the
