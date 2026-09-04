@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 from PySide6.QtCore import QSettings, Qt
+from PySide6.QtWidgets import QAbstractSpinBox, QComboBox
 
 from matteloop.core.execution_providers import (
     COREML_EXECUTION_PROVIDER,
@@ -261,3 +262,20 @@ def test_inspector_explains_invalid_output_filename_without_emitting_a_command(
     assert commands == []
     assert inspector.output_filename_edit.property("invalid") is True
     assert "single" in inspector.output_filename_edit.toolTip()
+
+
+def test_every_inspector_field_refuses_focus_from_the_wheel(qtbot) -> None:
+    """Every combo and spin box in the inspector, Transform panel included,
+    goes through compact_field: focus comes from a click or Tab only, so a
+    wheel tick over an unfocused field scrolls the inspector instead of
+    focusing and editing it."""
+    inspector = Inspector(_settings())
+    qtbot.addWidget(inspector)
+
+    fields = [
+        *inspector.findChildren(QComboBox),
+        *inspector.findChildren(QAbstractSpinBox),
+    ]
+
+    assert len(fields) >= 20
+    assert {field.focusPolicy() for field in fields} == {Qt.FocusPolicy.StrongFocus}
