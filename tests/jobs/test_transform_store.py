@@ -129,6 +129,33 @@ def test_discard_transform_on_a_missing_file_is_silent(tmp_path: Path) -> None:
     assert not transform_sidecar_path(workspace).exists()
 
 
+def test_store_transform_notes_a_failed_sidecar_removal_but_still_completes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A non-identity transform followed by an identity rebuild removes the
+    old sidecar; if the unlink itself fails, the stale sidecar would silently
+    restore a transform the last render did not apply. The job must still
+    complete (G4), but the failure must not vanish -- it belongs in notes."""
+    workspace = _seeded_cut(tmp_path)
+    store_transform(workspace, TransformSpec(first_frame=1), [])
+    sidecar = transform_sidecar_path(workspace)
+    assert sidecar.exists()
+    real_unlink = Path.unlink
+
+    def failing_unlink(self: Path, *args: object, **kwargs: object) -> None:
+        if self == sidecar:
+            raise PermissionError("simulated removal failure")
+        real_unlink(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+    notes: list[str] = []
+
+    store_transform(workspace, TransformSpec(), notes)
+
+    assert len(notes) == 1
+    assert "transform" in notes[0]
+
+
 def test_sidecar_beside_the_cut_does_not_break_listing_or_validation(
     tmp_path: Path,
 ) -> None:

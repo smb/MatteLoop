@@ -141,7 +141,7 @@ def store_transform(
     """Persist *spec* beside the cut, or remove it for identity. Swallows
     ``OSError`` into a note (G4): the job already published its output."""
     if spec.is_identity:
-        discard_transform(workspace)
+        discard_transform(workspace, notes)
         return
     payload = {
         "schema": TRANSFORM_SIDECAR_SCHEMA,
@@ -189,9 +189,19 @@ def _fsync_parent(path: Path) -> None:
         os.close(descriptor)
 
 
-def discard_transform(workspace: CutWorkspace) -> None:
-    """Remove the sidecar if present. Best effort -- never raises."""
+def discard_transform(
+    workspace: CutWorkspace, notes: list[str] | None = None
+) -> None:
+    """Remove the sidecar if present. Best effort -- never raises.
+
+    A missing sidecar is the common, silent case. Any other removal
+    failure is routed through *notes* (G4): the job already published its
+    output, but leaving a stale sidecar in place would silently restore a
+    transform the last render did not apply.
+    """
     try:
         transform_sidecar_path(workspace).unlink()
-    except OSError:
+    except FileNotFoundError:
         pass
+    except OSError as error:
+        _note(notes, f"could not remove the stored transform: {error}")
