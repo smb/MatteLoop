@@ -22,6 +22,7 @@ from matteloop.jobs.models.download import DownloadHttpError, DownloadProxyError
 _NETWORK_TIMEOUT_MS = 60_000
 _DOWNLOAD_TRACE = os.environ.get("MATTELOOP_DOWNLOAD_TRACE") == "1"
 _DOWNLOAD_TRACE_BYTE_INTERVAL = 8 << 20
+_DOWNLOAD_TRACE_WAIT_INTERVAL = 2.0
 _LOGGER = logging.getLogger(__name__)
 _ONNXRUNTIME_TRACE_LOGGED = False
 _PROXY_ERROR_NAMES = frozenset(
@@ -46,11 +47,18 @@ class QtNetworkDownloadTransport:
 class _QtNetworkDownloadResponse:
     def __init__(self, url: str) -> None:
         if _DOWNLOAD_TRACE:
+            self._trace_started = time.monotonic()
             self._constructed_thread_id = threading.get_ident()
             self._wait_index = 0
             self._empty_wakes = 0
+            self._empty_wake_total = 0
+            self._empty_wake_started = 0.0
             self._trace_byte_total = 0
             self._next_trace_byte_log = 0
+            self._trace_suppressed_waits = 0
+            self._last_wait_state: tuple[bool, str, bool] | None = None
+            self._last_trace_wait_at = self._trace_started
+            self._trace_summary_logged = False
         QNetworkProxyFactory.setUseSystemConfiguration(True)
         self._manager = QNetworkAccessManager()
         request = QNetworkRequest(QUrl(url))
@@ -82,26 +90,39 @@ class _QtNetworkDownloadResponse:
     def read(self, size: int) -> bytes:
         if self._closed or size <= 0:
             return b""
-        while True:
-            self._raise_reply_error()
-            available = self._reply.bytesAvailable()
-            if available:
-                chunk = bytes(self._reply.read(min(size, available)).data())
-                if chunk or self._reply.isFinished():
-                    if chunk and _DOWNLOAD_TRACE:
-                        self._trace_read(len(chunk))
-                        self._empty_wakes = 0
-                    return chunk
-            elif self._reply.isFinished():
-                return b""
-            self._wait_for_event(include_metadata=False)
+        try:
+            while True:
+                self._raise_reply_error()
+                available = self._reply.bytesAvailable()
+                if available:
+                    chunk = bytes(self._reply.read(min(size, available)).data())
+                    if chunk or self._reply.isFinished():
+                        if chunk and _DOWNLOAD_TRACE:
+                            self._trace_empty_wake_run_end(self._wait_index)
+                            self._trace_read(len(chunk))
+                        elif self._reply.isFinished() and _DOWNLOAD_TRACE:
+                            self._finish_trace()
+                        return chunk
+                elif self._reply.isFinished():
+                    if _DOWNLOAD_TRACE:
+                        self._finish_trace()
+                    return b""
+                self._wait_for_event(include_metadata=False)
+        except BaseException:
+            if _DOWNLOAD_TRACE:
+                self._finish_trace()
+            raise
 
     def close(self) -> None:
         if self._closed:
+            if _DOWNLOAD_TRACE:
+                self._finish_trace()
             return
         self._closed = True
         if not self._reply.isFinished():
             self._reply.abort()
+        if _DOWNLOAD_TRACE:
+            self._finish_trace()
 
     def _mark_tls_error(self, _errors: object) -> None:
         self._tls_error = True
@@ -155,10 +176,13 @@ class _QtNetworkDownloadResponse:
         if not signaled:
             if _DOWNLOAD_TRACE:
                 _LOGGER.info(
-                    "download guard timer expired wait_index=%d timeout_ms=%d",
+                    "download guard timer expired wait_index=%d timeout_ms=%d "
+                    "suppressed=%d",
                     wait_index,
                     _NETWORK_TIMEOUT_MS,
+                    self._take_suppressed_waits(),
                 )
+                self._finish_trace()
             raise TimeoutError("Qt Network response timed out")
 
     def _trace_response(self, url: str) -> None:
@@ -169,11 +193,12 @@ class _QtNetworkDownloadResponse:
         except ValueError:
             host = path = "<unavailable>"
         _LOGGER.info(
-            "download response host=%s path=%s status=%s thread_id=%d",
+            "download response host=%s path=%s status=%s thread_id=%d suppressed=%d",
             host,
             path,
             self._http_status(),
             self._constructed_thread_id,
+            self._take_suppressed_waits(),
         )
 
     def _trace_wait(
@@ -184,32 +209,117 @@ class _QtNetworkDownloadResponse:
         signaled: bool,
     ) -> None:
         available = self._reply.bytesAvailable()
+        finished = self._reply.isFinished()
+        error_name = self._reply_error_name()
+        observed_at = time.monotonic()
+        state = (finished, error_name, available > 0)
+        state_changed = (
+            self._last_wait_state is not None and state != self._last_wait_state
+        )
+        self._last_wait_state = state
+        if (
+            wait_index <= 20
+            or state_changed
+            or observed_at - self._last_trace_wait_at >= _DOWNLOAD_TRACE_WAIT_INTERVAL
+        ):
+            self._log_trace_wait(
+                wait_index,
+                include_metadata,
+                available,
+                finished,
+                error_name,
+                (observed_at - started) * 1000,
+            )
+        else:
+            self._trace_suppressed_waits += 1
+        if signaled and available == 0:
+            self._trace_empty_wake(wait_index, observed_at)
+        else:
+            self._trace_empty_wake_run_end(wait_index)
+
+    def _log_trace_wait(
+        self,
+        wait_index: int,
+        include_metadata: bool,
+        available: int,
+        finished: bool,
+        error_name: str,
+        elapsed_ms: float,
+    ) -> None:
         _LOGGER.info(
             "download wait index=%d metadata=%s bytes_available=%d finished=%s "
-            "error=%s elapsed_ms=%.1f",
+            "error=%s elapsed_ms=%.1f suppressed=%d",
             wait_index,
             include_metadata,
             available,
-            self._reply.isFinished(),
-            self._reply_error_name(),
-            (time.monotonic() - started) * 1000,
+            finished,
+            error_name,
+            elapsed_ms,
+            self._take_suppressed_waits(),
         )
-        if signaled and available == 0:
-            self._empty_wakes += 1
+        self._last_trace_wait_at = time.monotonic()
+
+    def _trace_empty_wake(self, wait_index: int, observed_at: float) -> None:
+        if not self._empty_wakes:
+            self._empty_wake_started = observed_at
+        self._empty_wakes += 1
+        self._empty_wake_total += 1
+        count = self._empty_wakes
+        if count == 1 or count in {10, 100, 1000} or count > 1000 and count % 1000 == 0:
             _LOGGER.info(
-                "download empty wake wait_index=%d consecutive=%d",
+                "download empty wake wait_index=%d consecutive=%d suppressed=%d",
                 wait_index,
-                self._empty_wakes,
+                count,
+                self._take_suppressed_waits(),
             )
+
+    def _trace_empty_wake_run_end(self, wait_index: int) -> None:
+        if not self._empty_wakes:
+            return
+        duration_ms = (time.monotonic() - self._empty_wake_started) * 1000
+        _LOGGER.info(
+            "download empty wake run ended wait_index=%d consecutive=%d "
+            "duration_ms=%.1f suppressed=%d",
+            wait_index,
+            self._empty_wakes,
+            duration_ms,
+            self._take_suppressed_waits(),
+        )
+        self._empty_wakes = 0
+        self._empty_wake_started = 0.0
+
+    def _take_suppressed_waits(self) -> int:
+        suppressed = self._trace_suppressed_waits
+        self._trace_suppressed_waits = 0
+        return suppressed
 
     def _trace_read(self, byte_count: int) -> None:
         self._trace_byte_total += byte_count
         if self._trace_byte_total < self._next_trace_byte_log:
             return
-        _LOGGER.info("download read bytes_total=%d", self._trace_byte_total)
+        _LOGGER.info(
+            "download read bytes_total=%d suppressed=%d",
+            self._trace_byte_total,
+            self._take_suppressed_waits(),
+        )
         self._next_trace_byte_log = (
             self._trace_byte_total + _DOWNLOAD_TRACE_BYTE_INTERVAL
         )
+
+    def _finish_trace(self) -> None:
+        if self._trace_summary_logged:
+            return
+        self._trace_empty_wake_run_end(self._wait_index)
+        _LOGGER.info(
+            "download summary bytes_total=%d waits=%d empty_wakes=%d "
+            "duration_ms=%.1f suppressed=%d",
+            self._trace_byte_total,
+            self._wait_index,
+            self._empty_wake_total,
+            (time.monotonic() - self._trace_started) * 1000,
+            self._take_suppressed_waits(),
+        )
+        self._trace_summary_logged = True
 
     def _raise_http_or_transport_error(self) -> None:
         status = self._http_status()

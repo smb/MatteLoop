@@ -187,11 +187,19 @@ def _response_with_fake_wait(
         module._QtNetworkDownloadResponse
     )
     response._reply = reply
-    response._wait_index = 0
-    response._empty_wakes = 0
-    response._trace_byte_total = 0
-    response._next_trace_byte_log = 0
-    response._constructed_thread_id = threading.get_ident()
+    if module._DOWNLOAD_TRACE:
+        response._trace_started = time.monotonic()
+        response._wait_index = 0
+        response._empty_wakes = 0
+        response._empty_wake_total = 0
+        response._empty_wake_started = 0.0
+        response._trace_byte_total = 0
+        response._next_trace_byte_log = 0
+        response._trace_suppressed_waits = 0
+        response._last_wait_state = None
+        response._last_trace_wait_at = response._trace_started
+        response._trace_summary_logged = False
+        response._constructed_thread_id = threading.get_ident()
     response._closed = False
     response._tls_error = False
     return response
@@ -353,10 +361,51 @@ def test_download_trace_is_silent_when_the_environment_variable_is_unset(
     with caplog.at_level(logging.INFO, logger=module.__name__):
         response._wait_for_event(include_metadata=False)
 
+    assert not hasattr(response, "_wait_index")
     assert not [record for record in caplog.records if record.name == module.__name__]
 
 
-def test_download_trace_records_each_wait_with_reply_state(
+def test_download_trace_keeps_initial_waits_and_logs_state_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    reload_download_transport,
+) -> None:
+    module = reload_download_transport("1")
+    monkeypatch.setattr(module, "_DOWNLOAD_TRACE_WAIT_INTERVAL", float("inf"))
+    reply = _FakeReply(available=7)
+    response = _response_with_fake_wait(module, monkeypatch, reply, _ready_read_event)
+
+    with caplog.at_level(logging.INFO, logger=module.__name__):
+        for _ in range(21):
+            response._wait_for_event(include_metadata=True)
+        reply.available = 0
+        response._wait_for_event(include_metadata=True)
+        reply.error_name = "TemporaryNetworkError"
+        response._wait_for_event(include_metadata=True)
+        reply.finished_state = True
+        response._wait_for_event(include_metadata=True)
+
+    wait_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == module.__name__
+        and record.getMessage().startswith("download wait ")
+    ]
+    assert [
+        int(message.split("index=", 1)[1].split(" ", 1)[0]) for message in wait_messages
+    ] == list(range(1, 21)) + [22, 23, 24]
+    assert "metadata=True" in wait_messages[0]
+    assert "bytes_available=7" in wait_messages[0]
+    assert "finished=False" in wait_messages[0]
+    assert "error=NoError" in wait_messages[0]
+    assert "elapsed_ms=" in wait_messages[0]
+    assert "suppressed=1" in wait_messages[20]
+    assert "bytes_available=0" in wait_messages[20]
+    assert "error=TemporaryNetworkError" in wait_messages[21]
+    assert "finished=True" in wait_messages[22]
+
+
+def test_download_trace_emits_a_wait_heartbeat_after_two_seconds(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     reload_download_transport,
@@ -364,27 +413,62 @@ def test_download_trace_records_each_wait_with_reply_state(
     module = reload_download_transport("1")
     reply = _FakeReply(available=7)
     response = _response_with_fake_wait(module, monkeypatch, reply, _ready_read_event)
+    now = 0.0
+    monkeypatch.setattr(module.time, "monotonic", lambda: now)
 
     with caplog.at_level(logging.INFO, logger=module.__name__):
-        response._wait_for_event(include_metadata=True)
+        for wait_index in range(1, 21):
+            response._trace_wait(wait_index, False, 0.0, True)
+        now = 1.99
+        response._trace_wait(21, False, 0.0, True)
+        now = 2.0
+        response._trace_wait(22, False, 0.0, True)
 
-    messages = [
+    wait_messages = [
         record.getMessage()
         for record in caplog.records
-        if record.name == module.__name__
+        if record.getMessage().startswith("download wait ")
     ]
-    wait_message = next(
-        message for message in messages if message.startswith("download wait ")
+    assert len(wait_messages) == 21
+    assert "index=21" not in " ".join(wait_messages)
+    assert "index=22" in wait_messages[-1]
+    assert "suppressed=1" in wait_messages[-1]
+
+
+def test_download_trace_logs_empty_wake_milestones_and_run_duration(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    reload_download_transport,
+) -> None:
+    module = reload_download_transport("1")
+    reply = _FakeReply()
+    response = _response_with_fake_wait(module, monkeypatch, reply, _ready_read_event)
+
+    with caplog.at_level(logging.INFO, logger=module.__name__):
+        for _ in range(2000):
+            response._wait_for_event(include_metadata=False)
+        reply.available = 1
+        assert response.read(1) == b"x"
+
+    empty_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("download empty wake wait_index=")
+    ]
+    assert [
+        int(message.split("consecutive=", 1)[1].split(" ", 1)[0])
+        for message in empty_messages
+    ] == [1, 10, 100, 1000, 2000]
+    run_end = next(
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("download empty wake run ended ")
     )
-    assert "index=1" in wait_message
-    assert "metadata=True" in wait_message
-    assert "bytes_available=7" in wait_message
-    assert "finished=False" in wait_message
-    assert "error=NoError" in wait_message
-    assert "elapsed_ms=" in wait_message
+    assert "consecutive=2000" in run_end
+    assert "duration_ms=" in run_end
 
 
-def test_download_trace_counts_empty_wakes_until_bytes_are_read(
+def test_download_trace_closing_summary_reports_response_totals(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     reload_download_transport,
@@ -395,20 +479,22 @@ def test_download_trace_counts_empty_wakes_until_bytes_are_read(
 
     with caplog.at_level(logging.INFO, logger=module.__name__):
         response._wait_for_event(include_metadata=False)
-        response._wait_for_event(include_metadata=False)
-        response._wait_for_event(include_metadata=False)
         reply.available = 1
         assert response.read(1) == b"x"
-        response._wait_for_event(include_metadata=False)
+        reply.finished_state = True
+        response.close()
+        response.close()
 
-    empty_messages = [
+    summary_messages = [
         record.getMessage()
         for record in caplog.records
-        if record.getMessage().startswith("download empty wake ")
+        if record.getMessage().startswith("download summary ")
     ]
-    assert ["consecutive=1", "consecutive=2", "consecutive=3", "consecutive=1"] == [
-        message.rsplit(" ", 1)[-1] for message in empty_messages
-    ]
+    assert len(summary_messages) == 1
+    assert "bytes_total=1" in summary_messages[0]
+    assert "waits=1" in summary_messages[0]
+    assert "empty_wakes=1" in summary_messages[0]
+    assert "duration_ms=" in summary_messages[0]
 
 
 def test_download_trace_reports_guard_timer_timeout(
@@ -434,6 +520,14 @@ def test_download_trace_reports_guard_timer_timeout(
         "download guard timer expired wait_index=1" in record.getMessage()
         for record in caplog.records
     )
+    summary = next(
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("download summary ")
+    )
+    assert "bytes_total=0" in summary
+    assert "waits=1" in summary
+    assert "empty_wakes=0" in summary
 
 
 def test_download_trace_logs_response_location_and_thread(
@@ -447,6 +541,7 @@ def test_download_trace_logs_response_location_and_thread(
     )
     response._reply = _FakeReply()
     response._constructed_thread_id = threading.get_ident()
+    response._trace_suppressed_waits = 0
 
     with caplog.at_level(logging.INFO, logger=module.__name__):
         response._trace_response("https://example.test/models/model.onnx?token=secret")
