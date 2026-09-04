@@ -343,11 +343,27 @@ class TransformStageController(QObject):
         worker.failed.connect(self._facts_failed)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._facts_thread_finished)
         thread.finished.connect(thread.deleteLater)
         thread.started.connect(worker.run)
         self._thread = thread
         self._worker = worker
         thread.start()
+
+    @Slot()
+    def _facts_thread_finished(self) -> None:
+        """Drop the dangling references once the facts worker's thread ends.
+
+        Connected ahead of ``thread.deleteLater`` (Qt invokes slots on one
+        signal in connection order), so by the time ``deleteLater`` frees
+        the C++ ``QThread`` object, ``_join_worker`` already has nothing to
+        find and never calls ``quit()``/``wait()`` on it. The ``sender()``
+        check guards against a superseded thread's queued ``finished``
+        clearing a newer thread that ``_schedule_facts`` has since started.
+        """
+        if self.sender() is self._thread:
+            self._thread = None
+            self._worker = None
 
     @Slot(object, object, int)
     def _facts_ready(self, facts: object, plan: object, generation: int) -> None:
@@ -440,11 +456,23 @@ class TransformStageController(QObject):
         worker.failed.connect(self._frame_load_failed)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._frame_thread_finished)
         thread.finished.connect(thread.deleteLater)
         thread.started.connect(worker.run)
         self._frame_thread = thread
         self._frame_worker = worker
         thread.start()
+
+    @Slot()
+    def _frame_thread_finished(self) -> None:
+        """Mirror ``_facts_thread_finished`` for the player's frame loader:
+        clear the dangling references before ``deleteLater`` (connected
+        right after) frees the ``QThread`` out from under
+        ``_cancel_frame_load``.
+        """
+        if self.sender() is self._frame_thread:
+            self._frame_thread = None
+            self._frame_worker = None
 
     @Slot(object, int)
     def _frame_load_succeeded(self, frames: object, generation: int) -> None:
