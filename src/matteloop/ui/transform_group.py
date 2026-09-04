@@ -275,9 +275,21 @@ class TransformGroup(QWidget):
         layout.addWidget(self._resize_section())
         layout.addWidget(self.readout_label)
 
+    def _section_heading(self, text: str, object_name: str) -> QLabel:
+        """A section title distinguishing this group's fields from its
+        siblings (e.g. crop's Width/Height from resize's), matching the
+        bold, non-interactive heading idiom the disclosure headers already
+        use (``theme.py``'s ``QToolButton { font-weight: 600; }``)."""
+        heading = QLabel(text)
+        heading.setObjectName(object_name)
+        heading.setProperty("heading", True)
+        heading.setAccessibleName(text)
+        return heading
+
     def _trim_section(self) -> QWidget:
         section = QWidget()
         layout = QFormLayout(section)
+        layout.addRow(self._section_heading("Trim", "transform_trim_heading"))
         layout.addRow("First frame", self._trim_row(
             self.first_frame_spinbox, self.first_playhead_button
         ))
@@ -297,6 +309,7 @@ class TransformGroup(QWidget):
     def _crop_section(self) -> QWidget:
         section = QWidget()
         layout = QFormLayout(section)
+        layout.addRow(self._section_heading("Crop", "transform_crop_heading"))
         layout.addRow(self.crop_edit_checkbox)
         layout.addRow("Aspect", self.aspect_combo)
         layout.addRow("X", self.crop_x_spinbox)
@@ -308,6 +321,7 @@ class TransformGroup(QWidget):
     def _resize_section(self) -> QWidget:
         section = QWidget()
         layout = QFormLayout(section)
+        layout.addRow(self._section_heading("Resize", "transform_resize_heading"))
         layout.addRow("Width", self.width_spinbox)
         layout.addRow("Height", self.height_spinbox)
         layout.addRow("Percent", self.percent_spinbox)

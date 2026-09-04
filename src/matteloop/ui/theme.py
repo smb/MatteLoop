@@ -84,6 +84,7 @@ def install_theme(
         QPushButton[primaryAction='true'] {{ background: {ACCENT_COLOR};
             color: {PRIMARY_ACTION_TEXT_COLOR}; border-color: {ACCENT_COLOR}; }}
         QLabel[secondary='true'] {{ color: {SECONDARY_COLOR}; }}
+        QLabel[heading='true'] {{ font-weight: 600; }}
         QLabel[mono='true'], QAbstractSpinBox[mono='true'], QLineEdit[mono='true'] {{
             font-family: '{MONO_FONT}', {_MONO_FALLBACKS};
         }}

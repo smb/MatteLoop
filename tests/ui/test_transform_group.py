@@ -4,6 +4,8 @@ from dataclasses import replace
 from fractions import Fraction
 from pathlib import Path
 
+from PySide6.QtWidgets import QLabel
+
 from matteloop.core.crop import centered_crop_for_aspect
 from matteloop.core.parameters import TransformChanged
 from matteloop.core.specs import (
@@ -303,3 +305,27 @@ def test_tab_widgets_returns_the_focus_order(qtbot) -> None:
     assert widgets[0] is group.first_frame_spinbox
     assert group.size_preset_combo in widgets
     assert len(widgets) == len(set(widgets))
+
+
+def test_crop_and_resize_sections_have_distinguishing_headings(qtbot) -> None:
+    """Without a heading, crop's and resize's identical Width/Height field
+    pairs are indistinguishable (only the trim rows read unambiguously)."""
+    group, _emitted = _group(qtbot)
+
+    trim_heading = group.findChild(QLabel, "transform_trim_heading")
+    crop_heading = group.findChild(QLabel, "transform_crop_heading")
+    resize_heading = group.findChild(QLabel, "transform_resize_heading")
+
+    assert trim_heading is not None and trim_heading.text() == "Trim"
+    assert crop_heading is not None and crop_heading.text() == "Crop"
+    assert resize_heading is not None and resize_heading.text() == "Resize"
+    # Each heading sits in its own section, ahead of that section's Width
+    # field, not attached to a sibling section.
+    assert crop_heading.parentWidget() is group.crop_width_spinbox.parentWidget()
+    assert resize_heading.parentWidget() is group.width_spinbox.parentWidget()
+    assert crop_heading.parentWidget() is not resize_heading.parentWidget()
+    # A plain heading label is not a tab stop and must not shift focus order.
+    assert trim_heading not in group.tab_widgets()
+    assert crop_heading not in group.tab_widgets()
+    assert resize_heading not in group.tab_widgets()
+    assert group.tab_widgets()[0] is group.first_frame_spinbox
