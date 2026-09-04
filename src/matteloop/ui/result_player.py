@@ -116,23 +116,33 @@ class ResultPlayerCanvas(CropCanvas):
     # -- public surface ----------------------------------------------------
 
     def set_frames(self, frames: PlayerFrames | None) -> None:
-        """Replace the cached frames; ``None`` closes the session (E31)."""
-        self.pause()
+        """Replace the cached frames; ``None`` closes the session (E31).
+
+        A crop/resize edit rebuilds the cache while the session stays open;
+        pausing unconditionally here silently stopped a loop that was
+        already playing, since nothing ever resumes it but the Play button.
+        Only closing the session (``frames is None``) forces a pause. The
+        kept range is preserved across such a swap too -- resetting it would
+        drop a trim ``set_kept_range`` just applied moments earlier.
+        """
         had_session = self._frames is not None
-        if frames is not None and not had_session:
-            self._cover_before_session = self._cover_frame
-            self.set_cover_frame(False)
-        elif frames is None and had_session and self._cover_before_session is not None:
-            self.set_cover_frame(self._cover_before_session)
-            self._cover_before_session = None
-        self._frames = frames
-        self._kept = None
         if frames is None:
+            self.pause()
+            if had_session and self._cover_before_session is not None:
+                self.set_cover_frame(self._cover_before_session)
+                self._cover_before_session = None
+            self._frames = None
+            self._kept = None
             self.play_button.hide()
             self._playhead_index = None
             self.set_status_marker(None)
             self.set_frame(None)
             return
+        if not had_session:
+            self._cover_before_session = self._cover_frame
+            self.set_cover_frame(False)
+            self._kept = None
+        self._frames = frames
         self.play_button.show()
         playable = self._playable()
         self._playhead_index = playable.start if playable else None

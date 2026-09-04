@@ -133,6 +133,44 @@ def test_new_kept_range_re_slices_without_a_new_playerframes(qtbot) -> None:
     assert canvas._frames is frames  # noqa: SLF001
 
 
+def test_frame_cache_swap_while_playing_does_not_stop_the_loop(qtbot) -> None:
+    """``set_frames`` paused unconditionally on every call, so a cache swap
+    while a session stays open (e.g. toggling "Edit crop" off, which
+    rebuilds the transformed cache) silently stopped a loop that was
+    already playing -- nothing then resumed it, since ``play()`` is only
+    ever called from the Play/Pause button toggle.
+    """
+    canvas = ResultPlayerCanvas()
+    qtbot.addWidget(canvas)
+    canvas.set_frames(_player_frames(4, (500, 500, 500, 500)))
+    canvas.play()
+    assert canvas.playing
+
+    canvas.set_frames(_player_frames(4, (500, 500, 500, 500)))
+
+    assert canvas.playing, "a cache swap while the session stays open must not pause"
+    assert canvas.play_button.text() == "Pause"
+
+
+def test_frame_cache_swap_preserves_an_already_applied_kept_range(qtbot) -> None:
+    """A cache swap must not drop a trim already applied via
+    ``set_kept_range`` -- ``set_frames`` used to reset ``self._kept`` to
+    ``None`` (the full range) on every call, including one that only swaps
+    in a rebuilt cache for the same open session.
+    """
+    canvas = ResultPlayerCanvas()
+    qtbot.addWidget(canvas)
+    canvas.set_frames(_player_frames(4, (100, 100, 100, 100)))
+    canvas.set_kept_range(range(1, 4))
+
+    canvas.set_frames(_player_frames(4, (100, 100, 100, 100)))
+
+    assert canvas._kept == range(1, 4), (  # noqa: SLF001
+        "a frame-cache swap must preserve an already-applied kept range"
+    )
+    assert canvas.current_frame == 1
+
+
 def test_play_button_hidden_without_frames_and_shown_with_them(qtbot) -> None:
     canvas = ResultPlayerCanvas()
     qtbot.addWidget(canvas)
