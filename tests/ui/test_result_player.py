@@ -146,6 +146,43 @@ def test_play_button_hidden_without_frames_and_shown_with_them(qtbot) -> None:
     assert canvas.play_button.isHidden()
 
 
+def test_checkerboard_paints_whenever_the_player_holds_frames(qtbot) -> None:
+    """A Render can open the transform stage without a Preview ever having
+    run, leaving ``checkerboard`` (a PreviewState proxy) false while the
+    player shows a transparent cut-out. The canvas must not rely on that
+    property once it is actually holding frames to show."""
+    canvas = ResultPlayerCanvas()
+    qtbot.addWidget(canvas)
+    canvas.setProperty("checkerboard", False)
+    assert canvas._should_paint_checkerboard() is False  # noqa: SLF001
+
+    canvas.set_frames(_player_frames(2, (100, 100)))
+
+    assert canvas._should_paint_checkerboard() is True  # noqa: SLF001
+
+    canvas.set_frames(None)
+
+    assert canvas._should_paint_checkerboard() is False  # noqa: SLF001
+
+
+def test_play_button_text_and_accessible_name_track_playback_state(qtbot) -> None:
+    canvas = ResultPlayerCanvas()
+    qtbot.addWidget(canvas)
+    canvas.set_frames(_player_frames(3, (500, 500, 500)))
+    assert canvas.play_button.text() == "Play"
+    assert canvas.play_button.accessibleName() == "Play the result loop"
+
+    canvas.play()
+
+    assert canvas.play_button.text() == "Pause"
+    assert canvas.play_button.accessibleName() == "Pause the result loop"
+
+    canvas.pause()
+
+    assert canvas.play_button.text() == "Play"
+    assert canvas.play_button.accessibleName() == "Play the result loop"
+
+
 def test_session_displays_in_fit_mode_and_restores_cover(qtbot) -> None:
     canvas = ResultPlayerCanvas()
     qtbot.addWidget(canvas)

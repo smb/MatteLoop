@@ -182,8 +182,16 @@ class PreviewCanvas(QLabel):
         super().resizeEvent(event)
         self._update_pixmap()
 
+    def _should_paint_checkerboard(self) -> bool:
+        """Whether this canvas paints a checkerboard behind its frame.
+
+        Subclasses override to add cases the ``checkerboard`` property alone
+        cannot express (e.g. a player actively holding frames to show).
+        """
+        return self.property("checkerboard") is True
+
     def paintEvent(self, event) -> None:  # type: ignore[no-untyped-def]
-        if self.property("checkerboard") is True:
+        if self._should_paint_checkerboard():
             painter = QPainter(self)
             tile = 16
             light = QColor(CHECKERBOARD_LIGHT)

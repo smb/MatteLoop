@@ -42,6 +42,11 @@ from matteloop.ui.crop_presentation import CropPresentation
 PLAYER_CACHE_BUDGET_BYTES = 128 * 1024 * 1024
 PLAYER_MIN_DISPLAY_SIDE = 64
 
+_PLAY_TEXT = "Play"
+_PLAY_ACCESSIBLE_NAME = "Play the result loop"
+_PAUSE_TEXT = "Pause"
+_PAUSE_ACCESSIBLE_NAME = "Pause the result loop"
+
 
 class _FrameLoadCancelled(Exception):
     """Raised internally to unwind ``_load_player_frames`` once superseded."""
@@ -97,7 +102,7 @@ class ResultPlayerCanvas(CropCanvas):
         self._timer.timeout.connect(self._advance)
         self.play_button = QPushButton("Play", self)
         self.play_button.setObjectName("result_play")
-        self.play_button.setAccessibleName("Play the result loop")
+        self.play_button.setAccessibleName(_PLAY_ACCESSIBLE_NAME)
         self.play_button.setCheckable(True)
         self.play_button.hide()
         self.play_button.toggled.connect(self._play_toggled)
@@ -163,15 +168,27 @@ class ResultPlayerCanvas(CropCanvas):
         if self._frames is None or not self._playable():
             return
         self._playing = True
-        if not self.play_button.isChecked():
-            self.play_button.setChecked(True)
+        self._sync_play_button(True)
         self._schedule_next()
 
     def pause(self) -> None:
         self._playing = False
         self._timer.stop()
-        if self.play_button.isChecked():
-            self.play_button.setChecked(False)
+        self._sync_play_button(False)
+
+    def _sync_play_button(self, playing: bool) -> None:
+        """Keep the button's checked state, text, and accessible name in step.
+
+        Text is the reliable signal that the loop is running: the theme has
+        no ``QPushButton:checked`` rule, so the checked visual alone is easy
+        to miss on a flat style.
+        """
+        if self.play_button.isChecked() != playing:
+            self.play_button.setChecked(playing)
+        self.play_button.setText(_PAUSE_TEXT if playing else _PLAY_TEXT)
+        self.play_button.setAccessibleName(
+            _PAUSE_ACCESSIBLE_NAME if playing else _PLAY_ACCESSIBLE_NAME
+        )
 
     @property
     def playing(self) -> bool:
@@ -213,6 +230,17 @@ class ResultPlayerCanvas(CropCanvas):
 
     def _crop_event(self, crop: CropSpec) -> object:
         return TransformChanged(replace(self._transform, crop=crop))
+
+    def _should_paint_checkerboard(self) -> bool:
+        """Show the checkerboard whenever a player session is holding frames.
+
+        A Render can open the transform stage without a Preview ever having
+        run, so ``checkerboard`` (a proxy for ``PreviewState``) can be false
+        while the loop plays a transparent cut-out over flat grey. The player
+        itself always knows whether it has frames to show, independent of
+        preview state.
+        """
+        return super()._should_paint_checkerboard() or self._frames is not None
 
     # -- playback internals ---------------------------------------------
 
