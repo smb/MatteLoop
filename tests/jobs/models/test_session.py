@@ -36,6 +36,7 @@ class FakeDownloader:
         self.events = events
         self.fail: BaseException | None = None
         self.calls: list[str] = []
+        self.cancelled_checks: list[Callable[[], bool]] = []
 
     def download(
         self,
@@ -46,6 +47,7 @@ class FakeDownloader:
     ) -> Path:
         self.events.append(f"download:{spec.id}")
         self.calls.append(spec.id)
+        self.cancelled_checks.append(cancelled)
         if self.fail is not None:
             raise self.fail
         assert destination == self.cache_root
@@ -444,6 +446,52 @@ def test_remove_obsolete_versions_removes_only_catalog_listed_directories(
     assert not obsolete.exists()
     assert current.is_dir()
     assert unrelated.is_dir()
+
+
+def test_fetch_passes_the_callers_cancellation_check_to_the_downloader(
+    tmp_path: Path,
+) -> None:
+    manager, downloader, _clients, _events = _manager(tmp_path)
+
+    def own() -> bool:
+        return False
+
+    manager.fetch("u2netp", cancelled=own)
+    manager.fetch("u2netp")
+
+    assert downloader.cancelled_checks[0] is own
+    assert downloader.cancelled_checks[1] is manager._cancelled
+
+
+def test_remove_obsolete_versions_removes_only_the_named_model_directory(
+    tmp_path: Path,
+) -> None:
+    manager, _downloader, _clients, _events = _manager(tmp_path)
+    catalog = ModelCatalog.load_resource()
+    obsolete = tmp_path / catalog.obsolete_rembg_versions[0]
+    named = obsolete / "u2netp"
+    other = obsolete / "u2net"
+    named.mkdir(parents=True)
+    (named / "u2netp.onnx").write_bytes(b"old")
+    other.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    symlinked = obsolete / "u2net_human_seg"
+    symlinked.symlink_to(outside, target_is_directory=True)
+
+    assert manager.remove_obsolete_versions("u2netp") == 1
+    assert not named.exists()
+    assert other.is_dir()
+    assert obsolete.is_dir()
+
+    assert manager.remove_obsolete_versions("u2net_human_seg") == 0
+    assert symlinked.is_symlink()
+    assert outside.is_dir()
+
+    with pytest.raises(AppError) as unknown:
+        manager.remove_obsolete_versions("not-a-model")
+    assert unknown.value.code is ErrorCode.MODEL_NOT_FOUND
+    assert other.is_dir()
 
 
 def test_remove_rejects_symlink_traversal_and_unknown_ids(tmp_path: Path) -> None:

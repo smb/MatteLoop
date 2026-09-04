@@ -192,7 +192,12 @@ class ModelSessionManager:
             self._active_result = result
             return result
 
-    def fetch(self, model_id: str, progress: ProgressCallback | None = None) -> Path:
+    def fetch(
+        self,
+        model_id: str,
+        progress: ProgressCallback | None = None,
+        cancelled: CancellationCheck | None = None,
+    ) -> Path:
         """Download and verify one weight without starting a session for it.
 
         prepare() also launches the segmentation client, which is wrong for
@@ -209,7 +214,7 @@ class ModelSessionManager:
                 spec,
                 self._cache_root,
                 self._progress if progress is None else progress,
-                self._cancelled,
+                self._cancelled if cancelled is None else cancelled,
             )
 
     def remove(self, model_id: str) -> bool:
@@ -270,12 +275,14 @@ class ModelSessionManager:
                 )
                 raise mapped from cause
 
-    def remove_obsolete_versions(self) -> int:
+    def remove_obsolete_versions(self, model_id: str | None = None) -> int:
         with self._lock:
             self._require_open()
             removed = 0
             for version in self._catalog.obsolete_rembg_versions:
                 version_path = self._cache_root / version
+                if model_id is not None:
+                    version_path = version_path / self._catalog.get(model_id).id
                 if not version_path.is_dir() or version_path.is_symlink():
                     continue
                 shutil.rmtree(version_path)
