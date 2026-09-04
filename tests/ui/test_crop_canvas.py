@@ -187,6 +187,69 @@ def test_crop_canvas_drag_from_the_media_gutter_emits_crop_changed(qtbot) -> Non
     assert any(isinstance(event, CropChanged) for event in events)
 
 
+def test_crop_canvas_accepts_title_and_object_name_overrides(qtbot) -> None:
+    canvas = CropCanvas(title="Result", object_name="x")
+    qtbot.addWidget(canvas)
+
+    assert canvas.objectName() == "x"
+    assert canvas.accessibleName() == "Background-removed result"
+
+
+class _ConstrainedCanvas(CropCanvas):
+    """A subclass exercising the reuse hooks a real result canvas overrides."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.events: list[object] = []
+
+    def _constrain(self, crop, target):
+        return CropSpec(crop.x, crop.y, crop.width, crop.width)
+
+    def _crop_event(self, crop):
+        event = ("constrained", crop)
+        self.events.append(event)
+        return event
+
+
+def test_crop_canvas_drag_routes_through_the_constrain_and_event_hooks(qtbot) -> None:
+    canvas = _ConstrainedCanvas()
+    qtbot.addWidget(canvas)
+    canvas.resize(200, 100)
+    canvas.set_frame(QImage(100, 50, QImage.Format.Format_RGBA8888))
+    canvas.apply_presentation(_presentation(), active=True, editable=True)
+    canvas.show()
+
+    qtbot.mousePress(canvas, Qt.MouseButton.LeftButton, pos=QPoint(60, 80))
+    qtbot.mouseMove(canvas, QPoint(80, 90))
+    qtbot.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=QPoint(80, 90))
+
+    assert canvas.events, "the drag must reach the overridden hooks"
+    kind, crop = canvas.events[-1]
+    assert kind == "constrained"
+    assert crop.width == crop.height
+
+
+def test_crop_canvas_keyboard_nudge_routes_through_the_constrain_and_event_hooks(
+    qtbot,
+) -> None:
+    canvas = _ConstrainedCanvas()
+    qtbot.addWidget(canvas)
+    canvas.resize(200, 100)
+    canvas.set_frame(QImage(100, 50, QImage.Format.Format_RGBA8888))
+    canvas.apply_presentation(_presentation(), active=True, editable=True)
+    canvas.show()
+    canvas.activateWindow()
+    canvas.setFocus()
+    qtbot.waitUntil(canvas.hasFocus, timeout=1000)
+
+    qtbot.keyClick(canvas, Qt.Key.Key_Left)
+
+    assert canvas.events, "the keyboard nudge must reach the overridden hooks"
+    kind, crop = canvas.events[-1]
+    assert kind == "constrained"
+    assert crop.width == crop.height
+
+
 def test_crop_canvas_uses_the_clamped_inset_for_a_tiny_canvas(qtbot) -> None:
     canvas = CropCanvas()
     qtbot.addWidget(canvas)
