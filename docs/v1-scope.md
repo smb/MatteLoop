@@ -77,7 +77,8 @@ Nothing else gates V1. When that sentence is true end to end, V1 is done.
 - **Model Manager outdated-weight cleanup, 2026-09-04:** although the Model
   Manager UI remains deferred, it gained the outdated-weight notice and
   `Delete outdated` as the agreed handling for a rembg namespace move (issue
-  #22). Bulk re-download is deliberately not part of it.
+  #22). Bulk re-download returned in #29 with confirmation, cancellation, batch
+  progress and per-model deletion after verification.
 
 ---
 

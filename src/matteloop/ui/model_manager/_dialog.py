@@ -35,6 +35,8 @@ class ModelManagerDialog(QDialog):
     download_requested = Signal(object)
     remove_requested = Signal(object)
     delete_outdated_requested = Signal()
+    redownload_outdated_requested = Signal()
+    cancel_requested = Signal()
     show_cache_requested = Signal()
 
     def __init__(
@@ -93,6 +95,11 @@ class ModelManagerDialog(QDialog):
         self.remove_button = QPushButton("Remove downloaded weight")
         self.remove_button.setObjectName("remove_model")
         self.remove_button.setAccessibleName("Remove selected model weight")
+        self.redownload_outdated_button = QPushButton("Re-download outdated")
+        self.redownload_outdated_button.setObjectName("redownload_outdated")
+        self.redownload_outdated_button.setAccessibleName(
+            "Re-download outdated model weights"
+        )
         self.outdated_notice_label = QLabel()
         self.outdated_notice_label.setObjectName("outdated_model_notice")
         self.outdated_notice_label.setWordWrap(True)
@@ -105,6 +112,10 @@ class ModelManagerDialog(QDialog):
         self.show_cache_button.setAccessibleName("Show model cache location")
         self.close_button = QPushButton("Close")
         self.close_button.setAccessibleName("Close model manager")
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.setObjectName("cancel_model_download")
+        self.cancel_button.setAccessibleName("Cancel the running model download")
+        self.cancel_button.setVisible(False)
 
     def _build_layout(self) -> None:
         layout = QVBoxLayout(self)
@@ -117,9 +128,11 @@ class ModelManagerDialog(QDialog):
         actions = QHBoxLayout()
         actions.addWidget(self.download_button)
         actions.addWidget(self.remove_button)
+        actions.addWidget(self.redownload_outdated_button)
         actions.addWidget(self.delete_outdated_button)
         actions.addWidget(self.show_cache_button)
         actions.addStretch(1)
+        actions.addWidget(self.cancel_button)
         actions.addWidget(self.close_button)
         layout.addLayout(actions)
 
@@ -129,7 +142,11 @@ class ModelManagerDialog(QDialog):
         )
         self.download_button.clicked.connect(self._download_selected)
         self.remove_button.clicked.connect(self._remove_selected)
+        self.redownload_outdated_button.clicked.connect(
+            self.redownload_outdated_requested.emit
+        )
         self.delete_outdated_button.clicked.connect(self.delete_outdated_requested.emit)
+        self.cancel_button.clicked.connect(self.cancel_requested.emit)
         self.show_cache_button.clicked.connect(self.show_cache_requested.emit)
         self.close_button.clicked.connect(self.close)
 
@@ -145,6 +162,14 @@ class ModelManagerDialog(QDialog):
     def outdated_entries(self) -> tuple[ModelEntry, ...]:
         return tuple(
             entry for entry in self._entries if entry.outdated_size_bytes is not None
+        )
+
+    @property
+    def redownload_entries(self) -> tuple[ModelEntry, ...]:
+        return tuple(
+            entry
+            for entry in self._entries
+            if entry.outdated_size_bytes is not None and not entry.cached
         )
 
     @property
@@ -167,13 +192,32 @@ class ModelManagerDialog(QDialog):
         self._removal_guard = guard
         self._update_actions()
 
-    def set_busy(self, busy: bool) -> None:
+    def set_busy(self, busy: bool, *, cancellable: bool = False) -> None:
         self._busy = busy
         self.model_list.setEnabled(not busy)
         self.download_button.setEnabled(not busy)
         self.show_cache_button.setEnabled(not busy)
         self.close_button.setEnabled(not busy)
+        if busy and cancellable:
+            self.cancel_button.setText("Cancel")
+            self.cancel_button.setVisible(True)
+            self.cancel_button.setEnabled(True)
+        else:
+            self.cancel_button.setText("Cancel")
+            self.cancel_button.setVisible(False)
+            self.cancel_button.setEnabled(True)
         self._update_actions()
+
+    def set_cancelling(self) -> None:
+        self.cancel_button.setText("Cancelling…")
+        self.cancel_button.setEnabled(False)
+        self.set_message("Cancelling…")
+
+    def reject(self) -> None:
+        if self._busy:
+            self.cancel_requested.emit()
+            return
+        super().reject()
 
     def set_message(self, message: str) -> None:
         self._message.setText(message)
@@ -266,6 +310,11 @@ class ModelManagerDialog(QDialog):
         has_outdated = self._obsolete_size_bytes > 0
         self.delete_outdated_button.setVisible(has_outdated)
         self.delete_outdated_button.setEnabled(not self._busy and has_outdated)
+        has_redownloadable = bool(self.redownload_entries)
+        self.redownload_outdated_button.setVisible(has_redownloadable)
+        self.redownload_outdated_button.setEnabled(
+            not self._busy and has_redownloadable
+        )
 
     def _download_selected(self) -> None:
         entry = self.selected_entry
