@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from fractions import Fraction
 
 from matteloop.core.geometry import (
     InteractionGeometry,
@@ -25,6 +26,8 @@ _HANDLES = frozenset(
         "west",
     }
 )
+_CORNER_HANDLES = frozenset({"north_west", "north_east", "south_east", "south_west"})
+_EDGE_HANDLES = frozenset({"north", "south", "east", "west"})
 
 
 def crop_from_drag(
@@ -103,6 +106,85 @@ def oriented_point_from_widget(
         raise ValueError("crop geometry must use a media transform")
     raw = geometry.widget_to_source(point)
     return _orientation_transform_from_media(transform).source_to_widget(raw)
+
+
+def fit_crop_aspect(
+    crop: CropSpec,
+    ratio: Fraction,
+    target: str,
+    *,
+    source_width: int,
+    source_height: int,
+) -> CropSpec:
+    """Re-fit *crop* to width:height == *ratio* after a handle/body move.
+
+    Corner handles keep the dragged corner's opposite corner fixed and
+    adjust whichever axis needs the smaller change to reach the ratio.
+    Edge handles adjust the perpendicular axis around the crop's centre.
+    A body move ("crop") is returned unchanged. The result is always
+    clamped to the source and has both dimensions >= 1.
+    """
+    _validate_dimensions(source_width, source_height)
+    _validate_ratio(ratio)
+    if target == "crop":
+        fitted = crop
+    elif target in _CORNER_HANDLES:
+        fitted = _fit_corner(crop, ratio, target)
+    elif target in _EDGE_HANDLES:
+        fitted = _fit_edge(crop, ratio, target)
+    else:
+        raise ValueError("unknown crop interaction target")
+    return clamp_crop(fitted, source_width, source_height)
+
+
+def centered_crop_for_aspect(
+    ratio: Fraction, *, source_width: int, source_height: int
+) -> CropSpec:
+    """Return the largest centred rectangle of *ratio* inside the source."""
+    _validate_dimensions(source_width, source_height)
+    _validate_ratio(ratio)
+    height_for_full_width = _rhu(Fraction(source_width) / ratio)
+    if height_for_full_width <= source_height:
+        width, height = source_width, max(1, height_for_full_width)
+    else:
+        width, height = max(1, _rhu(Fraction(source_height) * ratio)), source_height
+    x = (source_width - width) // 2
+    y = (source_height - height) // 2
+    return clamp_crop(CropSpec(x, y, width, height), source_width, source_height)
+
+
+def _fit_corner(crop: CropSpec, ratio: Fraction, target: str) -> CropSpec:
+    width, height = crop.width, crop.height
+    width_for_height = _rhu(Fraction(height) * ratio)
+    height_for_width = _rhu(Fraction(width) / ratio)
+    if abs(width_for_height - width) <= abs(height_for_width - height):
+        new_width, new_height = max(1, width_for_height), height
+    else:
+        new_width, new_height = width, max(1, height_for_width)
+    x = crop.x + width - new_width if "west" in target else crop.x
+    y = crop.y + height - new_height if "north" in target else crop.y
+    return CropSpec(x, y, new_width, new_height)
+
+
+def _fit_edge(crop: CropSpec, ratio: Fraction, target: str) -> CropSpec:
+    width, height = crop.width, crop.height
+    if target in {"east", "west"}:
+        new_height = max(1, _rhu(Fraction(width) / ratio))
+        y = crop.y + _rhu(Fraction(height - new_height, 2))
+        return CropSpec(crop.x, y, width, new_height)
+    new_width = max(1, _rhu(Fraction(height) * ratio))
+    x = crop.x + _rhu(Fraction(width - new_width, 2))
+    return CropSpec(x, crop.y, new_width, height)
+
+
+def _validate_ratio(ratio: Fraction) -> None:
+    if not isinstance(ratio, Fraction) or ratio <= 0:
+        raise ValueError("aspect ratio must be a positive Fraction")
+
+
+def _rhu(value: Fraction) -> int:
+    """Round half up (towards +infinity) on an exact Fraction."""
+    return (2 * value.numerator + value.denominator) // (2 * value.denominator)
 
 
 def _move_crop(
