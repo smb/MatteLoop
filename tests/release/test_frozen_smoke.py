@@ -82,12 +82,15 @@ def test_native_smoke_resolves_every_v1_session_class_without_weights(
     catalog = ModelCatalog.load_resource()
     classes = load_rembg_session_classes()
     for model_id in V1_MODEL_IDS:
-        assert _resolve_rembg_session_class(
-            model_id,
-            classes,
-            catalog.rembg_version,
-            catalog.rembg_version,
-        ) is not None
+        assert (
+            _resolve_rembg_session_class(
+                model_id,
+                classes,
+                catalog.rembg_version,
+                catalog.rembg_version,
+            )
+            is not None
+        )
 
 
 def test_smoke_result_contract_is_typed_and_immutable() -> None:
@@ -554,23 +557,18 @@ def test_native_bundle_includes_project_license_notices() -> None:
     assert "--include-data-files=legal/GPL-3.0.txt=GPL-3.0.txt" in args
     assert "--include-data-files=legal/LGPL-3.0.txt=LGPL-3.0.txt" in args
     assert (
-        "--include-data-files=legal/QT-PYSIDE-LGPL-NOTICE.md="
-        "QT-PYSIDE-LGPL-NOTICE.md"
+        "--include-data-files=legal/QT-PYSIDE-LGPL-NOTICE.md=QT-PYSIDE-LGPL-NOTICE.md"
     ) in args
     assert "--include-data-files=legal/RELINK.md=RELINK.md" in args
 
 
 def test_distributed_legal_files_preserve_the_measured_macos_floor() -> None:
     relink = (REPOSITORY_ROOT / "legal" / "RELINK.md").read_text(encoding="utf-8")
-    notices = (REPOSITORY_ROOT / "THIRD_PARTY_NOTICES.md").read_text(
-        encoding="utf-8"
-    )
+    notices = (REPOSITORY_ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
 
     for document in (" ".join(relink.split()), " ".join(notices.split())):
         assert "complete app requires macOS 15" in document
-        assert (
-            "custom media FFmpeg/libwebp dylibs retain a 13.0 minimum" in document
-        )
+        assert "custom media FFmpeg/libwebp dylibs retain a 13.0 minimum" in document
         assert "not been launched on an actual macOS 15 host" in document
         assert "delivered app targets macOS 13.0" not in document
         assert "actual macOS 13 host" not in document
