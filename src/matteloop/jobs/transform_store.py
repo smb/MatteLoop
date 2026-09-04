@@ -1,21 +1,13 @@
-"""Persist the transform applied to a cut, beside the cut directory.
+"""Persist the transform applied to a cut, beside the cut directory (D1).
 
-Design decision D1 (issue #25): the transform cannot live in the manifest
-(``_manifest.py`` rejects unknown keys and other schema versions, and the
-manifest modules are frozen) and cannot live inside the cut directory either
-(``_scan.py`` invalidates any cut with an unexpected entry). It is instead a
-dot-prefixed sidecar next to the cut directory,
+The manifest is frozen and rejects unknown keys/versions, and a sidecar
+inside the cut directory would invalidate the whole set for the picker
+(``_scan.py``), so this is a dot-prefixed sidecar next to it instead --
 ``cuts_root / f".transform-{cache_key}.json"`` -- a name every scanner and
-recovery routine in ``jobs/workspace`` already ignores.
-
-Reading and writing degrade rather than fail (guardrail G4): a missing,
-corrupt, wrong-schema, or foreign-cache-key sidecar is not something a user
-can fix from the UI, so ``load_transform`` returns identity plus a note
-instead of raising, and ``store_transform`` swallows ``OSError`` the same
-way. Writing follows the repository's durability ceiling and nothing more
-(guardrail G3): a temp sibling is fsynced, renamed into place atomically, and
-the parent directory is fsynced best-effort -- no locks, no journals, no
-inode binding.
+recovery routine in ``jobs/workspace`` already ignores. Reading and writing
+degrade rather than fail (G4); writing follows the durability ceiling and
+nothing more (G3): temp sibling -> fsync -> atomic rename -> best-effort
+parent fsync, no locks, no journals, no inode binding.
 """
 
 from __future__ import annotations
@@ -66,12 +58,7 @@ def _resize_to_payload(resize: ResizeSpec | None) -> dict[str, object] | None:
 
 
 def transform_from_payload(payload: object) -> TransformSpec:
-    """Rebuild a ``TransformSpec`` from a stored ``"transform"`` payload.
-
-    Raises ``ValueError`` for any structural or type deviation -- the sole
-    exception ``load_transform`` needs to catch before falling back to
-    identity.
-    """
+    """Rebuild a ``TransformSpec``; raises ``ValueError`` on any deviation."""
     if not isinstance(payload, dict):
         raise ValueError("transform payload must be an object")
     try:
@@ -118,13 +105,8 @@ def _note(notes: list[str] | None, message: str) -> None:
 def load_transform(
     workspace: CutWorkspace, notes: list[str] | None = None
 ) -> TransformSpec:
-    """Return the transform stored for *workspace*, or identity plus a note.
-
-    A missing sidecar is not a failure -- it means no transform was ever
-    applied, so it is silent. Anything else wrong with the sidecar (corrupt
-    JSON, an unrecognised schema, or one written for a different cache key)
-    degrades to identity with a note rather than raising.
-    """
+    """Return the stored transform, or identity (+ a note if something was
+    wrong: missing is silent; corrupt, foreign, or mismatched is not)."""
     path = transform_sidecar_path(workspace)
     try:
         raw = path.read_bytes()
@@ -156,12 +138,8 @@ def load_transform(
 def store_transform(
     workspace: CutWorkspace, spec: TransformSpec, notes: list[str]
 ) -> None:
-    """Persist *spec* beside the cut directory, or remove it for identity.
-
-    Swallows ``OSError`` and appends a note instead: a corrupt or unwritable
-    sidecar must never fail the job whose output has already been published
-    (guardrail G4).
-    """
+    """Persist *spec* beside the cut, or remove it for identity. Swallows
+    ``OSError`` into a note (G4): the job already published its output."""
     if spec.is_identity:
         discard_transform(workspace)
         return
@@ -198,8 +176,7 @@ def _write_sidecar(path: Path, encoded: bytes) -> None:
 
 
 def _fsync_parent(path: Path) -> None:
-    """Best-effort directory fsync (guardrail G3); a silent no-op where the
-    platform will not open a directory for reading (Windows)."""
+    """Best-effort directory fsync (G3); a no-op where unsupported (Windows)."""
     try:
         descriptor = os.open(path.parent, os.O_RDONLY)
     except OSError:
