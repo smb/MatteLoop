@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
@@ -11,8 +11,8 @@ from matteloop.core.parameters import (
     output_directory_for_source,
     output_filename_for_source,
 )
-from matteloop.core.specs import EdgeMode
-from matteloop.core.state import AppState
+from matteloop.core.specs import EdgeMode, TransformSpec
+from matteloop.core.state import AppState, ArtifactResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +32,8 @@ class ParameterPresentation:
     end: Fraction | None
     duration: Fraction | None
     source_duration: Fraction | None
+    transform: TransformSpec = field(default_factory=TransformSpec)
+    artifact: ArtifactResult | None = None
 
 
 def present_parameters(state: AppState) -> ParameterPresentation:
@@ -66,6 +68,8 @@ def present_parameters(state: AppState) -> ParameterPresentation:
         end=timeline.end if timeline is not None else None,
         duration=timeline.end - timeline.start if timeline is not None else None,
         source_duration=timeline.duration if timeline is not None else None,
+        transform=parameters.transform,
+        artifact=state.artifact_result,
     )
 
 
