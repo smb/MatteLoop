@@ -5,6 +5,7 @@ from __future__ import annotations
 import faulthandler
 import io
 import logging
+import math
 import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -16,6 +17,7 @@ from matteloop.paths import NEW_CACHE_NAME
 _MAX_BYTES = 1 << 20
 _BACKUPS = 2
 _fault_report: object | None = None
+_HANG_DUMP_ENV = "MATTELOOP_HANG_DUMP"
 
 
 def log_file() -> Path:
@@ -64,11 +66,26 @@ def _enable_fault_reports(target: Path) -> None:
     handler's.
     """
     global _fault_report
+    faulthandler.cancel_dump_traceback_later()
+    timeout = _hang_dump_seconds()
     try:
         report = target.open("a", buffering=1, encoding="utf-8")
     except OSError:
         return
     faulthandler.enable(file=report, all_threads=True)
+    if timeout is not None:
+        faulthandler.dump_traceback_later(timeout, repeat=True, file=report)
     if isinstance(_fault_report, io.TextIOBase):
         _fault_report.close()
     _fault_report = report
+
+
+def _hang_dump_seconds() -> float | None:
+    value = os.environ.get(_HANG_DUMP_ENV)
+    if value is None:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        return None
+    return seconds if math.isfinite(seconds) and seconds > 0 else None
