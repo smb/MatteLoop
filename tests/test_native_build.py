@@ -29,14 +29,19 @@ from scripts.media_stack.platforms import BuildTarget
 from scripts.qt_source import QtSourceCompanion
 
 
-def _installed_versions() -> dict[str, str]:
+def _installed_versions(os_name: str = "darwin") -> dict[str, str]:
+    runtime = (
+        {"onnxruntime-directml": "1.24.4"}
+        if os_name == "win32"
+        else {"onnxruntime": "1.29.0"}
+    )
     return {
         "PySide6": "6.10.3",
         "PySide6_Addons": "6.10.3",
         "PySide6_Essentials": "6.10.3",
         "Nuitka": "2.8.10",
-        "onnxruntime": "1.29.0",
         "shiboken6": "6.10.3",
+        **runtime,
     }
 
 
@@ -67,6 +72,14 @@ def _wheel(path: Path, *, nested_av: bool = False, native: bool = True) -> Path:
             archive.writestr("other/av/__init__.py", "")
             archive.writestr("other/av/_core.pyd", b"native")
     return path
+
+
+def _fake_onnxruntime_package(tmp_path: Path) -> Path:
+    package = tmp_path / "site-packages" / "onnxruntime"
+    directml = package / "capi" / "DirectML.dll"
+    directml.parent.mkdir(parents=True)
+    directml.write_bytes(b"directml")
+    return package
 
 
 def _artifacts(root: Path, *, identity: str = "identity") -> MediaStackArtifacts:
@@ -227,13 +240,37 @@ def test_native_build_does_not_require_development_pyav_distribution(
     deploy = tmp_path / "pyside6-deploy"
     deploy.write_bytes(b"tool")
 
-    assert prerequisite_errors(
-        os_name="darwin",
-        machine="arm64",
+    assert (
+        prerequisite_errors(
+            os_name="darwin",
+            machine="arm64",
+            python_version=(3, 13),
+            deploy_path=deploy,
+            installed_versions=_installed_versions(),
+        )
+        == ()
+    )
+
+
+def test_native_build_requires_windows_directml_distribution(tmp_path: Path) -> None:
+    deploy = tmp_path / "pyside6-deploy"
+    deploy.write_bytes(b"tool")
+    versions = _installed_versions("win32") | {"onnxruntime-directml": None}
+
+    errors = prerequisite_errors(
+        os_name="win32",
+        machine="AMD64",
         python_version=(3, 13),
         deploy_path=deploy,
-        installed_versions=_installed_versions(),
-    ) == ()
+        installed_versions=versions,
+    )
+
+    assert any(
+        "Missing build prerequisite: onnxruntime-directml" in error for error in errors
+    )
+    assert not any(
+        error.startswith("Missing build prerequisite: onnxruntime.") for error in errors
+    )
 
 
 def test_native_build_cli_exposes_verified_media_selection_flags() -> None:
@@ -300,9 +337,7 @@ def test_native_build_temporarily_repairs_missing_onnxruntime_soname(
     versioned.write_bytes(b"runtime")
     alias = tmp_path / "libonnxruntime.1.dylib"
 
-    with temporary_onnxruntime_dylib_alias(
-        os_name="darwin", capi_directory=tmp_path
-    ):
+    with temporary_onnxruntime_dylib_alias(os_name="darwin", capi_directory=tmp_path):
         assert alias.is_symlink()
         assert alias.resolve() == versioned
 
@@ -351,6 +386,69 @@ def test_native_build_adds_raw_pyav_wheel_only_to_temporary_spec(
     assert "--include-data-dir" not in source.read_text(encoding="utf-8")
 
 
+def test_native_build_includes_directml_only_in_windows_temporary_spec(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.spec"
+    windows_destination = tmp_path / "windows.spec"
+    macos_destination = tmp_path / "macos.spec"
+    source.write_text("extra_args =\n\t--nofollow-import-to=av\n", encoding="utf-8")
+    av_directory = tmp_path / "av"
+    av_directory.mkdir()
+    (av_directory / "__init__.py").write_text("", encoding="utf-8")
+    onnxruntime_directory = tmp_path / "site-packages" / "onnxruntime"
+    directml = onnxruntime_directory / "capi" / "DirectML.dll"
+    directml.parent.mkdir(parents=True)
+    directml.write_bytes(b"directml")
+
+    prepare_temporary_spec(
+        source,
+        windows_destination,
+        av_directory,
+        os_name="win32",
+        onnxruntime_package_directory=onnxruntime_directory,
+    )
+    prepare_temporary_spec(
+        source,
+        macos_destination,
+        av_directory,
+        os_name="darwin",
+        onnxruntime_package_directory=onnxruntime_directory,
+    )
+
+    windows_args = windows_destination.read_text(encoding="utf-8")
+    macos_args = macos_destination.read_text(encoding="utf-8")
+    expected = (
+        f"--include-data-files={directml.as_posix()}=onnxruntime/capi/DirectML.dll"
+    )
+    assert expected in windows_args
+    assert expected not in macos_args
+
+
+def test_native_build_reports_missing_windows_directml_file(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.spec"
+    destination = tmp_path / "temporary.spec"
+    source.write_text("extra_args =\n\t--nofollow-import-to=av\n", encoding="utf-8")
+    av_directory = tmp_path / "av"
+    av_directory.mkdir()
+    (av_directory / "__init__.py").write_text("", encoding="utf-8")
+    onnxruntime_directory = tmp_path / "onnxruntime"
+
+    with pytest.raises(
+        ValueError,
+        match="Windows packaging requires onnxruntime/capi/DirectML.dll",
+    ):
+        prepare_temporary_spec(
+            source,
+            destination,
+            av_directory,
+            os_name="win32",
+            onnxruntime_package_directory=onnxruntime_directory,
+        )
+
+
 def test_native_build_pyav_spec_paths_never_contain_backslashes(
     tmp_path: Path,
 ) -> None:
@@ -363,7 +461,13 @@ def test_native_build_pyav_spec_paths_never_contain_backslashes(
     (av_directory / "filter").mkdir()
     (av_directory / "filter" / "link.cpython-313-win_amd64.pyd").write_bytes(b"ext")
 
-    prepare_temporary_spec(source, destination, av_directory, os_name="win32")
+    prepare_temporary_spec(
+        source,
+        destination,
+        av_directory,
+        os_name="win32",
+        onnxruntime_package_directory=_fake_onnxruntime_package(tmp_path),
+    )
 
     for line in destination.read_text(encoding="utf-8").splitlines():
         if line.startswith("\t--include-data-"):
@@ -385,7 +489,11 @@ def test_native_build_selects_the_windows_icon_in_temporary_spec(
     (av_directory / "__init__.py").write_text("", encoding="utf-8")
 
     prepare_temporary_spec(
-        source, destination, av_directory, os_name="win32"
+        source,
+        destination,
+        av_directory,
+        os_name="win32",
+        onnxruntime_package_directory=_fake_onnxruntime_package(tmp_path),
     )
 
     temporary = destination.read_text(encoding="utf-8")
@@ -417,9 +525,7 @@ def test_default_media_preparation_uses_verified_builder_output(
         ensure=ensure,
     )
 
-    assert calls == [
-        (root, root / ".matteloop-build-cache" / "media-stack", False)
-    ]
+    assert calls == [(root, root / ".matteloop-build-cache" / "media-stack", False)]
     assert prepared.av_directory == tmp_path / "extracted" / "av"
     assert prepared.compliance_archive == artifacts.compliance_archive
     assert prepared.target == MACOS
@@ -949,9 +1055,7 @@ def _stub_native_main(
         "ensure_qt_source_companion",
         lambda *_a, **_k: selected_qt_companion,
     )
-    monkeypatch.setattr(
-        native_build, "installed_qt_distribution_inventory", lambda: {}
-    )
+    monkeypatch.setattr(native_build, "installed_qt_distribution_inventory", lambda: {})
     monkeypatch.setattr(
         native_build,
         "temporary_onnxruntime_dylib_alias",
@@ -1030,7 +1134,13 @@ def test_native_build_bundles_the_delvewheel_sibling_dll_directory(
     dll.write_bytes(b"dll")
     (libs / ".load-order-av-16.1.0").write_text("avcodec\n", encoding="utf-8")
 
-    prepare_temporary_spec(source, destination, av_directory, os_name="win32")
+    prepare_temporary_spec(
+        source,
+        destination,
+        av_directory,
+        os_name="win32",
+        onnxruntime_package_directory=_fake_onnxruntime_package(tmp_path),
+    )
 
     temporary = destination.read_text(encoding="utf-8")
     assert f"--include-data-dir={libs.as_posix()}=av.libs" in temporary

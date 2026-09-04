@@ -7,6 +7,7 @@ import sys
 import textwrap
 from importlib.metadata import version
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -149,10 +150,75 @@ def test_main_smoke_test_prints_structured_nonzero_failure(
     }
 
 
+def test_provider_command_prints_fake_runtime_facts(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import matteloop.app as app
+    import matteloop.core.execution_providers as execution_providers
+
+    runtime = SimpleNamespace(
+        get_device=lambda: "GPU",
+        get_available_providers=lambda: [
+            "DmlExecutionProvider",
+            "CPUExecutionProvider",
+        ],
+    )
+    monkeypatch.setattr(execution_providers.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(execution_providers.platform, "machine", lambda: "AMD64")
+    monkeypatch.setattr(app, "_onnxruntime_distribution", lambda: ("fake", "1.2"))
+    monkeypatch.setattr(app, "_load_onnxruntime", lambda: runtime)
+
+    assert app.main(["--providers"]) == 0
+    output = capsys.readouterr().out
+    assert "ONNX Runtime distribution: fake 1.2" in output
+    assert "onnxruntime device: GPU" in output
+    assert "DmlExecutionProvider: GPU over DirectML – empfohlen [recommended]" in output
+    assert "CPUExecutionProvider: CPU" in output
+
+
+def test_onnxruntime_distribution_falls_back_to_loaded_module_when_metadata_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import matteloop.app as app
+
+    def missing(name: str) -> str:
+        raise app.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(app.metadata, "version", missing)
+    fake_runtime = SimpleNamespace(__version__="1.24.4", get_device=lambda: "CPU-DML")
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake_runtime)
+
+    distribution, distribution_version = app._onnxruntime_distribution()
+
+    assert f"{distribution} {distribution_version}" == "onnxruntime-directml 1.24.4"
+
+
+def test_provider_command_reports_unavailable_windows_video_adapters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import matteloop.app as app
+
+    runtime = SimpleNamespace(
+        get_device=lambda: "GPU",
+        get_available_providers=lambda: ["CPUExecutionProvider"],
+    )
+
+    def fail(*_args: object, **_kwargs: object) -> object:
+        raise OSError("PowerShell unavailable")
+
+    monkeypatch.setattr(app.sys, "platform", "win32")
+    monkeypatch.setattr(app.subprocess, "run", fail)
+
+    lines = app._collect_provider_diagnostics(runtime)
+
+    assert "video adapters: unavailable (PowerShell unavailable)" in lines
+
+
 @pytest.mark.parametrize(
     ("argument", "expected_output"),
     [
         ("--version", f"MatteLoop {version('matteloop')}"),
+        ("--providers", "onnxruntime: unavailable (forbidden import: onnxruntime)"),
     ],
 )
 def test_headless_commands_run_in_fresh_guarded_interpreters(
@@ -163,4 +229,7 @@ def test_headless_commands_run_in_fresh_guarded_interpreters(
     result = _run_guarded_smoke_command(tmp_path, argument)
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == expected_output
+    if argument == "--providers":
+        assert expected_output in result.stdout
+    else:
+        assert result.stdout.strip() == expected_output

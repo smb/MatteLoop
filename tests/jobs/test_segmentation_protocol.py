@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import multiprocessing
 import sys
 import threading
 import time
 from multiprocessing import Pipe, active_children
 from multiprocessing.shared_memory import SharedMemory
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -16,6 +18,10 @@ from PIL import Image
 import matteloop.app as app_module
 import matteloop.jobs.segmentation_host as segmentation_host_module
 from matteloop.core.errors import AppError, ErrorCode
+from matteloop.core.execution_providers import (
+    CPU_EXECUTION_PROVIDER,
+    DML_EXECUTION_PROVIDER,
+)
 from matteloop.core.specs import MAX_ALPHA_MATTING_ERODE_SIZE
 from matteloop.jobs.protocol import (
     CONTROL_JOB_ID,
@@ -38,6 +44,7 @@ from matteloop.jobs.protocol import (
 )
 from matteloop.jobs.segmentation_host import (
     SegmentationClient,
+    _inference_failure,
     _PreparedRembgSession,
     _run_rembg,
     _serve_segmentation_connection,
@@ -1519,11 +1526,13 @@ def test_cleanup_failure_preserves_active_job_id_in_error() -> None:
     segmentation.close()
 
 
-def _start_production_loop(inference: object) -> tuple[object, threading.Thread]:
+def _start_production_loop(
+    inference: object, session: object = object()
+) -> tuple[object, threading.Thread]:
     parent, child = Pipe(duplex=True)
     thread = threading.Thread(
         target=_serve_segmentation_connection,
-        args=(child, object(), inference),
+        args=(child, session, inference),
         kwargs={"process_id": 123},
     )
     thread.start()
@@ -2048,12 +2057,18 @@ def test_production_loop_attach_failure_still_acknowledges_late_cancel() -> None
 
 
 def test_production_loop_inference_failure_still_acknowledges_late_cancel() -> None:
+    inference_calls = 0
+
     def inference(
         _frame: np.ndarray, _session: object, _options: SegmentOptions
     ) -> np.ndarray:
+        nonlocal inference_calls
+        inference_calls += 1
         raise ValueError("injected inference failure")
 
-    parent, thread = _start_production_loop(inference)
+    parent, thread = _start_production_loop(
+        inference, _PreparedRembgSession(object(), (), CPU_EXECUTION_PROVIDER)
+    )
     slot = SharedMemory(create=True, size=16)
     try:
         frame = red_frame(2, 2)
@@ -2070,6 +2085,7 @@ def test_production_loop_inference_failure_still_acknowledges_late_cancel() -> N
         )
         failure = _assert_failure_then_late_cancel_ack(parent, thread)
         assert failure.error["code"] == ErrorCode.INVALID_SEGMENTATION
+        assert inference_calls == 1
         parent.send_bytes(encode_parent_message(Shutdown(PROTOCOL_VERSION)))
         thread.join(timeout=1)
         assert not thread.is_alive()
@@ -2077,6 +2093,118 @@ def test_production_loop_inference_failure_still_acknowledges_late_cancel() -> N
         parent.close()
         slot.close()
         slot.unlink()
+
+
+def test_hardware_inference_failure_falls_back_once_and_reuses_cpu_session(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fallback_calls: list[tuple[bytes, object, object, list[str]]] = []
+    session_options = object()
+    model_bytes = b"verified-model"
+    artifact_path = tmp_path / "2.0.72" / "birefnet-dis" / "birefnet-dis.onnx"
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_bytes(model_bytes)
+
+    class FakeSession:
+        pass
+
+    class FakeOrt:
+        @staticmethod
+        def InferenceSession(
+            content: bytes, *, sess_options: object, providers: list[str]
+        ) -> object:
+            fallback_calls.append((content, sess_options, FakeOrt, providers))
+            return object()
+
+    prepared = segmentation_host_module._construct_requested_session(
+        FakeSession,
+        "birefnet-dis",
+        model_bytes,
+        session_options,
+        FakeOrt,
+        (),
+        DML_EXECUTION_PROVIDER,
+        fallback_artifact=(
+            tmp_path,
+            "2.0.72",
+            artifact_path.name,
+            len(model_bytes),
+            hashlib.sha256(model_bytes).hexdigest(),
+        ),
+    )
+    assert model_bytes not in prepared.session._cpu_fallback[0]
+    inference_sessions: list[object] = []
+
+    def inference(
+        frame: np.ndarray, session: object, _options: SegmentOptions
+    ) -> np.ndarray:
+        inference_sessions.append(session)
+        if len(inference_sessions) == 1:
+            raise RuntimeError("DXGI_ERROR_DEVICE_HUNG")
+        return np.ascontiguousarray(
+            np.concatenate(
+                (frame, np.full(frame.shape[:2] + (1,), 255, dtype=np.uint8)),
+                axis=2,
+            )
+        )
+
+    parent, thread = _start_production_loop(inference, prepared)
+    slot = SharedMemory(create=True, size=16)
+    try:
+        frame = red_frame(2, 2)
+        slot.buf[: frame.nbytes] = frame.tobytes()
+        for request_id in ("r1", "r2"):
+            parent.send_bytes(
+                encode_parent_message(
+                    SegmentRequest(
+                        PROTOCOL_VERSION,
+                        "j1",
+                        request_id,
+                        SharedFrame(slot.name, frame.shape, "uint8", frame.nbytes),
+                    )
+                )
+            )
+            response = decode_child_message(
+                parent.recv_bytes(MAX_PROTOCOL_MESSAGE_BYTES)
+            )
+        assert isinstance(response, SegmentResponse)
+        assert inference_sessions[0] is prepared
+        assert isinstance(inference_sessions[1], _PreparedRembgSession)
+        assert inference_sessions[1].execution_provider == CPU_EXECUTION_PROVIDER
+        assert inference_sessions[1].startup_notice
+        assert inference_sessions[2] is inference_sessions[1]
+        assert fallback_calls == [
+            (
+                b"verified-model",
+                session_options,
+                FakeOrt,
+                [DML_EXECUTION_PROVIDER, CPU_EXECUTION_PROVIDER],
+            ),
+            (b"verified-model", session_options, FakeOrt, [CPU_EXECUTION_PROVIDER]),
+        ]
+        assert "DmlExecutionProvider" in caplog.text
+        assert "birefnet-dis" in caplog.text
+        assert "RuntimeError" in caplog.text
+        assert "DXGI_ERROR_DEVICE_HUNG" in caplog.text
+        parent.send_bytes(encode_parent_message(Shutdown(PROTOCOL_VERSION)))
+        thread.join(timeout=1)
+        assert not thread.is_alive()
+    finally:
+        parent.close()
+        slot.close()
+        slot.unlink()
+
+
+def test_unicode_decode_inference_failure_has_a_valid_error_payload() -> None:
+    error = UnicodeDecodeError("utf-8", b"\xfc", 0, 1, "invalid byte")
+
+    failure = _inference_failure(request(), error)
+
+    detail = failure.error["technical_detail"]
+    assert isinstance(detail, str)
+    assert detail.startswith("UnicodeDecodeError: ")
+    assert "can't decode" in detail
 
 
 def test_late_cancel_after_invalid_result_has_no_stale_effect_on_next_request() -> None:

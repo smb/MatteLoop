@@ -74,6 +74,27 @@ def test_cuda_is_preselected_only_when_the_runtime_reports_cuda() -> None:
     assert select_provider(None, without_cuda) == CPU_EXECUTION_PROVIDER
 
 
+def test_windows_directml_is_preselected_without_cuda_or_amd_providers() -> None:
+    directml_options = provider_options(
+        [DML_EXECUTION_PROVIDER, CPU_EXECUTION_PROVIDER],
+        system="Windows",
+        machine="AMD64",
+    )
+    cuda_options = provider_options(
+        [DML_EXECUTION_PROVIDER, CPU_EXECUTION_PROVIDER, CUDA_EXECUTION_PROVIDER],
+        system="Windows",
+        machine="AMD64",
+    )
+
+    assert select_provider(None, directml_options) == DML_EXECUTION_PROVIDER
+    assert {option.provider for option in directml_options} == {
+        DML_EXECUTION_PROVIDER,
+        CPU_EXECUTION_PROVIDER,
+    }
+    assert directml_options[0].label == "GPU over DirectML – empfohlen"
+    assert select_provider(None, cuda_options) == CUDA_EXECUTION_PROVIDER
+
+
 def test_stored_provider_wins_and_unavailable_choice_uses_preselection() -> None:
     options = provider_options(
         [CPU_EXECUTION_PROVIDER, COREML_EXECUTION_PROVIDER],
@@ -82,7 +103,6 @@ def test_stored_provider_wins_and_unavailable_choice_uses_preselection() -> None
     )
 
     assert (
-        select_provider(COREML_EXECUTION_PROVIDER, options)
-        == COREML_EXECUTION_PROVIDER
+        select_provider(COREML_EXECUTION_PROVIDER, options) == COREML_EXECUTION_PROVIDER
     )
     assert select_provider(CUDA_EXECUTION_PROVIDER, options) == CPU_EXECUTION_PROVIDER

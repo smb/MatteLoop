@@ -51,8 +51,11 @@ and must preserve all applicable notices.
 | Pillow | MIT-CMU | <https://github.com/python-pillow/Pillow> |
 | NumPy | BSD-3-Clause, with separately licensed bundled components | <https://numpy.org/doc/stable/license.html> |
 | rembg | MIT | <https://github.com/danielgatis/rembg> |
-| ONNX Runtime | MIT | <https://github.com/microsoft/onnxruntime> |
+| ONNX Runtime | MIT; Windows bundles use `onnxruntime-directml` | <https://github.com/microsoft/onnxruntime> |
+| DirectML (DirectML.dll inside `onnxruntime-directml`) | Microsoft Software License Terms, proprietary; redistribution inside applications on Windows permitted (section 1a); Windows and Xbox only | <https://www.nuget.org/packages/Microsoft.AI.DirectML> |
 | platformdirs | MIT | <https://github.com/tox-dev/platformdirs> |
+
+The full DirectML terms ship as `DIRECTML-LICENSE.txt` in the Windows bundle.
 
 The locked dependency graph is recorded in `uv.lock`. It includes transitive
 packages beyond this summary. Release notices must be generated from the actual

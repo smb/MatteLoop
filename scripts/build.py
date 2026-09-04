@@ -7,6 +7,7 @@ import argparse
 import configparser
 import contextlib
 import importlib.metadata
+import importlib.util
 import platform as platform_module
 import shlex
 import shutil
@@ -74,13 +75,16 @@ else:
 ROOT = Path(__file__).resolve().parent.parent
 DIST_PATH = ROOT / "dist"
 
-_PINNED_DISTRIBUTIONS = {
+_COMMON_PINNED_DISTRIBUTIONS = {
     "PySide6": "6.10.3",
     "PySide6_Addons": "6.10.3",
     "PySide6_Essentials": "6.10.3",
     "shiboken6": "6.10.3",
     "Nuitka": "2.8.10",
-    "onnxruntime": "1.29.0",
+}
+_PLATFORM_PINNED_DISTRIBUTIONS = {
+    "win32": {"onnxruntime-directml": "1.24.4"},
+    "default": {"onnxruntime": "1.29.0"},
 }
 
 _PLATFORM_ICONS = {
@@ -169,15 +173,16 @@ def prerequisite_errors(
             "Run `uv sync --all-groups` from the project root."
         )
 
-    versions = installed_versions or _installed_versions()
-    for distribution, expected in _PINNED_DISTRIBUTIONS.items():
+    pinned_distributions = _pinned_distributions(os_name)
+    versions = installed_versions or _installed_versions(os_name)
+    for distribution, expected in pinned_distributions.items():
         actual = versions.get(distribution)
         if actual is None:
             errors.append(
                 f"Missing build prerequisite: {distribution}. "
                 "Run `uv sync --all-groups` from the project root."
             )
-        elif not _version_matches(distribution, actual):
+        elif actual != expected:
             errors.append(
                 f"{distribution} {actual} is installed, but the build requires "
                 f"{distribution} {expected}. Run `uv sync --all-groups`."
@@ -250,8 +255,9 @@ def prepare_temporary_spec(
     av_directory: Path,
     *,
     os_name: str = sys.platform,
+    onnxruntime_package_directory: Path | None = None,
 ) -> None:
-    """Select the platform icon and add raw PyAV files to a temporary spec."""
+    """Select the platform icon and add native wheel files to a temporary spec."""
     try:
         icon = _PLATFORM_ICONS[os_name]
     except KeyError as error:
@@ -283,11 +289,30 @@ def prepare_temporary_spec(
     )
     if not wheel_file_args:
         raise ValueError(f"no PyAV wheel files found in {av_directory}")
+    directml_file_args = ""
+    if os_name == "win32":
+        package_directory = (
+            onnxruntime_package_directory or _onnxruntime_package_directory()
+        )
+        directml = (package_directory / "capi" / "DirectML.dll").resolve()
+        if not directml.is_file():
+            raise ValueError(
+                "Windows packaging requires onnxruntime/capi/DirectML.dll; "
+                f"file not found at {directml}"
+            )
+        directml_file_args = (
+            f"\t--include-data-files={directml.as_posix()}"
+            "=onnxruntime/capi/DirectML.dll\n"
+        )
     data_dir_args = "".join(
         f"\t--include-data-dir={directory.as_posix()}={directory.name}\n"
         for directory in directories
     )
-    content = content.replace(marker, f"{marker}{data_dir_args}{wheel_file_args}\n", 1)
+    content = content.replace(
+        marker,
+        f"{marker}{data_dir_args}{wheel_file_args}\n{directml_file_args}",
+        1,
+    )
     destination_spec.write_text(content, encoding="utf-8")
 
 
@@ -720,9 +745,9 @@ def _distribution_artifacts_present(
     return False
 
 
-def _installed_versions() -> dict[str, str | None]:
+def _installed_versions(os_name: str = sys.platform) -> dict[str, str | None]:
     versions: dict[str, str | None] = {}
-    for distribution in _PINNED_DISTRIBUTIONS:
+    for distribution in _pinned_distributions(os_name):
         try:
             versions[distribution] = importlib.metadata.version(distribution)
         except importlib.metadata.PackageNotFoundError:
@@ -730,13 +755,34 @@ def _installed_versions() -> dict[str, str | None]:
     return versions
 
 
-def _version_matches(distribution: str, actual: str) -> bool:
-    return actual == _PINNED_DISTRIBUTIONS[distribution]
+def _pinned_distributions(os_name: str) -> dict[str, str]:
+    platform_distributions = _PLATFORM_PINNED_DISTRIBUTIONS.get(
+        os_name, _PLATFORM_PINNED_DISTRIBUTIONS["default"]
+    )
+    return _COMMON_PINNED_DISTRIBUTIONS | platform_distributions
 
 
 def _onnxruntime_capi_directory() -> Path:
     distribution = importlib.metadata.distribution("onnxruntime")
     return Path(distribution.locate_file("onnxruntime/capi"))
+
+
+def _onnxruntime_package_directory() -> Path:
+    package_spec = importlib.util.find_spec("onnxruntime")
+    if package_spec is not None and package_spec.submodule_search_locations:
+        return Path(next(iter(package_spec.submodule_search_locations)))
+
+    for distribution_name in ("onnxruntime-directml", "onnxruntime"):
+        try:
+            distribution = importlib.metadata.distribution(distribution_name)
+        except importlib.metadata.PackageNotFoundError:
+            continue
+        return Path(distribution.locate_file("onnxruntime"))
+
+    raise ValueError(
+        "could not locate the installed onnxruntime package required for "
+        "Windows DirectML packaging"
+    )
 
 
 def _create_onnxruntime_dylib_alias(directory: Path) -> Path | None:

@@ -28,7 +28,7 @@
     "long_functions": 11
   },
   "src/matteloop/jobs/segmentation_host.py": {
-    "lines": 1779,
+    "lines": 1850,
     "long_functions": 8
   },
   "src/matteloop/jobs/source.py": {
@@ -72,7 +72,7 @@
     "long_functions": 3
   },
   "src/matteloop/smoke.py": {
-    "lines": 524,
+    "lines": 539,
     "long_functions": 1
   },
   "src/matteloop/smoke_child.py": {
