@@ -108,4 +108,5 @@ def _render_request(
             parameters.max_mib,
             collision_policy=collision_policy,
         ),
+        transform=parameters.transform,
     )

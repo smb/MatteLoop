@@ -7,7 +7,7 @@ from pathlib import Path
 
 from matteloop.core.execution_providers import CUDA_EXECUTION_PROVIDER
 from matteloop.core.parameters import ParameterState
-from matteloop.core.specs import EdgeMode
+from matteloop.core.specs import CropSpec, EdgeMode, TransformSpec
 from matteloop.core.timeline import TimelineState
 from matteloop.ui.preview_controller import _preview_inputs, _render_request
 
@@ -22,6 +22,7 @@ class Metadata:
 
 def test_preview_and_render_requests_share_every_inspector_parameter() -> None:
     source = Path("/clips/holiday.mp4")
+    transform = TransformSpec(first_frame=1, last_frame=3, crop=CropSpec(0, 0, 4, 4))
     parameters = ParameterState(
         model_id="u2net",
         edge_mode=EdgeMode.DECONTAMINATE_COLORS,
@@ -34,6 +35,7 @@ def test_preview_and_render_requests_share_every_inspector_parameter() -> None:
         output_directory=Path("/exports"),
         output_filename="holiday-cut.webp",
         max_mib=Decimal("12.5"),
+        transform=transform,
     )
     timeline = TimelineState(
         Fraction(4), Fraction(1, 2), Fraction(7, 2), Fraction(1), fps=120
@@ -52,6 +54,7 @@ def test_preview_and_render_requests_share_every_inspector_parameter() -> None:
     assert request.framing.stretch_x == parameters.stretch_x
     assert request.output.path == Path("/exports/holiday-cut.webp")
     assert request.output.max_bytes == int(Decimal("12.5") * 1024 * 1024)
+    assert request.transform == transform
 
 
 def timeline_to_sampling(timeline: TimelineState):
