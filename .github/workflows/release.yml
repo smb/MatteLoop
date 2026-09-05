@@ -148,6 +148,11 @@
           }
         },
         {
+          "name": "Create macOS application archive",
+          "if": "runner.os == 'macOS'",
+          "run": "ditto -c -k --norsrc --keepParent dist/MatteLoop.app \"dist/MatteLoop-${{ matrix.target }}.zip\""
+        },
+        {
           "name": "Upload retained media-stack staging on failure",
           "if": "failure()",
           "uses": "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
@@ -160,12 +165,23 @@
         {
           "name": "Upload unsigned bundle",
           "id": "upload",
+          "if": "runner.os == 'Windows'",
           "uses": "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
           "with": {
             "name": "MatteLoop-unsigned-${{ matrix.target }}",
             "path": "dist",
             "if-no-files-found": "error",
             "include-hidden-files": true
+          }
+        },
+        {
+          "name": "Upload macOS application archive",
+          "if": "runner.os == 'macOS'",
+          "uses": "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+          "with": {
+            "name": "MatteLoop-unsigned-${{ matrix.target }}",
+            "path": "dist/MatteLoop-${{ matrix.target }}.zip\ndist/MatteLoop-*-sources-*",
+            "if-no-files-found": "error"
           }
         }
       ]
@@ -188,7 +204,11 @@
         },
         {
           "name": "Separate the application from its LGPL source archives",
-          "run": "mkdir -p assets\nfor bundle in bundles/MatteLoop-unsigned-*; do\n  target=\"${bundle##*/MatteLoop-unsigned-}\"\n  # The source archives beside the bundle are the LGPL corresponding\n  # sources; they ship as their own assets so the application download is\n  # not 90 MB heavier for every user. Whatever remains is the application.\n  find \"$bundle\" -maxdepth 1 -name \"MatteLoop-*-sources-*\" -exec mv {} assets/ \\;\n  (cd \"$bundle\" && zip -qry \"../../assets/MatteLoop-${GITHUB_REF_NAME}-${target}.zip\" .)\ndone\nls -lh assets"
+          "run": "mkdir -p assets\nfor bundle in bundles/MatteLoop-unsigned-*; do\n  target=\"${bundle##*/MatteLoop-unsigned-}\"\n  # The source archives beside the bundle are the LGPL corresponding\n  # sources; they ship as their own assets so the application download is\n  # not 90 MB heavier for every user. Whatever remains is the application.\n  find \"$bundle\" -maxdepth 1 -name \"MatteLoop-*-sources-*\" -exec mv {} assets/ \\;\n  if [ \"$target\" = \"macos-15-arm64\" ]; then\n    mv \"$bundle/MatteLoop-${target}.zip\" \"assets/MatteLoop-${GITHUB_REF_NAME}-${target}.zip\"\n  else\n    (cd \"$bundle\" && zip -qry \"../../assets/MatteLoop-${GITHUB_REF_NAME}-${target}.zip\" .)\n  fi\ndone\nls -lh assets"
+        },
+        {
+          "name": "Validate macOS archive launcher permissions",
+          "run": "set -euo pipefail\narchive=\"assets/MatteLoop-${GITHUB_REF_NAME}-macos-15-arm64.zip\"\ntest -f \"$archive\"\nextracted=$(mktemp -d)\nunzip -q \"$archive\" -d \"$extracted\"\npython3 -c 'import pathlib, plistlib, sys; app = pathlib.Path(sys.argv[1]); executable = plistlib.loads((app / \"Contents\" / \"Info.plist\").read_bytes())[\"CFBundleExecutable\"]; launcher = app / \"Contents\" / \"MacOS\" / executable; assert launcher.is_file() and launcher.stat().st_mode & 0o111, f\"{launcher} is not executable\"' \"$extracted/MatteLoop.app\""
         },
         {
           "name": "Create the draft release",

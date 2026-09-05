@@ -259,12 +259,13 @@ hash of the media manifest, all `scripts/media_stack/**/*.py` files,
 `scripts/build_media_stack.py`, and `scripts/verify_media_stack.py`; it has no
 broad restore key.
 
-The workflow uploads all of `dist/` as one temporary unsigned Actions artifact,
-so the app and both source/checksum pairs follow the existing upload path. It
-does not create a release, publish, sign, notarize, or permanently host the
-corresponding sources. A later authorized publication must keep all five
-deliverables together on a durable endpoint; an expiring Actions artifact is
-not that endpoint.
+Windows uploads all of `dist/` as one temporary unsigned Actions artifact;
+macOS uploads the finished `MatteLoop-<target>.zip` together with the source
+archives and their checksums, and `publish` moves the archive unchanged and
+verifies the launcher is executable. It does not create a release, publish,
+sign, notarize, or permanently host the corresponding sources. A later
+authorized publication must keep all five deliverables together on a durable
+endpoint; an expiring Actions artifact is not that endpoint.
 
 ## Models and first launch
 
