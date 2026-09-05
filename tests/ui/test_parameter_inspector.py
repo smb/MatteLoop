@@ -227,7 +227,7 @@ def test_inspector_exposes_and_emits_the_selected_execution_provider(qtbot) -> N
     inspector = Inspector(
         _settings(),
         provider_options=(
-            ProviderOption(CPU_EXECUTION_PROVIDER, "CPU – empfohlen", True),
+            ProviderOption(CPU_EXECUTION_PROVIDER, "CPU – recommended", True),
             ProviderOption(
                 COREML_EXECUTION_PROVIDER,
                 "Apple CoreML – experimentell",

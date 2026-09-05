@@ -51,7 +51,7 @@ def test_apple_silicon_prefers_cpu_while_offering_coreml_as_experimental() -> No
         COREML_EXECUTION_PROVIDER,
     ]
     assert select_provider(None, options) == CPU_EXECUTION_PROVIDER
-    assert options[0].label == "CPU – empfohlen"
+    assert options[0].label == "CPU – recommended"
     assert options[1].label == "Apple CoreML – experimentell"
     assert options[1].recommended is False
 
@@ -91,7 +91,7 @@ def test_windows_directml_is_preselected_without_cuda_or_amd_providers() -> None
         DML_EXECUTION_PROVIDER,
         CPU_EXECUTION_PROVIDER,
     }
-    assert directml_options[0].label == "GPU over DirectML – empfohlen"
+    assert directml_options[0].label == "GPU over DirectML – recommended"
     assert select_provider(None, cuda_options) == CUDA_EXECUTION_PROVIDER
 
 

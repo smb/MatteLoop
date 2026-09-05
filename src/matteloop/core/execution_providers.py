@@ -169,5 +169,5 @@ def _provider_label(
     if provider == COREML_EXECUTION_PROVIDER and model_id.startswith("birefnet"):
         return f"{label} – experimentell"
     if provider == recommended:
-        return f"{label} – empfohlen"
+        return f"{label} – recommended"
     return label
