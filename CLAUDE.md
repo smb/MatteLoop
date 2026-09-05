@@ -127,6 +127,36 @@ request that references the issue. Never push it to `main` directly.
 The repository is public and takes reports from other people, so the trail
 from a report to the change answering it has to stay visible and reviewable.
 
+## Keeping the README honest (REQUIRED)
+
+The README is the product page, not a build note. A change a user can see is
+not finished until the README shows the application as it now is.
+
+- **A user-visible feature is not done until the README shows it.** A new
+  stage, panel or output option means the README's description and its
+  screenshots match what ships. A pull request that adds one and leaves the
+  README describing the previous application is incomplete, the same way one
+  without a test is.
+- **A minor release checks the README and the screenshots before the version
+  bump.** A patch carries corrections and needs no pass. A minor carries
+  something new — and the screenshots are the part that rots silently, because
+  they are captured from the running application and age with every layout
+  change, not only with the feature they illustrate.
+- **Screenshots are generated, never collected.** `scripts/screenshots.py`
+  captures them from the real widgets, so a stale one is one command away from
+  being current and anyone can reproduce them. Never paste an image taken by
+  hand, and never let that script reach into the application: it drives
+  existing seams, and widening an API to make a screenshot easier is a change
+  to the product for the benefit of a developer tool.
+- **Release notes stay the place for "what is new".** The README describes the
+  application as it is now and carries no version history.
+
+Rendering the interface is also a review. The screenshots added in #43 exposed
+six German strings in an English UI, a number format following the system
+locale rather than the interface, and the absence of any application-level
+settings surface — none of which a test, a linter or a reading review had
+caught.
+
 ## Delegation
 
 Implementation is delegated to `codex exec -m gpt-5.6-luna -c model_reasoning_effort="xhigh"`.
