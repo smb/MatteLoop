@@ -42,6 +42,7 @@ from matteloop.ui.preview_controller import PreviewRuntime
 from matteloop.ui.render_pipeline import _StageReporter, render_prepared
 from matteloop.ui.store import ReducerStore
 from tests.fixtures.media_factory import make_video
+from tests.jobs.render_support import frozen_segmentation_result
 
 
 @dataclass(frozen=True)
@@ -56,7 +57,7 @@ class Metadata:
 class FakeSegmenter:
     def segment(self, frame, request):
         del request
-        return frame
+        return frozen_segmentation_result(frame.copy())
 
 
 def test_stage_change_preserves_current_frame_and_overall_counts(tmp_path) -> None:

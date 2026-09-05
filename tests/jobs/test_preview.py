@@ -20,6 +20,7 @@ from tests.jobs.render_support import (
     FakeSegmenter,
     FakeSource,
     binding,
+    frozen_segmentation_result,
     job,
     render_service,
     request,
@@ -238,7 +239,7 @@ def test_decontaminate_is_deterministic_local_rgba_postprocess(tmp_path) -> None
             result[0, 0] = (10, 20, 30, 0)
             result[0, 1] = (25, 50, 100, 128)
             result[0, 2] = (7, 8, 9, 255)
-            return result
+            return frozen_segmentation_result(result)
 
     segmenter = EdgeSegmenter()
     service = PreviewService(
