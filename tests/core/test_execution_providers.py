@@ -52,7 +52,7 @@ def test_apple_silicon_prefers_cpu_while_offering_coreml_as_experimental() -> No
     ]
     assert select_provider(None, options) == CPU_EXECUTION_PROVIDER
     assert options[0].label == "CPU – recommended"
-    assert options[1].label == "Apple CoreML – experimentell"
+    assert options[1].label == "Apple CoreML – experimental"
     assert options[1].recommended is False
 
 
