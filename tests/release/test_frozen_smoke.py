@@ -12,6 +12,7 @@ import sys
 import tempfile
 import tomllib
 import urllib.request
+import zipfile
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
@@ -766,12 +767,32 @@ def test_release_workflow_builds_on_dispatch_tags_and_media_stack_changes() -> N
     assert steps.index(cache_stats) == build_index + 1
 
     upload = next(step for step in steps if step.get("id") == "upload")
+    assert upload["if"] == "runner.os == 'Windows'"
     assert upload["with"]["name"] == "MatteLoop-unsigned-${{ matrix.target }}"
     assert upload["with"]["path"] == "dist"
-    # delocate stores PyAV's FFmpeg libraries in av/.dylibs, and the default
-    # upload silently drops hidden files: the runner's own smoke test passed
-    # while the artifact people downloaded could not import av at all.
+    # On macOS, delocate's av/.dylibs and other hidden directories travel
+    # inside the ditto archive; this hidden-file setting belongs to Windows.
     assert upload["with"]["include-hidden-files"] is True
+
+    ditto = next(
+        step for step in steps if step["name"] == "Create macOS application archive"
+    )
+    macos_upload = next(
+        step for step in steps if step["name"] == "Upload macOS application archive"
+    )
+    validation = next(
+        step
+        for step in workflow["jobs"]["publish"]["steps"]
+        if step["name"] == "Validate macOS archive launcher permissions"
+    )
+    assert ditto["if"] == "runner.os == 'macOS'"
+    assert ditto["run"] == (
+        "ditto -c -k --norsrc --keepParent dist/MatteLoop.app "
+        '\"dist/MatteLoop-${{ matrix.target }}.zip\"'
+    )
+    assert macos_upload["if"] == "runner.os == 'macOS'"
+    assert steps.index(ditto) < steps.index(macos_upload)
+    assert "dist/MatteLoop-*-sources-*" in macos_upload["with"]["path"]
     serialized = json.dumps(workflow).lower()
     assert "secrets." not in serialized
     assert "codesign" not in serialized
@@ -788,6 +809,7 @@ def test_release_workflow_builds_on_dispatch_tags_and_media_stack_changes() -> N
     create = publish["steps"][-1]
     assert create["env"] == {"GH_TOKEN": "${{ github.token }}"}
     assert "--draft" in create["run"]
+    assert publish["steps"].index(validation) < publish["steps"].index(create)
 
 
 @pytest.mark.parametrize(
@@ -902,6 +924,95 @@ def test_release_packaging_keeps_lgpl_sources_out_of_the_application_zip(
     ).stdout.split()
     assert "MatteLoop.dist/matteloop.exe" in archived
     assert not [name for name in archived if "sources" in name]
+
+
+def test_release_packaging_preserves_macos_archive_and_source_sidecars(
+    tmp_path: Path,
+) -> None:
+    workflow_path = REPOSITORY_ROOT / ".github" / "workflows" / "release.yml"
+    workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+    step = next(
+        s
+        for s in workflow["jobs"]["publish"]["steps"]
+        if s["name"].startswith("Separate the application")
+    )
+    bundle = tmp_path / "bundles" / "MatteLoop-unsigned-macos-15-arm64"
+    bundle.mkdir(parents=True)
+    archive = bundle / "MatteLoop-macos-15-arm64.zip"
+    with zipfile.ZipFile(archive, "w") as created:
+        created.writestr("MatteLoop.app/Contents/MacOS/MatteLoop", b"app")
+    sidecars = {
+        "MatteLoop-media-sources-macos-arm64-abc.tar.gz": b"media source",
+        "MatteLoop-media-sources-macos-arm64-abc.tar.gz.sha256": b"media hash",
+        "MatteLoop-qt-sources-6.10.3-def.tar.gz": b"qt source",
+        "MatteLoop-qt-sources-6.10.3-def.tar.gz.sha256": b"qt hash",
+    }
+    for name, contents in sidecars.items():
+        (bundle / name).write_bytes(contents)
+    original_archive = archive.read_bytes()
+
+    subprocess.run(
+        ["bash", "-e", "-c", step["run"]],
+        cwd=tmp_path,
+        check=True,
+        env={**os.environ, "GITHUB_REF_NAME": "v9.9.9"},
+        capture_output=True,
+    )
+
+    assets_dir = tmp_path / "assets"
+    assert (assets_dir / "MatteLoop-v9.9.9-macos-15-arm64.zip").read_bytes() == (
+        original_archive
+    )
+    assert {
+        path.name
+        for path in assets_dir.iterdir()
+        if path.name != "MatteLoop-v9.9.9-macos-15-arm64.zip"
+    } == set(sidecars)
+    for name, contents in sidecars.items():
+        assert (assets_dir / name).read_bytes() == contents
+
+
+@pytest.mark.parametrize(
+    ("launcher_mode", "expected_returncode"),
+    [(0o755, 0), (0o644, 1)],
+)
+def test_release_validation_requires_an_executable_macos_launcher(
+    tmp_path: Path,
+    launcher_mode: int,
+    expected_returncode: int,
+) -> None:
+    workflow_path = REPOSITORY_ROOT / ".github" / "workflows" / "release.yml"
+    workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+    step = next(
+        s
+        for s in workflow["jobs"]["publish"]["steps"]
+        if s["name"] == "Validate macOS archive launcher permissions"
+    )
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir()
+    archive = assets_dir / "MatteLoop-v9.9.9-macos-15-arm64.zip"
+    launcher = zipfile.ZipInfo("MatteLoop.app/Contents/MacOS/MatteLoop")
+    launcher.external_attr = launcher_mode << 16
+    with zipfile.ZipFile(archive, "w") as created:
+        created.writestr(
+            "MatteLoop.app/Contents/Info.plist",
+            b'<?xml version="1.0" encoding="UTF-8"?>'
+            b"<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+            b'\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">'
+            b"<plist version=\"1.0\"><dict><key>CFBundleExecutable</key>"
+            b"<string>MatteLoop</string></dict></plist>",
+        )
+        created.writestr(launcher, b"launcher")
+
+    completed = subprocess.run(
+        ["bash", "-e", "-c", step["run"]],
+        cwd=tmp_path,
+        check=False,
+        env={**os.environ, "GITHUB_REF_NAME": "v9.9.9"},
+        capture_output=True,
+    )
+
+    assert completed.returncode == expected_returncode
 
 
 def test_every_workflow_shell_script_parses() -> None:
