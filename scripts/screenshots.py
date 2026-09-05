@@ -5,12 +5,16 @@ produced by the pinned rembg model. The window receives those genuine images
 through a small immutable state snapshot instead of starting the asynchronous
 preview job; the model dialog and all painted widgets are real application
 widgets. The Transform section is seeded with the demo clip's real timeline
-facts because no finished cut workspace is needed for this developer tool.
+facts because no finished cut workspace is needed for this developer tool. The
+model dialog reads a temporary cache containing one sparse catalog-sized
+placeholder; its displayed location is a fixed fictional current-product path,
+so it never reads or creates the capturing machine's model cache.
 """
 
 from __future__ import annotations
 
 import os
+import tempfile
 from collections.abc import Callable
 from fractions import Fraction
 from pathlib import Path
@@ -43,6 +47,7 @@ from matteloop.ui.theme import install_theme
 from matteloop.ui.transform_group import CutFacts
 
 _MODEL_ID = "birefnet-general-lite"
+_DEMO_CACHE_DISPLAY_ROOT = Path("/Users/example/Library/Caches/matteloop/models")
 _OUTPUT_DIRECTORY = Path("/Users/example/Movies/MatteLoop")
 _WINDOW_SIZE = (1440, 900)
 _SOURCE_ID = "screenshot-source"
@@ -197,21 +202,51 @@ def _capture_model_manager(
     application: QApplication, output: Path
 ) -> None:
     catalog = ModelCatalog.load_resource()
-    dialog = ModelManagerDialog(
-        catalog,
-        model_cache_root(),
-        active_model=lambda: _MODEL_ID,
-    )
-    dialog.refresh()
-    row_height = dialog.model_list.sizeHintForRow(0)
-    dialog.model_list.setFixedHeight(
-        row_height * dialog.model_list.count() + 2 * dialog.model_list.frameWidth()
-    )
-    dialog.adjustSize()
-    dialog.show()
-    application.processEvents()
-    _capture(dialog, output / "model-manager.png")
-    dialog.close()
+    spec = catalog.get(_MODEL_ID)
+    artifact = spec.artifact
+    if artifact is None:
+        raise RuntimeError(f"V1 model {_MODEL_ID!r} has no artifact")
+
+    real_cache_root = model_cache_root()
+    with tempfile.TemporaryDirectory(prefix="matteloop-screenshot-cache-") as root:
+        cache_root = Path(root)
+        if cache_root == real_cache_root:
+            raise RuntimeError("screenshot cache unexpectedly uses the real cache")
+        artifact_path = (
+            cache_root
+            / catalog.rembg_version
+            / _MODEL_ID
+            / artifact.runtime_filename
+        )
+        artifact_path.parent.mkdir(parents=True)
+        with artifact_path.open("wb") as placeholder:
+            placeholder.truncate(artifact.size_bytes)
+        if artifact_path.stat().st_size != artifact.size_bytes:
+            raise RuntimeError("screenshot model placeholder has the wrong size")
+
+        dialog = ModelManagerDialog(
+            catalog,
+            cache_root,
+            active_model=lambda: _MODEL_ID,
+        )
+        dialog.refresh()
+        if dialog.cache_root == real_cache_root:
+            raise RuntimeError("model dialog unexpectedly uses the real cache")
+        display_root = str(_DEMO_CACHE_DISPLAY_ROOT)
+        dialog.set_message(f"{len(dialog.entries)} V1 model(s); cache: {display_root}")
+        dialog.cache_location_label.setText(display_root)
+        dialog.cache_location_label.setToolTip(display_root)
+        dialog.cache_location_label.setAccessibleDescription(display_root)
+        row_height = dialog.model_list.sizeHintForRow(0)
+        dialog.model_list.setFixedHeight(
+            row_height * dialog.model_list.count()
+            + 2 * dialog.model_list.frameWidth()
+        )
+        dialog.adjustSize()
+        dialog.show()
+        application.processEvents()
+        _capture(dialog, output / "model-manager.png")
+        dialog.close()
 
 
 def main() -> None:
