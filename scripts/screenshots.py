@@ -152,10 +152,10 @@ def _transform_facts(metadata: object) -> CutFacts:
     if type(frame_count) is not int or frame_count < 1:
         frame_count = max(
             1,
-            int(getattr(metadata, "duration") * getattr(metadata, "peak_rate")),
+            int(getattr(metadata, "duration") * getattr(metadata, "sustained_rate")),
         )
     if not isinstance(frame_rate, Fraction) or frame_rate <= 0:
-        frame_rate = getattr(metadata, "peak_rate")
+        frame_rate = getattr(metadata, "sustained_rate")
     fps = max(1, round(float(frame_rate)))
     return CutFacts(
         cache_key="screenshot",

@@ -80,7 +80,7 @@ def test_present_leaves_missing_source_metadata_values_blank() -> None:
                 height=None,
                 duration=None,
                 average_rate=None,
-                peak_rate=None,
+                sustained_rate=None,
                 file_size=None,
             )
         )
