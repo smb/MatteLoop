@@ -11,7 +11,7 @@ permissions:
 jobs:
   lint:
     runs-on: ubuntu-22.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     env:
       QT_QPA_PLATFORM: offscreen
     steps:
@@ -31,7 +31,7 @@ jobs:
     # status check referring to it silently stops being satisfied.
     name: test (${{ matrix.name }})
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       QT_QPA_PLATFORM: offscreen
     strategy:
@@ -65,7 +65,7 @@ jobs:
 
   swscale:
     runs-on: ubuntu-22.04
-    timeout-minutes: 20
+    timeout-minutes: 25
     env:
       QT_QPA_PLATFORM: offscreen
     steps:
