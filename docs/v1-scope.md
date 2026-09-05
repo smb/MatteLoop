@@ -8,10 +8,7 @@ Revision: 2026-09-01, following native dependency qualification.
 
 Product rename, 2026-08-31: `rembgGUI` is now **MatteLoop**. New installs use
 the `matteloop` package, command, settings identity, cache, and workspace
-names. Every existing subdirectory of `~/Library/Caches/rembggui/` — model
-weights, compiled provider caches and thumbnails — and
-`<output-directory>/.rembggui-work/` data remain readable, with new locations
-preferred when both exist.
+names.
 
 ---
 

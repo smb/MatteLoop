@@ -276,9 +276,6 @@ locally. Later runs reuse the cache; the first use therefore needs network
 access and enough disk space.
 
 The default model cache is `~/Library/Caches/matteloop/models` on macOS.
-Existing `~/Library/Caches/rembggui/` subdirectories — weights, compiled
-provider caches and thumbnails — are still used when the new location does not
-exist; if both exist, the MatteLoop location is preferred.
 
 The 13 V1 models range from about 4.4 MiB (`u2netp`) to 927.6 MiB for the
 largest BiRefNet models. The default `birefnet-portrait` is about 927.6 MiB;

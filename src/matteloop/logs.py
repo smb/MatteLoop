@@ -11,7 +11,7 @@ from pathlib import Path
 
 from platformdirs import user_log_dir
 
-from matteloop.paths import NEW_CACHE_NAME
+from matteloop.paths import CACHE_NAME
 
 _MAX_BYTES = 1 << 20
 _BACKUPS = 2
@@ -20,7 +20,7 @@ _fault_report: object | None = None
 
 def log_file() -> Path:
     """Return the rotating diagnostics file for this installation."""
-    return Path(user_log_dir(NEW_CACHE_NAME)) / "matteloop.log"
+    return Path(user_log_dir(CACHE_NAME)) / "matteloop.log"
 
 
 def configure_logging(destination: Path | None = None) -> Path | None:
