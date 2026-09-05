@@ -31,6 +31,7 @@ from matteloop.ui.preview_controller import (
     PreviewRuntime,
 )
 from matteloop.ui.store import ReducerStore
+from tests.jobs.render_support import frozen_segmentation_result
 
 
 @dataclass(frozen=True)
@@ -80,7 +81,7 @@ class FakePreviewRuntime(PreviewRuntime):
 
     def segment(self, frame, request):
         del request
-        return frame
+        return frozen_segmentation_result(frame.copy())
 
     def preview(
         self, request, playhead: Fraction, context: JobContext

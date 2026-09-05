@@ -21,9 +21,11 @@ from matteloop.core.errors import AppError, ErrorCode
 from matteloop.core.specs import (
     CollisionPolicy,
     CropSpec,
+    EdgeMode,
     FramingSpec,
     OutputSpec,
     SamplingSpec,
+    SegmentationSpec,
     TransformSpec,
 )
 from matteloop.core.state import JobKind
@@ -51,6 +53,7 @@ from tests.jobs.render_support import (
     FakeEncoder,
     FakeSegmenter,
     FakeSource,
+    frozen_segmentation_result,
     job,
     render_service,
     request,
@@ -1204,6 +1207,44 @@ def test_render_encodes_and_validates_a_real_lossless_webp(tmp_path) -> None:
     assert artifact.ownership_current == 0
 
 
+def test_decontaminate_edge_mode_renders_without_mutating_frozen_segmentation(
+    tmp_path,
+) -> None:
+    import numpy as np
+
+    frame = np.zeros((128, 128, 4), dtype=np.uint8)
+    frame[0, 0] = (200, 150, 50, 255)  # opaque
+    frame[1, 1] = (100, 75, 30, 128)  # translucent, black-premultiplied
+    frame[2, 2] = (10, 20, 30, 0)  # fully transparent, non-zero RGB
+    frozen = frozen_segmentation_result(frame)
+    original = frozen.copy()
+
+    class FixedSegmenter(FakeSegmenter):
+        def segment(self, frame, request):
+            self.calls.append(request)
+            return frozen
+
+    standard_artifact = render_service(segmenter=FixedSegmenter()).render(
+        request(tmp_path), job(tmp_path, "standard-run", JobKind.RENDER)
+    )
+    standard_bytes = standard_artifact.output_path.read_bytes()
+
+    decontaminate_request = request(
+        tmp_path,
+        segmentation=SegmentationSpec(
+            "birefnet-portrait", EdgeMode.DECONTAMINATE_COLORS
+        ),
+    )
+    decontaminate_artifact = render_service(segmenter=FixedSegmenter()).render(
+        decontaminate_request, job(tmp_path, "decontaminate-run", JobKind.RENDER)
+    )
+    decontaminate_bytes = decontaminate_artifact.output_path.read_bytes()
+
+    assert standard_bytes != decontaminate_bytes
+    assert frozen.flags.writeable is False
+    assert np.array_equal(frozen, original)
+
+
 def test_render_keeps_decode_working_set_bounded_across_60_frames(tmp_path) -> None:
     """No decoded frame may outlive the frame that produced it.
 
@@ -1436,7 +1477,9 @@ def test_empty_frame_is_retained_when_range_union_is_nonempty(tmp_path) -> None:
         def segment(self, frame, request):
             if not self.calls:
                 self.calls.append(request)
-                return __import__("numpy").zeros(frame.shape[:2] + (4,), dtype="uint8")
+                return frozen_segmentation_result(
+                    __import__("numpy").zeros(frame.shape[:2] + (4,), dtype="uint8")
+                )
             return super().segment(frame, request)
 
     render_request = replace(
@@ -1464,7 +1507,7 @@ def test_invalid_range_framing_fails_after_cut_promotion_and_preserves_output(
             result = np.zeros(frame.shape[:2] + (4,), dtype=np.uint8)
             if visible_size is not None:
                 result[:visible_size, :visible_size, 3] = 255
-            return result
+            return frozen_segmentation_result(result)
 
     render_request = replace(
         request(tmp_path),

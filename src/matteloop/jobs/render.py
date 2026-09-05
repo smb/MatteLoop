@@ -1580,6 +1580,7 @@ def _produce_cut_frame(
         )
     tracker.register(segmented)
     if request.segmentation.edge_mode is EdgeMode.DECONTAMINATE_COLORS:
+        segmented = tracker.register(segmented.copy())
         _decontaminate_edge_colors_in_place(segmented)
     result = Image.frombytes(
         "RGBA",

@@ -110,6 +110,12 @@ class ExplodingSource(FakeSource):
         self._explode()
 
 
+def frozen_segmentation_result(result: np.ndarray) -> np.ndarray:
+    """Match SegmentationHost: hand segmentation output back read-only."""
+    result.setflags(write=False)
+    return result
+
+
 class FakeSegmenter:
     def __init__(self) -> None:
         self.calls: list[SegmentRequest] = []
@@ -119,7 +125,7 @@ class FakeSegmenter:
         result = np.zeros(frame.shape[:2] + (4,), dtype=np.uint8)
         result[24:104, 32:96, :3] = frame[24:104, 32:96, :3]
         result[24:104, 32:96, 3] = 255
-        return result
+        return frozen_segmentation_result(result)
 
 
 class FakeEncoder:
