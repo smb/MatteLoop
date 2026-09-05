@@ -212,7 +212,7 @@ def timeline_from_metadata(
 
 
 def _metadata_rate(metadata: object) -> Fraction:
-    for name in ("average_rate", "base_rate", "guessed_rate", "peak_rate"):
+    for name in ("average_rate", "base_rate", "guessed_rate", "sustained_rate"):
         value = getattr(metadata, name, None)
         if isinstance(value, Fraction) and value > 0:
             return value

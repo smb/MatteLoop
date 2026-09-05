@@ -78,7 +78,7 @@ class SourceValidationProof:
     average_rate: Fraction | None
     base_rate: Fraction | None
     guessed_rate: Fraction | None
-    peak_rate: Fraction
+    sustained_rate: Fraction
     frame_count: int | None
     rotation: int
     pixel_aspect: Fraction
@@ -115,7 +115,7 @@ class SourceValidationProof:
             "average_rate": _optional_fraction_payload(self.average_rate),
             "base_rate": _optional_fraction_payload(self.base_rate),
             "guessed_rate": _optional_fraction_payload(self.guessed_rate),
-            "peak_rate": _fraction_payload(self.peak_rate),
+            "sustained_rate": _fraction_payload(self.sustained_rate),
             "frame_count": self.frame_count,
             "rotation": self.rotation,
             "pixel_aspect": _fraction_payload(self.pixel_aspect),
@@ -166,7 +166,7 @@ class SourceValidationProof:
                 average_rate=_optional_fraction_from_payload(payload["average_rate"]),
                 base_rate=_optional_fraction_from_payload(payload["base_rate"]),
                 guessed_rate=_optional_fraction_from_payload(payload["guessed_rate"]),
-                peak_rate=_fraction_from_payload(payload["peak_rate"]),
+                sustained_rate=_fraction_from_payload(payload["sustained_rate"]),
                 frame_count=(
                     None
                     if frame_count_value is None
@@ -204,7 +204,7 @@ class SourceInfo:
     average_rate: Fraction | None
     base_rate: Fraction | None
     guessed_rate: Fraction | None
-    peak_rate: Fraction
+    sustained_rate: Fraction
     frame_count: int | None
     rotation: int
     pixel_aspect: Fraction
@@ -522,8 +522,8 @@ def _validate_proof_identity(
     if (
         proof.duration <= 0
         or proof.duration > MAX_SOURCE_DURATION
-        or proof.peak_rate <= 0
-        or proof.peak_rate > MAX_SOURCE_FPS
+        or proof.sustained_rate <= 0
+        or proof.sustained_rate > MAX_SOURCE_FPS
         or proof.time_base <= 0
         or proof.coded_width <= 0
         or proof.coded_height <= 0
@@ -756,7 +756,7 @@ def _frame_at_timestamp(
 @dataclass(frozen=True, slots=True)
 class _DerivedTimeline:
     duration: Fraction
-    peak_rate: Fraction
+    sustained_rate: Fraction
     frame_count: int
 
 
@@ -767,7 +767,7 @@ def _derive_timeline(
     nominal_rate: Fraction | None,
     is_cancelled: CancelCheck | None = None,
 ) -> _DerivedTimeline:
-    """Boundedly prove duration and maximum cadence from exact decoded PTS."""
+    """Boundedly prove duration and cadence from timestamps on the stream grid."""
     _raise_if_cancelled(is_cancelled)
     time_base = Fraction(stream.time_base)
     offset = (
@@ -839,19 +839,17 @@ def _derive_timeline(
                 "convert-source",
             )
         return _DerivedTimeline(Fraction(1, nominal_rate), nominal_rate, 1)
-    deltas = tuple(
-        later - earlier for earlier, later in zip(timestamps, timestamps[1:])
-    )
-    peak_rate = max(Fraction(1, delta) for delta in deltas)
-    if peak_rate > MAX_SOURCE_FPS:
+    deltas = tuple(b - a for a, b in zip(timestamps, timestamps[1:]))
+    duration = timestamps[-1] + deltas[-1]
+    sustained_rate = Fraction(len(timestamps), duration + 2 * time_base)
+    if sustained_rate > MAX_SOURCE_FPS:
         raise _source_error(
             ErrorCode.SOURCE_FPS_UNSUPPORTED,
             "source.probe.high-frame-rate",
             "decoded source cadence exceeds the 60 fps V1 limit",
             "convert-source-to-60fps",
         )
-    duration = timestamps[-1] + deltas[-1]
-    return _DerivedTimeline(duration, peak_rate, len(timestamps))
+    return _DerivedTimeline(duration, sustained_rate, len(timestamps))
 
 
 def _source_info(
@@ -907,7 +905,7 @@ def _source_info(
         )
         if duration <= 0:
             duration = derived.duration
-        validation_rate = max(validation_rate or Fraction(0), derived.peak_rate)
+        validation_rate = max(validation_rate or Fraction(0), derived.sustained_rate)
     else:
         validation_rate = max(validation_rate or Fraction(0), cfr_rate)
     if duration <= 0:
@@ -964,8 +962,8 @@ def _source_info(
     frames = declared_frame_count if declared_frame_count > 0 else None
     if frames is None and derived is not None:
         frames = derived.frame_count
-    peak_rate = derived.peak_rate if derived is not None else validation_rate
-    if peak_rate is None or peak_rate <= 0:
+    sustained_rate = derived.sustained_rate if derived is not None else validation_rate
+    if sustained_rate is None or sustained_rate <= 0:
         raise _source_error(
             ErrorCode.SOURCE_FPS_UNSUPPORTED,
             "source.probe.unknown-cadence",
@@ -988,7 +986,7 @@ def _source_info(
         average_rate=average_rate,
         base_rate=base_rate,
         guessed_rate=guessed_rate,
-        peak_rate=peak_rate,
+        sustained_rate=sustained_rate,
         frame_count=frames,
         rotation=rotation,
         pixel_aspect=pixel_aspect,
@@ -1014,7 +1012,7 @@ def _source_info(
         average_rate=average_rate,
         base_rate=base_rate,
         guessed_rate=guessed_rate,
-        peak_rate=peak_rate,
+        sustained_rate=sustained_rate,
         frame_count=frames,
         rotation=rotation,
         pixel_aspect=pixel_aspect,

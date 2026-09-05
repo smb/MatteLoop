@@ -281,7 +281,7 @@ def present_source_metadata(
     path = getattr(metadata, "path", None)
     full_path = str(path) if path is not None else None
     average_rate = getattr(metadata, "average_rate", None)
-    rate = average_rate or getattr(metadata, "peak_rate", None)
+    rate = average_rate or getattr(metadata, "sustained_rate", None)
     return {
         "source_filename": format_source_filename(path),
         "source_dimensions": format_source_dimensions(

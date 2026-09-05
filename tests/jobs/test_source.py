@@ -31,6 +31,7 @@ from matteloop.jobs.source import (
     _rotation_from_display_matrix,
     _rotation_from_metadata,
     _source_info,
+    _validate_proof_identity,
     decode_frame,
     probe_source,
 )
@@ -140,7 +141,7 @@ def test_probe_reports_exact_vfr_stream_metadata_and_ignores_fixture_sidecar(
     assert info.duration == Fraction(1, 5)
     assert info.time_base == Fraction(1, 10240)
     assert info.average_rate == Fraction(15)
-    assert info.peak_rate == Fraction(20)
+    assert info.sustained_rate == Fraction(30720, 2562)
     assert info.frame_count == 3
     assert info.pixel_aspect == Fraction(1)
 
@@ -345,11 +346,131 @@ def test_missing_duration_and_rate_are_derived_from_exact_frame_pts():
     derived = _derive_timeline(Container(), stream, Fraction(0), None)
 
     assert derived.duration == Fraction(1, 2)
-    assert derived.peak_rate == Fraction(10)
+    assert derived.sustained_rate == Fraction(30, 7)
     assert derived.frame_count == 3
 
 
-def test_vfr_peak_rate_is_scanned_even_with_average_and_guessed_rates(tmp_path):
+def test_millisecond_quantized_60fps_source_opens_and_proof_verifies(tmp_path):
+    gaps = (17, 17, 16) * 599 + (17, 16)
+    timestamps = [0]
+    for gap in gaps:
+        timestamps.append(timestamps[-1] + gap)
+    frames = [_yuv_frame(81, 90, 240, matrix=1, color_range=1) for _ in timestamps]
+    for frame, pts in zip(frames, timestamps):
+        frame.pts = pts
+        frame.time_base = Fraction(1, 1000)
+    stream = _color_stream(matrix=1)
+    stream.index = 0
+    stream.width = 1920
+    stream.height = 1080
+    stream.time_base = Fraction(1, 1000)
+    stream.start_time = 0
+    stream.duration = 30_000
+    stream.average_rate = Fraction(2_700_000, 45_001)
+    stream.base_rate = Fraction(60)
+    stream.guessed_rate = Fraction(60)
+    stream.frames = len(frames)
+
+    class Container:
+        duration = None
+
+        def seek(self, *args, **kwargs):
+            return None
+
+        def decode(self, selected_stream):
+            assert selected_stream is stream
+            yield from frames
+
+    info = _source_info(
+        tmp_path / "quantized-60fps.mp4",
+        SourceRevision(1, 2, 3, 4, 5),
+        Container(),
+        stream,
+        frames[0],
+    )
+
+    assert info.sustained_rate == Fraction(1_800_000, 30_001)
+    _validate_proof_identity(info.validation_proof, info.revision)
+
+
+def test_short_millisecond_quantized_60fps_source_opens(tmp_path):
+    timestamps = (1, 17, 34, 50)
+    frames = [_yuv_frame(81, 90, 240, matrix=1, color_range=1) for _ in timestamps]
+    for frame, pts in zip(frames, timestamps):
+        frame.pts = pts
+        frame.time_base = Fraction(1, 1000)
+    stream = _color_stream(matrix=1)
+    stream.index = 0
+    stream.width = 1920
+    stream.height = 1080
+    stream.time_base = Fraction(1, 1000)
+    stream.start_time = 0
+    stream.duration = 66
+    stream.average_rate = Fraction(60)
+    stream.base_rate = Fraction(60)
+    stream.guessed_rate = Fraction(60)
+    stream.frames = len(frames)
+
+    class Container:
+        duration = None
+
+        def seek(self, *args, **kwargs):
+            return None
+
+        def decode(self, selected_stream):
+            assert selected_stream is stream
+            yield from frames
+
+    _source_info(
+        tmp_path / "short-quantized-60fps.mp4",
+        SourceRevision(1, 2, 3, 4, 5),
+        Container(),
+        stream,
+        frames[0],
+    )
+
+
+def test_sustained_120fps_source_is_rejected(tmp_path):
+    frames = [_yuv_frame(81, 90, 240, matrix=1, color_range=1) for _ in range(3)]
+    for frame, pts in zip(frames, range(3)):
+        frame.pts = pts
+        frame.time_base = Fraction(1, 120)
+    stream = _color_stream(matrix=1)
+    stream.width = 16
+    stream.height = 8
+    stream.time_base = Fraction(1, 120)
+    stream.start_time = 0
+    stream.duration = 3
+    stream.average_rate = Fraction(30)
+    stream.base_rate = Fraction(120)
+    stream.guessed_rate = Fraction(30)
+    stream.frames = len(frames)
+
+    class Container:
+        duration = None
+
+        def seek(self, *args, **kwargs):
+            return None
+
+        def decode(self, selected_stream):
+            assert selected_stream is stream
+            yield from frames
+
+    with pytest.raises(AppError) as error:
+        _source_info(
+            tmp_path / "120fps.mp4",
+            SourceRevision(1, 2, 3, 4, 5),
+            Container(),
+            stream,
+            frames[0],
+        )
+
+    assert error.value.code is ErrorCode.SOURCE_FPS_UNSUPPORTED
+
+
+def test_vfr_timestamp_scan_uses_sustained_cadence_even_with_declared_rates(
+    tmp_path,
+):
     frames = [_yuv_frame(81, 90, 240, matrix=1, color_range=1) for _ in range(3)]
     for frame, pts in zip(frames, (0, 1, 10)):
         frame.pts = pts
@@ -365,6 +486,8 @@ def test_vfr_peak_rate_is_scanned_even_with_average_and_guessed_rates(tmp_path):
     stream.base_rate = Fraction(100)
     stream.frames = 3
 
+    decoded = False
+
     class Container:
         duration = None
 
@@ -372,19 +495,21 @@ def test_vfr_peak_rate_is_scanned_even_with_average_and_guessed_rates(tmp_path):
             return None
 
         def decode(self, selected_stream):
+            nonlocal decoded
             assert selected_stream is stream
+            decoded = True
             yield from frames
 
-    with pytest.raises(AppError) as error:
-        _source_info(
-            tmp_path / "vfr.mp4",
-            SourceRevision(1, 2, 3, 4, 5),
-            Container(),
-            stream,
-            frames[0],
-        )
+    info = _source_info(
+        tmp_path / "vfr.mp4",
+        SourceRevision(1, 2, 3, 4, 5),
+        Container(),
+        stream,
+        frames[0],
+    )
 
-    assert error.value.code is ErrorCode.SOURCE_FPS_UNSUPPORTED
+    assert decoded
+    assert info.sustained_rate == Fraction(100, 7)
 
 
 def test_exact_consistent_cfr_metadata_is_the_only_scan_free_path(tmp_path):
@@ -417,7 +542,7 @@ def test_exact_consistent_cfr_metadata_is_the_only_scan_free_path(tmp_path):
     )
 
     assert info.duration == Fraction(3, 2)
-    assert info.peak_rate == Fraction(2)
+    assert info.sustained_rate == Fraction(2)
 
 
 def test_probe_rejects_a_source_narrower_or_shorter_than_the_minimum(tmp_path):
