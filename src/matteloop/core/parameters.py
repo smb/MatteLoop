@@ -235,7 +235,7 @@ def _reduce_execution_provider(
     return _invalidate(
         state,
         replace(state.parameters, execution_provider=event.execution_provider),
-        "Rechenbeschleunigung",
+        "Compute acceleration",
     )
 
 

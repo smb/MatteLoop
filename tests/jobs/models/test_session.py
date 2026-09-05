@@ -850,7 +850,7 @@ def test_failed_hardware_provider_falls_back_to_cpu_with_a_startup_notice() -> N
     assert isinstance(prepared, _PreparedRembgSession)
     assert prepared.execution_provider == CPU_EXECUTION_PROVIDER
     assert prepared.startup_notice is not None
-    assert "CPU fortgesetzt" in prepared.startup_notice
+    assert "continues on the CPU" in prepared.startup_notice
     assert calls == [
         [CUDA_EXECUTION_PROVIDER, CPU_EXECUTION_PROVIDER],
         [CPU_EXECUTION_PROVIDER],

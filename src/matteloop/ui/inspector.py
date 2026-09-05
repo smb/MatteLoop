@@ -205,7 +205,7 @@ class Inspector(QFrame):
         self.set_model_status("ready")
         self.provider_picker = compact_field(ElidingComboBox())
         self.provider_picker.setObjectName("provider_picker")
-        self.provider_picker.setAccessibleName("Rechenbeschleunigung")
+        self.provider_picker.setAccessibleName("Compute acceleration")
         self._set_provider_options(catalog.default_id)
         self.edge_picker = compact_field(ElidingComboBox())
         self.edge_picker.setObjectName("edge_picker")
@@ -636,7 +636,7 @@ class Inspector(QFrame):
         model_layout.addWidget(self.model_picker, 1)
         model_layout.addWidget(self.model_status)
         layout.addRow(self._form_label("Model"), model_row)
-        layout.addRow(self._form_label("Rechenbeschleunigung"), self.provider_picker)
+        layout.addRow(self._form_label("Compute acceleration"), self.provider_picker)
         layout.addRow(self._form_label("Edge treatment"), self.edge_picker)
         return controls
 

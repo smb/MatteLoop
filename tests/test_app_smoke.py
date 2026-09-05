@@ -172,7 +172,10 @@ def test_provider_command_prints_fake_runtime_facts(
     output = capsys.readouterr().out
     assert "ONNX Runtime distribution: fake 1.2" in output
     assert "onnxruntime device: GPU" in output
-    assert "DmlExecutionProvider: GPU over DirectML – empfohlen [recommended]" in output
+    assert (
+        "DmlExecutionProvider: GPU over DirectML – recommended [recommended]"
+        in output
+    )
     assert "CPUExecutionProvider: CPU" in output
 
 

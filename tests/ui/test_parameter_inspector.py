@@ -227,10 +227,10 @@ def test_inspector_exposes_and_emits_the_selected_execution_provider(qtbot) -> N
     inspector = Inspector(
         _settings(),
         provider_options=(
-            ProviderOption(CPU_EXECUTION_PROVIDER, "CPU – empfohlen", True),
+            ProviderOption(CPU_EXECUTION_PROVIDER, "CPU – recommended", True),
             ProviderOption(
                 COREML_EXECUTION_PROVIDER,
-                "Apple CoreML – experimentell",
+                "Apple CoreML – experimental",
             ),
         ),
     )
@@ -239,7 +239,7 @@ def test_inspector_exposes_and_emits_the_selected_execution_provider(qtbot) -> N
     inspector.command_requested.connect(commands.append)
 
     assert inspector.provider_picker.currentData() == CPU_EXECUTION_PROVIDER
-    assert inspector.provider_picker.itemText(1) == "Apple CoreML – experimentell"
+    assert inspector.provider_picker.itemText(1) == "Apple CoreML – experimental"
     inspector.provider_picker.setCurrentIndex(1)
 
     assert [type(command).__name__ for command in commands] == [

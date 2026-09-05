@@ -120,7 +120,7 @@ def test_execution_provider_changes_stale_the_current_preview() -> None:
 
     assert changed.parameters.execution_provider == "CUDAExecutionProvider"
     assert changed.preview is PreviewState.STALE
-    assert changed.stale_category == "Rechenbeschleunigung"
+    assert changed.stale_category == "Compute acceleration"
 
 
 def test_cleanup_parameter_changes_stale_the_current_preview() -> None:

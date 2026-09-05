@@ -1585,8 +1585,7 @@ def _create_cpu_fallback_session(
         session,
         inference_kwargs,
         CPU_EXECUTION_PROVIDER,
-        f"{label} konnte dieses Modell nicht laden. Die Verarbeitung wird "
-        "automatisch über die CPU fortgesetzt.",
+        f"{label} could not load this model. Processing continues on the CPU.",
     )
 
 

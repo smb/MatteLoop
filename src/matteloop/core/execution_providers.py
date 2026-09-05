@@ -167,7 +167,7 @@ def _provider_label(
 ) -> str:
     label = provider_base_label(provider)
     if provider == COREML_EXECUTION_PROVIDER and model_id.startswith("birefnet"):
-        return f"{label} – experimentell"
+        return f"{label} – experimental"
     if provider == recommended:
-        return f"{label} – empfohlen"
+        return f"{label} – recommended"
     return label
