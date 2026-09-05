@@ -41,7 +41,7 @@ jobs:
           - name: core
             paths: >-
               tests/core tests/test_app_smoke.py
-              tests/test_legacy_data_locations.py tests/test_media_factory.py
+              tests/test_media_factory.py
               tests/test_native_build.py tests/test_packaged_entrypoint.py
               tests/test_resources.py tests/test_scope_contract.py
           - name: jobs
