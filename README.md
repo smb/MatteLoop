@@ -113,12 +113,6 @@ It decodes `assets/demo/golden-retriever.mp4`, segments it with
 `birefnet-general-lite` — which has to be in the local model cache already —
 and rewrites `assets/screenshots/`.
 
-New installs use the MatteLoop cache and workspace names. Existing model
-weights, compiled provider caches and thumbnails under
-`~/Library/Caches/rembggui/` and promoted cuts in an output directory's
-`.rembggui-work/` remain discoverable; when both old and new locations exist,
-the new MatteLoop location is preferred.
-
 Native builds automatically compile or reuse a source-pinned, verified LGPL
 FFmpeg/libwebp/PyAV wheel; the stock PyAV wheel is not an eligible packaging
 fallback. They also create a checksum-verified Qt/PySide 6.10.3 source

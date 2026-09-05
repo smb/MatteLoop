@@ -5,8 +5,7 @@ from typing import TYPE_CHECKING
 from platformdirs import user_cache_dir
 
 from matteloop.paths import (
-    LEGACY_WORKSPACE_NAME,
-    NEW_WORKSPACE_NAME,
+    WORKSPACE_NAME,
     cache_subdirectory,
 )
 
@@ -32,7 +31,6 @@ __all__ = (
     "_linux_mount_is_local",
     "_linux_mountinfo_is_local",
     "_windows_drive_type_is_local",
-    "_workspace_root_for_output",
     "_workspace_layout",
     "user_cache_dir",
 )
@@ -77,7 +75,7 @@ def _workspace_layout(
     output_directory: Path, *, create: bool
 ) -> WorkspaceLayout:
     output = _canonical_output_directory(output_directory)
-    requested_root = _workspace_root_for_output(output)
+    requested_root = output / WORKSPACE_NAME
     fallback = (
         _locality_fallback(requested_root)
         if requested_root.exists()
@@ -117,17 +115,8 @@ def _workspace_layout(
     return WorkspaceLayout(output, root, cuts, scratch, fallback)
 
 
-def _workspace_root_for_output(output: Path) -> Path:
-    """Prefer the new workspace name while discovering the legacy directory."""
-    new_root = output / NEW_WORKSPACE_NAME
-    legacy_root = output / LEGACY_WORKSPACE_NAME
-    if new_root.exists() or not legacy_root.exists():
-        return new_root
-    return legacy_root
-
-
 def _fallback_workspace_root(output: Path) -> Path:
-    """Prefer the new cache location while adopting an existing legacy one."""
+    """Return the local cache workspace for a non-local output directory."""
     digest = hashlib.sha256(os.fsencode(str(output))).hexdigest()
     return cache_subdirectory("workspaces", digest)
 

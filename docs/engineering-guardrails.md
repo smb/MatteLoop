@@ -65,19 +65,11 @@ tests and clean type checks the whole way down, and it feels like diligence.
 
 ### Product rename — 2026-08-31
 
-The product was renamed from `rembgGUI` to **MatteLoop**. New source, package,
-executable, settings, workspace, and documentation surfaces use MatteLoop.
-Existing data under `~/Library/Caches/rembggui/` — model weights, compiled
-provider caches, thumbnails and fallback workspaces — and promoted cut sets
-under `<output-directory>/.rembggui-work/` remain discoverable for backward
-compatibility; when both names exist, the new MatteLoop location is preferred.
-A rename must never orphan user-owned data, so a single helper,
-`paths.cache_subdirectory`, decides this for every cache subdirectory rather
-than each call site repeating the rule.
+The product was renamed to **MatteLoop**. New source, package, executable,
+settings, workspace, and documentation surfaces use MatteLoop.
 
 The persisted `rembggui-cut-manifest` and `rembggui-fingerprint` schema tokens
-are deliberately unchanged: they feed cut cache keys, so renaming them would
-leave promoted cut sets on disk but unreachable.
+are deliberately unchanged because they are stored-file format identifiers.
 
 ---
 

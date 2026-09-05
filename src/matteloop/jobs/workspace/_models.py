@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from matteloop.paths import WORKSPACE_NAME
+
 # ruff: noqa: F403,F405,F811
 from ._common import *  # noqa: F403,F401
 
@@ -25,7 +27,6 @@ if TYPE_CHECKING:
         WorkspaceFallback,
         _fallback_workspace_root,
         _workspace_layout,
-        _workspace_root_for_output,
     )
     from ._runtime_helpers import _promotion_lock
     from ._scan import _inspect_frame
@@ -112,7 +113,7 @@ class CutWorkspace:
         expected_root = (
             _fallback_workspace_root(self.output_directory)
             if self.fallback is not None
-            else _workspace_root_for_output(self.output_directory)
+            else self.output_directory / WORKSPACE_NAME
         )
         if not _same_lexical_path(self.workspace_root, expected_root):
             raise _unsafe_error("workspace root is not bound to the output directory")
