@@ -5,6 +5,8 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
+from PySide6.QtCore import QCoreApplication
+
 from matteloop.jobs.models.catalog import ModelCatalog
 from matteloop.ui.aligned_rows import (
     ROW_DATA_ROLE,
@@ -12,6 +14,7 @@ from matteloop.ui.aligned_rows import (
     AlignedRow,
     RowStatus,
 )
+from matteloop.ui.copy import model_display_name
 from matteloop.ui.source_presentation import format_source_file_size
 
 MODEL_ENTRY_ROLE = ROW_DATA_ROLE + 11
@@ -37,32 +40,48 @@ class ModelEntry:
 
 def present_model(entry: ModelEntry) -> AlignedRow:
     """Present one model with aligned metadata and spoken status words."""
+    display_name = model_display_name(entry.model_id, entry.display_name)
     if entry.cached:
-        cache_status = "cached locally"
+        cache_status = QCoreApplication.translate("ModelEntries", "cached locally")
         cache_detail = cache_status
         if entry.outdated_rembg_version is not None:
-            cache_detail += "; outdated copy from rembg " + entry.outdated_rembg_version
+            cache_detail += (
+                QCoreApplication.translate(
+                    "ModelEntries", "; outdated copy from rembg %s"
+                )
+                % entry.outdated_rembg_version
+            )
         glyph = "◆" if entry.active else "✓"
     elif entry.outdated_size_bytes is not None:
-        cache_status = "outdated weight"
-        version = entry.outdated_rembg_version or "obsolete rembg"
-        cache_detail = (
-            f"{cache_status} from rembg {version}; "
-            f"{format_source_file_size(entry.outdated_size_bytes)} on disk"
+        cache_status = QCoreApplication.translate("ModelEntries", "outdated weight")
+        version = entry.outdated_rembg_version or QCoreApplication.translate(
+            "ModelEntries", "obsolete rembg"
         )
+        cache_detail = QCoreApplication.translate(
+            "ModelEntries", "%s from rembg %s; %s on disk"
+        ) % (cache_status, version, format_source_file_size(entry.outdated_size_bytes))
         glyph = "⟳"
     else:
-        cache_status = "not cached"
+        cache_status = QCoreApplication.translate("ModelEntries", "not cached")
         cache_detail = cache_status
         glyph = "◆" if entry.active else "↓"
-    active_status = "active model" if entry.active else "not active"
+    active_status = (
+        QCoreApplication.translate("ModelEntries", "active model")
+        if entry.active
+        else QCoreApplication.translate("ModelEntries", "not active")
+    )
     size = format_source_file_size(entry.download_size_bytes)
-    detail = f"{entry.display_name}; {size}; {cache_detail}; {active_status}"
+    detail = QCoreApplication.translate("ModelEntries", "%s; %s; %s; %s") % (
+        display_name,
+        size,
+        cache_detail,
+        active_status,
+    )
     return AlignedRow(
         glyph,
         RowStatus.CACHED if entry.cached else RowStatus.UNCACHED,
         (
-            AlignedColumn(entry.display_name),
+            AlignedColumn(display_name),
             AlignedColumn(size, True),
             AlignedColumn(cache_status),
             AlignedColumn(active_status),

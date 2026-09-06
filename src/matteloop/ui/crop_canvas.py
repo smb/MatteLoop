@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QCoreApplication, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
@@ -89,7 +89,9 @@ class CropCanvas(PreviewCanvas):
         self._editable = editable
         if presentation is None:
             self._geometry = None
-            self.setAccessibleDescription("Original video frame")
+            self.setAccessibleDescription(
+                QCoreApplication.translate("CropCanvas", "Original video frame")
+            )
         else:
             self._rebuild_geometry()
             self._announce_crop()
@@ -328,9 +330,19 @@ class CropCanvas(PreviewCanvas):
             return
         crop = presentation.crop
         self.setAccessibleDescription(
-            f"Crop bounds: x {crop.x}, y {crop.y}, width {crop.width}, "
-            f"height {crop.height} source pixels; source {presentation.width} × "
-            f"{presentation.height}"
+            QCoreApplication.translate(
+                "CropCanvas",
+                "Crop bounds: x %s, y %s, width %s, height %s source pixels; "
+                "source %s × %s",
+            )
+            % (
+                crop.x,
+                crop.y,
+                crop.width,
+                crop.height,
+                presentation.width,
+                presentation.height,
+            )
         )
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
-from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtCore import QCoreApplication, Qt, QUrl, Signal
 from PySide6.QtGui import QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
@@ -43,15 +43,21 @@ class SourceStrip(QWidget):
         layout.setSpacing(12)
         self.filename = QLabel()
         self.filename.setObjectName("source_filename")
-        self.filename.setAccessibleName("Source video")
+        self.filename.setAccessibleName(
+            QCoreApplication.translate("SourceStrip", "Source video")
+        )
         self.filename.setProperty("mono", True)
         self.dimensions = self._label("source_dimensions")
         self.duration = self._label("source_duration")
         self.frame_rate = self._label("source_frame_rate")
         self.file_size = self._label("source_file_size")
-        self.replace_button = QPushButton("Open Video…")
+        self.replace_button = QPushButton(
+            QCoreApplication.translate("SourceStrip", "Open Video…")
+        )
         self.replace_button.setObjectName("replace_video")
-        self.replace_button.setAccessibleName("Open Video")
+        self.replace_button.setAccessibleName(
+            QCoreApplication.translate("SourceStrip", "Open Video")
+        )
         for widget in (
             self.filename,
             self.dimensions,
@@ -69,7 +75,6 @@ class SourceStrip(QWidget):
         value.setProperty("secondary", True)
         value.setProperty("mono", True)
         return value
-
 
     def set_presented_metadata(self, values: SourcePresentationValues) -> None:
         """Apply presenter-owned source values to the strip widgets."""
@@ -90,19 +95,29 @@ class SourceDropSurface(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("source_drop_target")
-        self.setAccessibleName("Video drop area")
+        self.setAccessibleName(
+            QCoreApplication.translate("SourceDropSurface", "Video drop area")
+        )
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAcceptDrops(True)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(8)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.heading = QLabel("Drop a video here")
+        self.heading = QLabel(
+            QCoreApplication.translate("SourceDropSurface", "Drop a video here")
+        )
         self.heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.heading.setAccessibleName("Open a video")
-        self.button = QPushButton("Open Video…")
+        self.heading.setAccessibleName(
+            QCoreApplication.translate("SourceDropSurface", "Open a video")
+        )
+        self.button = QPushButton(
+            QCoreApplication.translate("SourceDropSurface", "Open Video…")
+        )
         self.button.setObjectName("choose_video")
-        self.button.setAccessibleName("Open Video")
+        self.button.setAccessibleName(
+            QCoreApplication.translate("SourceDropSurface", "Open Video")
+        )
         self.button.setMinimumHeight(44)
         layout.addWidget(self.heading)
         layout.addWidget(self.button, alignment=Qt.AlignmentFlag.AlignCenter)

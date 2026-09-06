@@ -27,6 +27,10 @@ composite. MatteLoop is the whole path from that clip to that loop:
 - **Open Preferences** from the gear button to choose or clear the output
   directory.
 
+The interface is available in English and German. Change the language in
+Preferences from the gear button; the choice applies after restarting
+MatteLoop.
+
 The result is lossless and genuinely transparent — an alpha channel, not a
 matte painted onto a colour.
 

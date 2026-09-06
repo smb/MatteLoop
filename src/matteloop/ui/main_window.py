@@ -20,8 +20,9 @@ from PySide6.QtWidgets import (
 from matteloop.core.execution_providers import ProviderOption
 from matteloop.core.state import AppState, FocusTarget
 from matteloop.ui.action_shelf import ActionShelf
-from matteloop.ui.crop_view import render_source_editor
+from matteloop.ui.copy import main_window_copy
 from matteloop.ui.inspector import Inspector
+from matteloop.ui.main_window_render import render_source_error, render_window
 from matteloop.ui.ports import (
     ChooseVideoRequested,
     ManageModelsRequested,
@@ -57,7 +58,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("main_window")
-        self.setAccessibleName("MatteLoop")
+        self.setAccessibleName(main_window_copy("MatteLoop"))
         self.setMinimumSize(1100, 720)
         self.resize(1440, 900)
         self._store = store
@@ -67,6 +68,7 @@ class MainWindow(QMainWindow):
         self._provider_options = provider_options
         self._unsubscribe: Callable[[], None] | None = None
         self._last_focus: FocusTarget | None = None
+        self._success_artifact_path = ""
         self._build()
         self._set_tab_order()
         self._restore_geometry()
@@ -101,9 +103,13 @@ class MainWindow(QMainWindow):
         self.result_canvas = self.preview_stage.result_canvas
         self.timeline_widget = TimelineWidget()
         self.timeline_placeholder = self.timeline_widget
-        self.source_error_heading = StatusLabel("Couldn’t read this video")
+        self.source_error_heading = StatusLabel(
+            main_window_copy("Couldn’t read this video")
+        )
         self.source_error_heading.setObjectName("source_error_heading")
-        self.source_error_heading.setAccessibleName("Video load error")
+        self.source_error_heading.setAccessibleName(
+            main_window_copy("Video load error")
+        )
         self.source_error_heading.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.source_error_heading.hide()
         self.source_error_copy = QLabel()
@@ -128,7 +134,9 @@ class MainWindow(QMainWindow):
         )
         self.inspector_scroll = self.inspector.scroll_area
         self.inspector_content = self.inspector.scroll_area.widget()
-        self.action_shelf = ActionShelf(self._store, self._services)
+        self.action_shelf = ActionShelf(
+            self._store, self._services, settings=self._settings
+        )
         self.preview_button = self.action_shelf.preview_button
         self.render_button = self.action_shelf.render_button
         self.rebuild_button = self.inspector.rebuild_button
@@ -141,9 +149,9 @@ class MainWindow(QMainWindow):
         success_info_row.setObjectName("success_info_row")
         info_layout = QHBoxLayout(success_info_row)
         info_layout.setContentsMargins(0, 0, 0, 0)
-        self.success_banner = QLabel("Render complete")
+        self.success_banner = QLabel(main_window_copy("Render complete"))
         self.success_banner.setObjectName("success_banner")
-        self.success_banner.setAccessibleName("Render complete")
+        self.success_banner.setAccessibleName(main_window_copy("Render complete"))
         self.success_banner.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.success_artifact = QLabel()
         self.success_artifact.setObjectName("success_artifact")
@@ -159,12 +167,12 @@ class MainWindow(QMainWindow):
         actions_layout = QHBoxLayout(success_actions_row)
         actions_layout.setContentsMargins(0, 0, 0, 0)
         actions_layout.addStretch(1)
-        self.open_output_button = QPushButton("Open output")
+        self.open_output_button = QPushButton(main_window_copy("Open output"))
         self.open_output_button.setObjectName("open_output")
-        self.open_output_button.setAccessibleName("Open output")
-        self.open_folder_button = QPushButton("Open folder")
+        self.open_output_button.setAccessibleName(main_window_copy("Open output"))
+        self.open_folder_button = QPushButton(main_window_copy("Open folder"))
         self.open_folder_button.setObjectName("open_output_folder")
-        self.open_folder_button.setAccessibleName("Open folder")
+        self.open_folder_button.setAccessibleName(main_window_copy("Open folder"))
         actions_layout.addWidget(self.open_output_button)
         actions_layout.addWidget(self.open_folder_button)
         success_layout.addWidget(success_info_row)
@@ -217,7 +225,8 @@ class MainWindow(QMainWindow):
     def _set_tab_order(self) -> None:
         """Declare a deterministic keyboard route through the shell."""
         widgets = [
-            self.source_drop_target, self.choose_video_button,
+            self.source_drop_target,
+            self.choose_video_button,
             self.replace_video_button,
             self.original_canvas,
             self.result_canvas,
@@ -252,71 +261,10 @@ class MainWindow(QMainWindow):
         self._render(model)
 
     def _render_source_error(self, model: PresentationModel) -> None:
-        """Show the source failure with its icon, message and disclosed detail."""
-        self.source_error_heading.setVisible(model.source_error_visible)
-        self.source_error_copy.setVisible(model.source_error_visible)
-        self.source_error_heading.setText("Couldn’t read this video")
-        self.source_error_heading.set_status_icon(model.source_error_icon)
-        self.source_error_heading.setToolTip(model.source_error_detail or "")
-        self.source_error_heading.setAccessibleDescription(
-            model.source_error_detail or ""
-        )
-        self.source_error_copy.setText(model.source_error_message or "")
+        render_source_error(self, model)
 
     def _render(self, model: PresentationModel) -> None:
-        self.source_drop_surface.setVisible(model.source_surface_visible)
-        self.source_strip.setVisible(model.source_strip_visible)
-        self.preview_stage.setVisible(model.show_stage)
-        self.timeline_widget.setVisible(model.show_timeline)
-        self.timeline_widget.apply_presentation(model.timeline, not model.editor_locked)
-        self._render_source_error(model)
-        self.source_drop_surface.heading.setText(model.source_surface_heading)
-        self.source_strip.set_presented_metadata(model)
-        render_source_editor(self.original_canvas, self.inspector, model)
-        self.result_canvas.set_presented_frame(model.result_frame, model.result_message)
-        self.result_canvas.setAccessibleName(model.result_accessible_name)
-        self.result_canvas.setAccessibleDescription(model.result_accessible_description)
-        self.result_canvas.setProperty("status", model.result_status)
-        self.result_canvas.setProperty("checkerboard", model.result_checkerboard)
-        self.result_canvas.set_status_marker(
-            model.result_status_marker, model.result_status_icon
-        )
-        self.result_canvas.style().unpolish(self.result_canvas)
-        self.result_canvas.style().polish(self.result_canvas)
-        self.choose_video_button.setEnabled(model.choose_enabled)
-        self.replace_video_button.setEnabled(model.replace_enabled)
-        self.preview_button.setEnabled(model.preview_enabled)
-        self.preview_button.setText(model.preview_label)
-        self.render_button.setEnabled(model.render_enabled)
-        self.rebuild_button.setEnabled(model.rebuild_enabled)
-        self.rebuild_button.setVisible(model.show_rebuild)
-        self.edited_cut_recovery.setVisible(model.recovery_visible)
-        self.edited_cut_recovery.setText(model.recovery_label)
-        self.inspector.set_workspace_state(
-            model.workspace_attention, model.workspace_open
-        )
-        self.open_output_button.setEnabled(model.open_output_enabled)
-        self.open_folder_button.setEnabled(model.open_folder_enabled)
-        self.success_container.setVisible(model.show_success)
-        self.success_banner.setText(model.success_label)
-        artifact_path = model.artifact_path or ""
-        self._success_artifact_path = artifact_path
-        self._update_success_artifact()
-        self.success_artifact.setToolTip(artifact_path)
-        self.success_artifact.setAccessibleDescription(artifact_path)
-        self.success_banner.setToolTip(artifact_path)
-        self.success_banner.setAccessibleDescription(model.success_accessible_description)
-        self.inspector.setEnabled(model.inspector_enabled)
-        for name, button in (
-            ("preview", self.preview_button),
-            ("render", self.render_button),
-        ):
-            button.setProperty("primaryAction", model.primary_action == name)
-            button.setProperty("primary", model.primary_action == name)
-            button.style().unpolish(button)
-            button.style().polish(button)
-        self.preview_button.setAccessibleName(model.preview_label)
-        self._queue_focus(model.focus_target)
+        render_window(self, model)
 
     def _update_success_artifact(self) -> None:
         if not hasattr(self, "success_artifact"):

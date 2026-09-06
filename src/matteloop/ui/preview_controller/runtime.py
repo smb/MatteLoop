@@ -90,11 +90,7 @@ class ProductionPreviewRuntime:
 
     def __init__(self, *, cache_root: Path | None = None) -> None:
         self.catalog = ModelCatalog.load_resource()
-        self.cache_root = (
-            model_cache_root()
-            if cache_root is None
-            else cache_root
-        )
+        self.cache_root = model_cache_root() if cache_root is None else cache_root
         self._context: JobContext | None = None
         self._prepared: PreparedSegmentation | None = None
         self._prepared_provider = CPU_EXECUTION_PROVIDER
@@ -284,10 +280,7 @@ class ProductionPreviewRuntime:
         context: JobContext,
     ) -> RenderArtifact:
         prepared = self._prepared
-        if (
-            prepared is None
-            or prepared.model_id != request.segmentation.model_id
-        ):
+        if prepared is None or prepared.model_id != request.segmentation.model_id:
             spec = self.catalog.get(request.segmentation.model_id)
             artifact = spec.artifact
             if artifact is None:
@@ -308,9 +301,7 @@ class ProductionPreviewRuntime:
             )
         from matteloop.ui.render_pipeline import render_prepared
 
-        return render_prepared(
-            prepared, request, context, cut_workspace=cut_workspace
-        )
+        return render_prepared(prepared, request, context, cut_workspace=cut_workspace)
 
     def close(self) -> None:
         self._manager.close()
@@ -344,9 +335,6 @@ class ProductionPreviewRuntime:
         return (
             bool(filename)
             and (
-                self.cache_root
-                / self.catalog.rembg_version
-                / model_id
-                / filename
+                self.cache_root / self.catalog.rembg_version / model_id / filename
             ).is_file()
         )

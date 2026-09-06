@@ -5,7 +5,7 @@ from __future__ import annotations
 from threading import Thread
 from uuid import uuid4
 
-from PySide6.QtCore import QObject, QThread, Signal, Slot
+from PySide6.QtCore import QCoreApplication, QObject, QThread, Signal, Slot
 from PySide6.QtWidgets import QWidget
 
 from matteloop.core.execution_providers import ProviderOption
@@ -128,9 +128,7 @@ class PreviewController(QObject):
         metadata = state.source_value
         if source_id is None or state.source is not SourceState.READY:
             return
-        inputs = _preview_inputs(
-            metadata, state.timeline, state.crop, state.parameters
-        )
+        inputs = _preview_inputs(metadata, state.timeline, state.crop, state.parameters)
         job_id = uuid4().hex
         request_id = uuid4().hex
         self._store.dispatch(
@@ -197,9 +195,7 @@ class PreviewController(QObject):
         worker.provider_notice.connect(self._provider_notice)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(
-            lambda job_id=job_id: self._thread_finished(job_id)
-        )
+        thread.finished.connect(lambda job_id=job_id: self._thread_finished(job_id))
         self._contexts[job_id] = context
         self._threads[job_id] = (thread, worker)
         self._active_job_id = job_id
@@ -212,7 +208,7 @@ class PreviewController(QObject):
         if not self._dialog_cancel_connected:
             self._dialog.cancel_requested.connect(self._cancel_active)
             self._dialog_cancel_connected = True
-        self._dialog.reset("Preparing model")
+        self._dialog.reset()
         self._dialog.set_job_details(inputs.parameters.model_id)
         self._dialog.setProperty("jobId", job_id)
         self._dialog.open()
@@ -288,9 +284,15 @@ class PreviewController(QObject):
         if isinstance(stage, str) and stage:
             self._dialog.set_stage(stage)
         if isinstance(notification, ModelPrepared):
-            self._dialog.setWindowTitle("Previewing selected frame")
+            self._dialog.setWindowTitle(
+                QCoreApplication.translate(
+                    "PreviewJobDialog", "Previewing selected frame"
+                )
+            )
         elif stage and stage is not ProgressStage.SEGMENTATION:
-            self._dialog.setWindowTitle("Preparing model")
+            self._dialog.setWindowTitle(
+                QCoreApplication.translate("PreviewJobDialog", "Preparing model")
+            )
 
     def _terminal_notification(
         self, notification: PreviewSucceeded | PreviewFailed | CancelAcknowledged

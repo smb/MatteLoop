@@ -52,12 +52,8 @@ def _settings(name: str) -> QSettings:
     return settings
 
 
-def _ready_store(
-    source: Path, output_directory: Path | None = None
-) -> ReducerStore:
-    state = AppState(
-        parameters=ParameterState(output_directory=output_directory)
-    )
+def _ready_store(source: Path, output_directory: Path | None = None) -> ReducerStore:
+    state = AppState(parameters=ParameterState(output_directory=output_directory))
     loading = reduce(state, SourceLoadRequested("source", "load"))
     ready = reduce(loading, SourceLoaded("source", "load", Metadata(source)))
     return ReducerStore(ready)
@@ -98,9 +94,7 @@ def test_preferences_directory_matches_inspector_and_can_fall_back_to_source(
     inspector = Inspector(settings)
     qtbot.addWidget(preferences)
     qtbot.addWidget(inspector)
-    monkeypatch.setattr(
-        QFileDialog, "getExistingDirectory", lambda *_args: str(chosen)
-    )
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *_args: str(chosen))
 
     preferences.choose_output_directory_button.click()
 
@@ -122,9 +116,7 @@ def test_preferences_clear_works_without_a_loaded_source(qtbot, tmp_path: Path) 
     override = tmp_path / "exports"
     settings = _settings("clear-without-source")
     settings.setValue("parameters/output_directory", str(override))
-    store = ReducerStore(
-        AppState(parameters=ParameterState(output_directory=override))
-    )
+    store = ReducerStore(AppState(parameters=ParameterState(output_directory=override)))
     controller = SourceController(store, settings=settings)
     dialog = SettingsDialog(store, controller)
     qtbot.addWidget(dialog)
@@ -165,3 +157,22 @@ def test_preferences_offers_no_cancel_it_cannot_honour(qtbot) -> None:
     assert dialog.button_box.button(QDialogButtonBox.StandardButton.Close)
     assert dialog.button_box.button(QDialogButtonBox.StandardButton.Cancel) is None
     assert dialog.button_box.button(QDialogButtonBox.StandardButton.Ok) is None
+
+
+def test_preferences_persists_language_for_the_next_restart(qtbot) -> None:
+    settings = _settings("language")
+    # Start from English explicitly: without a stored value the dialog opens on
+    # the system language, so on a German machine selecting German is a no-op
+    # and the test would only ever pass on an English host.
+    settings.setValue("ui/language", "en")
+    dialog = SettingsDialog(ReducerStore(AppState()), Services(), settings=settings)
+    qtbot.addWidget(dialog)
+    assert dialog.language_selector.currentData() == "en"
+
+    dialog.language_selector.setCurrentIndex(dialog.language_selector.findData("de"))
+
+    assert settings.value("ui/language") == "de"
+    assert (
+        dialog.language_note_label.text()
+        == "Interface language changes apply after restarting MatteLoop."
+    )

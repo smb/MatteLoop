@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from pathlib import Path
 
 import pytest
+from PySide6.QtCore import QTranslator
 
 import matteloop.resources as resources_module
 from matteloop.resources import (
@@ -12,6 +14,9 @@ from matteloop.resources import (
     resource_path,
     status_icon_asset,
 )
+from matteloop.ui.i18n import application_translator
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.parametrize(
@@ -44,6 +49,18 @@ def test_resource_path_resolves_one_explicit_runtime_copy(tmp_path: Path) -> Non
 
     assert resource_path("manifest.json", runtime_root=tmp_path) == expected
     assert read_resource_bytes("manifest.json", runtime_root=tmp_path) == b"{}"
+
+
+def test_qtranslator_loads_catalogue_from_frozen_resource_root(tmp_path: Path) -> None:
+    resource_dir = tmp_path / "resources"
+    resource_dir.mkdir()
+    source = REPOSITORY_ROOT / "resources" / "matteloop_de.qm"
+    destination = resource_dir / source.name
+    shutil.copy2(source, destination)
+
+    translator = QTranslator()
+    assert translator.load(str(destination))
+    assert application_translator("de", runtime_root=tmp_path) is not None
 
 
 def test_resource_path_fails_closed_when_resource_is_missing(tmp_path: Path) -> None:

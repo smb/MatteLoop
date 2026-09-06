@@ -74,6 +74,8 @@ extra_args =
 	--include-module=PIL.WebPImagePlugin
 	--include-data-files=resources/model-manifest.json=resources/model-manifest.json
 	--include-data-files=resources/model-provenance.json=resources/model-provenance.json
+	--include-data-files=resources/matteloop_en.qm=resources/matteloop_en.qm
+	--include-data-files=resources/matteloop_de.qm=resources/matteloop_de.qm
 	--include-data-files=LICENSE=LICENSE
 	--include-data-files=THIRD_PARTY_NOTICES.md=THIRD_PARTY_NOTICES.md
 	--include-data-files=legal/GPL-3.0.txt=GPL-3.0.txt

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSettings, QSignalBlocker, Qt, Signal
+from PySide6.QtCore import QCoreApplication, QSettings, QSignalBlocker, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QDoubleSpinBox,
@@ -61,6 +61,17 @@ from matteloop.ui.compact_widgets import (
     MiddleElidingLineEdit,
     compact_field,
 )
+from matteloop.ui.copy import (
+    accessible_field_name,
+    crop_field_label,
+    inspector_label,
+    model_display_name,
+    model_license,
+    model_purpose,
+    model_status,
+    provider_label,
+    section_title,
+)
 from matteloop.ui.crop_presentation import CropPresentation
 from matteloop.ui.inspector_disclosure import configure_disclosure, read_bool
 from matteloop.ui.parameter_presentation import (
@@ -95,7 +106,9 @@ class Inspector(QFrame):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("inspector")
-        self.setAccessibleName("Processing settings")
+        self.setAccessibleName(
+            QCoreApplication.translate("Inspector", "Processing settings")
+        )
         self._settings = settings
         self._model_options = dict(model_options or ())
         self._provider_options = (
@@ -127,23 +140,42 @@ class Inspector(QFrame):
         content_layout.setContentsMargins(16, 12, 16, 16)
         content_layout.setSpacing(4)
         self.disclosures: dict[str, tuple[QToolButton, QWidget]] = {}
-        self.edited_cut_recovery = QPushButton("Retry Rebuild")
+        self.edited_cut_recovery = QPushButton(
+            QCoreApplication.translate("Inspector", "Retry Rebuild")
+        )
         self.edited_cut_recovery.setObjectName("edited_cut_recovery")
-        self.edited_cut_recovery.setAccessibleName("Edited cut recovery")
+        self.edited_cut_recovery.setAccessibleName(
+            QCoreApplication.translate("Inspector", "Edited cut recovery")
+        )
         self.edited_cut_recovery.setToolTip(
-            "Edited cut frames could not be validated. Retry the rebuild scan."
+            QCoreApplication.translate(
+                "Inspector",
+                "Edited cut frames could not be validated. Retry the rebuild scan.",
+            )
         )
         self.edited_cut_recovery.hide()
-        self.rebuild_button = QPushButton("Rebuild from edited cuts")
+        self.rebuild_button = QPushButton(
+            QCoreApplication.translate("Inspector", "Rebuild from edited cuts")
+        )
         self.rebuild_button.setObjectName("rebuild_action")
-        self.rebuild_button.setAccessibleName("Rebuild from edited cuts")
+        self.rebuild_button.setAccessibleName(
+            QCoreApplication.translate("Inspector", "Rebuild from edited cuts")
+        )
         self.rebuild_button.setMinimumHeight(40)
-        self.manage_models = QPushButton("Manage Models…")
+        self.manage_models = QPushButton(
+            QCoreApplication.translate("Inspector", "Manage Models…")
+        )
         self.manage_models.setObjectName("manage_models")
-        self.manage_models.setAccessibleName("Manage Models…")
-        self.manage_workspaces = QPushButton("Manage Workspaces…")
+        self.manage_models.setAccessibleName(
+            QCoreApplication.translate("Inspector", "Manage Models…")
+        )
+        self.manage_workspaces = QPushButton(
+            QCoreApplication.translate("Inspector", "Manage Workspaces…")
+        )
         self.manage_workspaces.setObjectName("manage_workspaces")
-        self.manage_workspaces.setAccessibleName("Manage Workspaces…")
+        self.manage_workspaces.setAccessibleName(
+            QCoreApplication.translate("Inspector", "Manage Workspaces…")
+        )
         self.transform_group = TransformGroup(self.command_requested.emit)
         for key, title, default in _DISCLOSURES:
             section = self._section(key, title, default)
@@ -163,7 +195,9 @@ class Inspector(QFrame):
     def _build_segmentation_parameter_controls(self) -> None:
         self.model_picker = compact_field(ElidingComboBox())
         self.model_picker.setObjectName("model_picker")
-        self.model_picker.setAccessibleName("Segmentation model")
+        self.model_picker.setAccessibleName(
+            QCoreApplication.translate("Inspector", "Segmentation model")
+        )
         self.model_picker.setView(QListView())
         self.model_picker.view().setItemDelegate(AlignedRowDelegate(self.model_picker))
         self.model_picker.view().setMinimumWidth(460)
@@ -175,15 +209,21 @@ class Inspector(QFrame):
                 artifact.size_bytes if artifact is not None else None
             )
             availability = self._model_options.get(model_id, False)
-            status_words = "cached locally" if availability else "not cached yet"
+            status_words = (
+                QCoreApplication.translate("Inspector", "cached locally")
+                if availability
+                else QCoreApplication.translate("Inspector", "not cached yet")
+            )
+            display_name = model_display_name(model_id, spec.display_name)
+            purpose = model_purpose(model_id, spec.purpose)
+            license_note = model_license(model_id, spec.license_note)
             detail = (
-                f"{spec.display_name}; {spec.purpose}; {size}; {status_words}; "
-                f"{spec.license_note}"
+                f"{display_name}; {purpose}; {size}; {status_words}; {license_note}"
             )
             row = AlignedRow(
                 "✓" if availability else "↓",
                 RowStatus.CACHED if availability else RowStatus.UNCACHED,
-                (AlignedColumn(spec.display_name), AlignedColumn(size, True)),
+                (AlignedColumn(display_name), AlignedColumn(size, True)),
                 detail,
             )
             self.model_picker.addItem(status_icon(row), row.display_text, model_id)
@@ -195,7 +235,9 @@ class Inspector(QFrame):
         )
         self.model_status = QLabel()
         self.model_status.setObjectName("model_status")
-        self.model_status.setAccessibleName("Model status")
+        self.model_status.setAccessibleName(
+            QCoreApplication.translate("Inspector", "Model status")
+        )
         self.model_status.setSizePolicy(
             QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
         )
@@ -203,72 +245,113 @@ class Inspector(QFrame):
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
         self.set_model_status("ready")
+        self._build_provider_controls(catalog.default_id)
+        self.model_picker.currentIndexChanged.connect(self._update_model_accessibility)
+
+    def _build_provider_controls(self, model_id: str) -> None:
         self.provider_picker = compact_field(ElidingComboBox())
         self.provider_picker.setObjectName("provider_picker")
-        self.provider_picker.setAccessibleName("Compute acceleration")
-        self._set_provider_options(catalog.default_id)
+        self.provider_picker.setAccessibleName(
+            QCoreApplication.translate("Inspector", "Compute acceleration")
+        )
+        self._set_provider_options(model_id)
         self.edge_picker = compact_field(ElidingComboBox())
         self.edge_picker.setObjectName("edge_picker")
-        self.edge_picker.setAccessibleName("Edge treatment")
-        self.edge_picker.addItem("Standard", EdgeMode.STANDARD)
-        self.edge_picker.addItem("Decontaminate colors", EdgeMode.DECONTAMINATE_COLORS)
-        self.model_picker.currentIndexChanged.connect(self._update_model_accessibility)
+        self.edge_picker.setAccessibleName(
+            QCoreApplication.translate("Inspector", "Edge treatment")
+        )
+        self.edge_picker.addItem(
+            QCoreApplication.translate("Inspector", "Standard"), EdgeMode.STANDARD
+        )
+        self.edge_picker.addItem(
+            QCoreApplication.translate("Inspector", "Decontaminate colors"),
+            EdgeMode.DECONTAMINATE_COLORS,
+        )
 
     def _build_sampling_parameter_controls(self) -> None:
         self.fps_spinbox = compact_field(QSpinBox())
         self.fps_spinbox.setObjectName("output_fps")
-        self.fps_spinbox.setAccessibleName("Output FPS")
+        self.fps_spinbox.setAccessibleName(
+            QCoreApplication.translate("Inspector", "Output FPS")
+        )
         self.fps_spinbox.setRange(1, 240)
-        self.fps_spinbox.setSuffix(" fps")
-        self.fps_warning = QLabel("High output FPS may increase render cost")
+        self.fps_spinbox.setSuffix(QCoreApplication.translate("Inspector", " fps"))
+        self.fps_warning = QLabel(
+            QCoreApplication.translate(
+                "Inspector", "High output FPS may increase render cost"
+            )
+        )
         self.fps_warning.setObjectName("fps_warning")
         self.fps_warning.setProperty("warning", True)
-        self.fps_warning.setAccessibleName("Output FPS cost warning")
+        self.fps_warning.setAccessibleName(
+            QCoreApplication.translate("Inspector", "Output FPS cost warning")
+        )
         self.fps_warning.hide()
         self.start_spinbox = self._time_spinbox("start")
         self.end_spinbox = self._time_spinbox("end")
         self.duration_spinbox = self._time_spinbox("duration")
 
     def _build_cleanup_parameter_controls(self) -> None:
-        self.trim_checkbox = QCheckBox("Global trim")
+        self.trim_checkbox = QCheckBox(
+            QCoreApplication.translate("Inspector", "Global trim")
+        )
         self.trim_checkbox.setObjectName("global_trim")
-        self.trim_checkbox.setAccessibleName("Global alpha trim")
+        self.trim_checkbox.setAccessibleName(
+            QCoreApplication.translate("Inspector", "Global alpha trim")
+        )
         self.alpha_threshold_spinbox = self._decimal_spinbox(
             "alpha_threshold", 0.0, 100.0, 1
         )
         self.alpha_threshold_spinbox.setSuffix(" %")
         self.padding_spinbox = compact_field(QSpinBox())
         self.padding_spinbox.setObjectName("padding")
-        self.padding_spinbox.setAccessibleName("Padding pixels")
+        self.padding_spinbox.setAccessibleName(
+            QCoreApplication.translate("Inspector", "Padding pixels")
+        )
         self.padding_spinbox.setRange(0, 2_147_483_647)
         self.stretch_spinbox = self._decimal_spinbox(
             "horizontal_stretch", 0.000001, 1_000_000_000.0, 6
         )
-        self.stretch_spinbox.setAccessibleName("Horizontal stretch")
+        self.stretch_spinbox.setAccessibleName(
+            QCoreApplication.translate("Inspector", "Horizontal stretch")
+        )
 
     def _build_output_parameter_controls(self) -> None:
         self.output_directory_edit = compact_field(MiddleElidingLineEdit())
         self.output_directory_edit.setObjectName("output_directory")
-        self.output_directory_edit.setAccessibleName("Output directory")
+        self.output_directory_edit.setAccessibleName(
+            QCoreApplication.translate("Inspector", "Output directory")
+        )
         self.output_directory_edit.setProperty("mono", True)
         self.output_directory_edit.setReadOnly(True)
-        self.output_directory_button = QPushButton("Choose…")
+        self.output_directory_button = QPushButton(
+            QCoreApplication.translate("Inspector", "Choose…")
+        )
         self.output_directory_button.setObjectName("choose_output_directory")
-        self.output_directory_button.setAccessibleName("Choose output directory")
+        self.output_directory_button.setAccessibleName(
+            QCoreApplication.translate("Inspector", "Choose output directory")
+        )
         self.output_filename_edit = compact_field(QLineEdit())
         self.output_filename_edit.setObjectName("output_filename")
-        self.output_filename_edit.setAccessibleName("Output filename")
+        self.output_filename_edit.setAccessibleName(
+            QCoreApplication.translate("Inspector", "Output filename")
+        )
         self.output_filename_edit.setProperty("mono", True)
         self.output_filename_edit.setPlaceholderText("filename.webp")
         self.output_filename_edit.setToolTip(
-            "Use one non-empty filename ending in .webp; "
-            "path separators are not allowed."
+            QCoreApplication.translate(
+                "Inspector",
+                "Use one non-empty filename ending in .webp; path separators are "
+                "not allowed.",
+            )
         )
         self.max_size_spinbox = self._decimal_spinbox(
             "maximum_size", 0.0, 1_000_000_000.0, 3
         )
-        self.max_size_spinbox.setAccessibleName("Maximum file size in MiB")
-        self.max_size_spinbox.setSuffix(" MiB")
+        self.max_size_spinbox.setAccessibleName(
+            QCoreApplication.translate("Inspector", "Maximum file size in MiB")
+        )
+        self.max_size_spinbox.setSuffix(QCoreApplication.translate("Inspector", " MiB"))
 
     def _connect_parameter_controls(self) -> None:
         self.model_picker.currentIndexChanged.connect(self._model_changed)
@@ -357,7 +440,9 @@ class Inspector(QFrame):
         self.command_requested.emit(OutputFilenameChanged(filename))
 
     def _show_filename_error(self) -> None:
-        message = "Filename must be a single non-empty .webp filename."
+        message = QCoreApplication.translate(
+            "Inspector", "Filename must be a single non-empty .webp filename."
+        )
         self.output_filename_edit.setProperty("invalid", True)
         self.output_filename_edit.setToolTip(message)
         self.output_filename_edit.setAccessibleDescription(message)
@@ -367,8 +452,11 @@ class Inspector(QFrame):
     def _clear_filename_error(self) -> None:
         self.output_filename_edit.setProperty("invalid", False)
         self.output_filename_edit.setToolTip(
-            "Use one non-empty filename ending in .webp; "
-            "path separators are not allowed."
+            QCoreApplication.translate(
+                "Inspector",
+                "Use one non-empty filename ending in .webp; path separators are "
+                "not allowed.",
+            )
         )
         self.output_filename_edit.setAccessibleDescription("")
         self.output_filename_edit.style().unpolish(self.output_filename_edit)
@@ -441,9 +529,7 @@ class Inspector(QFrame):
             self.output_filename_edit.setText(presentation.output_filename)
             self.max_size_spinbox.setValue(float(presentation.max_mib))
             self._apply_time_values(presentation)
-            self.output_directory_edit.setText(
-                str(presentation.output_directory or "")
-            )
+            self.output_directory_edit.setText(str(presentation.output_directory or ""))
             self._clear_filename_error()
             self._update_model_accessibility()
         finally:
@@ -472,12 +558,12 @@ class Inspector(QFrame):
     def _time_spinbox(self, name: str) -> QDoubleSpinBox:
         field = compact_field(QDoubleSpinBox())
         field.setObjectName(f"{name}_time")
-        field.setAccessibleName(name.capitalize())
+        field.setAccessibleName(accessible_field_name(name))
         field.setProperty("mono", True)
         field.setDecimals(3)
         field.setRange(0.0, 1.0)
         field.setSingleStep(0.001)
-        field.setSuffix(" s")
+        field.setSuffix(QCoreApplication.translate("Inspector", " s"))
         return field
 
     def _decimal_spinbox(
@@ -493,13 +579,19 @@ class Inspector(QFrame):
 
     def _build_crop_controls(self) -> None:
         self._crop_syncing = False
-        self.crop_toggle = QCheckBox("Crop")
+        self.crop_toggle = QCheckBox(QCoreApplication.translate("Inspector", "Crop"))
         self.crop_toggle.setObjectName("crop_toggle")
-        self.crop_toggle.setAccessibleName("Crop overlay")
+        self.crop_toggle.setAccessibleName(
+            QCoreApplication.translate("Inspector", "Crop overlay")
+        )
         self.crop_toggle.setChecked(True)
-        self.crop_reset_button = QPushButton("Reset Crop")
+        self.crop_reset_button = QPushButton(
+            QCoreApplication.translate("Inspector", "Reset Crop")
+        )
         self.crop_reset_button.setObjectName("crop_reset")
-        self.crop_reset_button.setAccessibleName("Reset crop")
+        self.crop_reset_button.setAccessibleName(
+            QCoreApplication.translate("Inspector", "Reset crop")
+        )
         self.crop_x_spinbox = self._crop_spinbox("x")
         self.crop_y_spinbox = self._crop_spinbox("y")
         self.crop_width_spinbox = self._crop_spinbox("width")
@@ -522,9 +614,10 @@ class Inspector(QFrame):
     ) -> None:
         """Render reducer-owned crop values into standard inspector widgets."""
         self._crop_syncing = True
-        blockers = [QSignalBlocker(self.crop_toggle), *(
-            QSignalBlocker(field) for field in self.crop_fields.values()
-        )]
+        blockers = [
+            QSignalBlocker(self.crop_toggle),
+            *(QSignalBlocker(field) for field in self.crop_fields.values()),
+        ]
         try:
             self.crop_toggle.setChecked(enabled)
             if presentation is None:
@@ -553,7 +646,9 @@ class Inspector(QFrame):
     def _crop_spinbox(self, name: str) -> QSpinBox:
         field = compact_field(QSpinBox())
         field.setObjectName(f"crop_{name}")
-        field.setAccessibleName(f"Crop {name}")
+        field.setAccessibleName(
+            QCoreApplication.translate("Inspector", "Crop %s") % crop_field_label(name)
+        )
         field.setProperty("mono", True)
         field.setMinimum(0 if name in {"x", "y"} else 1)
         field.setMaximum(1)
@@ -604,7 +699,7 @@ class Inspector(QFrame):
             body_layout.addWidget(self.rebuild_button)
             body_layout.addWidget(self.manage_workspaces)
         checked = read_bool(self._settings, f"inspector/{key}", default)
-        configure_disclosure(button, key, title, checked)
+        configure_disclosure(button, key, section_title(key), checked)
         body.setVisible(checked)
         button.toggled.connect(body.setVisible)
         button.toggled.connect(
@@ -686,21 +781,19 @@ class Inspector(QFrame):
 
     @staticmethod
     def _form_label(text: str) -> QLabel:
-        label = QLabel(text)
+        label = QLabel(inspector_label(text))
         label.setFixedWidth(136)
         label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         return label
 
     def set_model_status(self, status: str) -> None:
         """Render the presenter-derived model availability beside the picker."""
-        marker, label = {
-            "ready": ("●", "Ready"),
-            "downloading": ("◌", "Downloading"),
-            "not_cached": ("○", "Not cached"),
-        }.get(status, ("○", "Not cached"))
+        marker, label = model_status(status)
         self.model_status.setText(f"{marker} {label}")
         self.model_status.setProperty("status", status)
-        self.model_status.setAccessibleDescription(f"Model status: {label}")
+        self.model_status.setAccessibleDescription(
+            QCoreApplication.translate("Inspector", "Model status: %s") % label
+        )
         self.model_status.style().unpolish(self.model_status)
         self.model_status.style().polish(self.model_status)
 
@@ -788,7 +881,14 @@ class Inspector(QFrame):
         try:
             self.provider_picker.clear()
             for option in options:
-                self.provider_picker.addItem(option.label, option.provider)
+                self.provider_picker.addItem(
+                    provider_label(
+                        option.provider,
+                        recommended=option.recommended,
+                        model_id=model_id,
+                    ),
+                    option.provider,
+                )
         finally:
             self.provider_picker.blockSignals(False)
         if selected is not None:

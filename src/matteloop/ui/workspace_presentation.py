@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime
 from fractions import Fraction
 from pathlib import Path
+
+from PySide6.QtCore import QCoreApplication, QDateTime, QLocale, QObject
 
 from matteloop.core.specs import (
     AlphaMattingSpec,
@@ -15,19 +16,59 @@ from matteloop.core.specs import (
     SamplingSpec,
     SegmentationSpec,
 )
-from matteloop.core.timeline import format_timecode
 from matteloop.jobs.models.catalog import ModelCatalog
 from matteloop.jobs.workspace import CutManifest, WorkspaceSummary
 from matteloop.ui.aligned_rows import AlignedColumn, AlignedRow, RowStatus
+from matteloop.ui.copy import model_display_name, model_license, model_purpose
+from matteloop.ui.i18n import display_locale
 from matteloop.ui.source_presentation import (
+    format_localized_timecode,
     format_source_dimensions,
     format_source_file_size,
     format_source_filename,
 )
 
 
+class WorkspacePresentation(QObject):
+    """Translation context used by the Qt-free workspace presentation helpers."""
+
+    def format_frames(self, count: int) -> str:
+        return self.tr("%n frames", "", count)
+
+
+_WORKSPACE_TRANSLATOR = WorkspacePresentation()
+
+
 def present_workspace(summary: WorkspaceSummary, catalog: ModelCatalog) -> AlignedRow:
     """Map one validated manifest to aligned columns and spoken detail."""
+    values = _workspace_values(summary, catalog)
+    flags = values["flags"]
+    status_token = (
+        RowStatus.EDITED
+        if summary.manifest.edited
+        else RowStatus.PINNED
+        if summary.manifest.pinned
+        else RowStatus.READY
+    )
+    return AlignedRow(
+        "✎" if summary.manifest.edited else ("◆" if summary.manifest.pinned else "✓"),
+        status_token,
+        (
+            AlignedColumn(values["filename"]),
+            AlignedColumn(values["frame_text"], True),
+            AlignedColumn(values["display_name"]),
+            AlignedColumn(values["range_text"]),
+            AlignedColumn(values["dimensions"]),
+            AlignedColumn(values["created_at"]),
+            AlignedColumn(flags),
+        ),
+        _workspace_detail(values),
+    )
+
+
+def _workspace_values(
+    summary: WorkspaceSummary, catalog: ModelCatalog
+) -> dict[str, str]:
     manifest = summary.manifest
     sampling = _mapping(manifest.cache_key_inputs["sampling"])
     start = _fraction(sampling["start"])
@@ -37,50 +78,68 @@ def present_workspace(summary: WorkspaceSummary, catalog: ModelCatalog) -> Align
     model = catalog.get(model_id)
     flags = ", ".join(
         label
-        for label, enabled in (("edited", manifest.edited), ("pinned", manifest.pinned))
+        for label, enabled in (
+            (
+                QCoreApplication.translate("WorkspacePresentation", "edited"),
+                manifest.edited,
+            ),
+            (
+                QCoreApplication.translate("WorkspacePresentation", "pinned"),
+                manifest.pinned,
+            ),
+        )
         if enabled
-    ) or "unchanged"
-    status_words = f"{flags}; {format_source_file_size(summary.size_bytes)}"
-    detail = (
-        f"{format_source_filename(manifest.source_path)}; "
-        f"{manifest.frame_count} frames; {model.display_name}; "
-        f"{format_timecode(start)}–{format_timecode(end)} at {fps} fps; "
-        f"{format_source_dimensions(manifest.width, manifest.height)}; "
-        f"created {_created_at(manifest.created_at_ns)}; "
-        f"purpose: {model.purpose}; licence: {model.license_note}; "
-        f"{status_words}"
+    ) or QCoreApplication.translate("WorkspacePresentation", "unchanged")
+    display_name = model_display_name(model_id, model.display_name)
+    purpose = model_purpose(model_id, model.purpose)
+    license_note = model_license(model_id, model.license_note)
+    frame_count = manifest.frame_count
+    frame_text = _WORKSPACE_TRANSLATOR.format_frames(frame_count)
+    fps_text = QCoreApplication.translate("WorkspacePresentation", "%s fps") % fps
+    return {
+        "filename": format_source_filename(manifest.source_path),
+        "frame_text": frame_text,
+        "display_name": display_name,
+        "range_text": QCoreApplication.translate("WorkspacePresentation", "%1–%2 · %3")
+        .replace("%1", format_localized_timecode(start))
+        .replace("%2", format_localized_timecode(end))
+        .replace("%3", fps_text),
+        "dimensions": format_source_dimensions(manifest.width, manifest.height),
+        "created_at": _created_at(manifest.created_at_ns),
+        "purpose": purpose,
+        "license_note": license_note,
+        "flags": flags,
+        "size": format_source_file_size(summary.size_bytes),
+        "range": f"{format_localized_timecode(start)}–{format_localized_timecode(end)}",
+        "fps": fps_text,
+    }
+
+
+def _workspace_detail(values: dict[str, str]) -> str:
+    status_words = (
+        QCoreApplication.translate("WorkspacePresentation", "%1; %2")
+        .replace("%1", values["flags"])
+        .replace("%2", values["size"])
     )
-    glyph = "✎" if manifest.edited else ("◆" if manifest.pinned else "✓")
-    status_token = (
-        RowStatus.EDITED
-        if manifest.edited
-        else RowStatus.PINNED
-        if manifest.pinned
-        else RowStatus.READY
-    )
-    return AlignedRow(
-        glyph,
-        status_token,
-        (
-            AlignedColumn(format_source_filename(manifest.source_path)),
-            AlignedColumn(f"{manifest.frame_count} frames", True),
-            AlignedColumn(model.display_name),
-            AlignedColumn(
-                f"{format_timecode(start)}–{format_timecode(end)} · {fps} fps"
-            ),
-            AlignedColumn(
-                format_source_dimensions(manifest.width, manifest.height)
-            ),
-            AlignedColumn(_created_at(manifest.created_at_ns)),
-            AlignedColumn(flags),
-        ),
-        detail,
+    return (
+        QCoreApplication.translate(
+            "WorkspacePresentation",
+            "%1; %2; %3; %4 at %5; %6; created %7; purpose: %8; licence: %9; %10",
+        )
+        .replace("%10", status_words)
+        .replace("%1", values["filename"])
+        .replace("%2", values["frame_text"])
+        .replace("%3", values["display_name"])
+        .replace("%4", values["range"])
+        .replace("%5", values["fps"])
+        .replace("%6", values["dimensions"])
+        .replace("%7", values["created_at"])
+        .replace("%8", values["purpose"])
+        .replace("%9", values["license_note"])
     )
 
 
-def request_for_workspace(
-    manifest: CutManifest, base: RenderRequest
-) -> RenderRequest:
+def request_for_workspace(manifest: CutManifest, base: RenderRequest) -> RenderRequest:
     """Use the manifest's exact cut inputs with the current output/framing."""
     inputs = manifest.cache_key_inputs
     sampling = _mapping(inputs["sampling"])
@@ -147,8 +206,9 @@ def _string(value: object) -> str:
 
 def _created_at(timestamp_ns: int) -> str:
     try:
-        return datetime.fromtimestamp(timestamp_ns / 1_000_000_000).strftime(
-            "%Y-%m-%d %H:%M"
+        timestamp = QDateTime.fromMSecsSinceEpoch(timestamp_ns // 1_000_000)
+        return display_locale().toString(
+            timestamp, QLocale.FormatType.ShortFormat
         )
     except (OverflowError, OSError, ValueError):
-        return "unknown time"
+        return QCoreApplication.translate("WorkspacePresentation", "unknown time")

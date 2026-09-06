@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Signal
+from PySide6.QtCore import QCoreApplication, QSize, Signal
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -53,8 +53,12 @@ class ModelManagerDialog(QDialog):
         if not isinstance(cache_root, Path):
             raise TypeError("cache_root must be a Path")
         self.setObjectName("model_manager")
-        self.setWindowTitle("Model manager")
-        self.setAccessibleName("Model manager")
+        self.setWindowTitle(
+            QCoreApplication.translate("ModelManagerDialog", "Model manager")
+        )
+        self.setAccessibleName(
+            QCoreApplication.translate("ModelManagerDialog", "Model manager")
+        )
         self.setModal(True)
         self.resize(1080, 460)
         self._catalog = catalog
@@ -77,49 +81,108 @@ class ModelManagerDialog(QDialog):
         self._message.setProperty("secondary", True)
         self.total_size_label = QLabel()
         self.total_size_label.setObjectName("model_cache_total")
-        self.total_size_label.setAccessibleName("Total model cache size")
+        self.total_size_label.setAccessibleName(
+            QCoreApplication.translate("ModelManagerDialog", "Total model cache size")
+        )
         self.cache_location_label = QLabel(str(self._cache_root))
         self.cache_location_label.setObjectName("model_cache_location")
-        self.cache_location_label.setAccessibleName("Model cache location")
+        self.cache_location_label.setAccessibleName(
+            QCoreApplication.translate("ModelManagerDialog", "Model cache location")
+        )
         self.cache_location_label.setToolTip(str(self._cache_root))
         self.cache_location_label.setAccessibleDescription(str(self._cache_root))
         self.model_list = QListWidget()
         self.model_list.setObjectName("model_list")
-        self.model_list.setAccessibleName("V1 models")
+        self.model_list.setAccessibleName(
+            QCoreApplication.translate("ModelManagerDialog", "V1 models")
+        )
         self.model_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         self.model_list.setItemDelegate(AlignedRowDelegate(self.model_list))
         self.model_list.setUniformItemSizes(True)
-        self.download_button = QPushButton("Download weight")
+        self._build_action_widgets()
+
+    def _build_action_widgets(self) -> None:
+        self._build_model_actions()
+        self._build_cache_actions()
+
+    def _build_model_actions(self) -> None:
+        self.download_button = QPushButton(
+            QCoreApplication.translate("ModelManagerDialog", "Download weight")
+        )
         self.download_button.setObjectName("download_model")
-        self.download_button.setAccessibleName("Download selected model weight")
-        self.remove_button = QPushButton("Remove downloaded weight")
+        self.download_button.setAccessibleName(
+            QCoreApplication.translate(
+                "ModelManagerDialog", "Download selected model weight"
+            )
+        )
+        self.remove_button = QPushButton(
+            QCoreApplication.translate("ModelManagerDialog", "Remove downloaded weight")
+        )
         self.remove_button.setObjectName("remove_model")
-        self.remove_button.setAccessibleName("Remove selected model weight")
-        self.redownload_outdated_button = QPushButton("Re-download outdated")
+        self.remove_button.setAccessibleName(
+            QCoreApplication.translate(
+                "ModelManagerDialog", "Remove selected model weight"
+            )
+        )
+        self.redownload_outdated_button = QPushButton(
+            QCoreApplication.translate("ModelManagerDialog", "Re-download outdated")
+        )
         self.redownload_outdated_button.setObjectName("redownload_outdated")
         self.redownload_outdated_button.setAccessibleName(
-            "Re-download outdated model weights"
+            QCoreApplication.translate(
+                "ModelManagerDialog", "Re-download outdated model weights"
+            )
         )
+
+    def _build_cache_actions(self) -> None:
         self.outdated_notice_label = QLabel()
         self.outdated_notice_label.setObjectName("outdated_model_notice")
         self.outdated_notice_label.setWordWrap(True)
         self.outdated_notice_label.setVisible(False)
-        self.delete_outdated_button = QPushButton("Delete outdated")
+        self.delete_outdated_button = QPushButton(
+            QCoreApplication.translate("ModelManagerDialog", "Delete outdated")
+        )
         self.delete_outdated_button.setObjectName("delete_outdated")
-        self.delete_outdated_button.setAccessibleName("Delete outdated model weights")
-        self.show_cache_button = QPushButton("Show cache location")
+        self.delete_outdated_button.setAccessibleName(
+            QCoreApplication.translate(
+                "ModelManagerDialog", "Delete outdated model weights"
+            )
+        )
+        self.show_cache_button = QPushButton(
+            QCoreApplication.translate("ModelManagerDialog", "Show cache location")
+        )
         self.show_cache_button.setObjectName("show_model_cache")
-        self.show_cache_button.setAccessibleName("Show model cache location")
-        self.close_button = QPushButton("Close")
-        self.close_button.setAccessibleName("Close model manager")
-        self.cancel_button = QPushButton("Cancel")
+        self.show_cache_button.setAccessibleName(
+            QCoreApplication.translate(
+                "ModelManagerDialog", "Show model cache location"
+            )
+        )
+        self.close_button = QPushButton(
+            QCoreApplication.translate("ModelManagerDialog", "Close")
+        )
+        self.close_button.setAccessibleName(
+            QCoreApplication.translate("ModelManagerDialog", "Close model manager")
+        )
+        self.cancel_button = QPushButton(
+            QCoreApplication.translate("ModelManagerDialog", "Cancel")
+        )
         self.cancel_button.setObjectName("cancel_model_download")
-        self.cancel_button.setAccessibleName("Cancel the running model download")
+        self.cancel_button.setAccessibleName(
+            QCoreApplication.translate(
+                "ModelManagerDialog", "Cancel the running model download"
+            )
+        )
         self.cancel_button.setVisible(False)
 
     def _build_layout(self) -> None:
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Manage the downloaded V1 model weights."))
+        layout.addWidget(
+            QLabel(
+                QCoreApplication.translate(
+                    "ModelManagerDialog", "Manage the downloaded V1 model weights."
+                )
+            )
+        )
         layout.addWidget(self._message)
         layout.addWidget(self.total_size_label)
         layout.addWidget(self.cache_location_label)
@@ -199,19 +262,27 @@ class ModelManagerDialog(QDialog):
         self.show_cache_button.setEnabled(not busy)
         self.close_button.setEnabled(not busy)
         if busy and cancellable:
-            self.cancel_button.setText("Cancel")
+            self.cancel_button.setText(
+                QCoreApplication.translate("ModelManagerDialog", "Cancel")
+            )
             self.cancel_button.setVisible(True)
             self.cancel_button.setEnabled(True)
         else:
-            self.cancel_button.setText("Cancel")
+            self.cancel_button.setText(
+                QCoreApplication.translate("ModelManagerDialog", "Cancel")
+            )
             self.cancel_button.setVisible(False)
             self.cancel_button.setEnabled(True)
         self._update_actions()
 
     def set_cancelling(self) -> None:
-        self.cancel_button.setText("Cancelling…")
+        self.cancel_button.setText(
+            QCoreApplication.translate("ModelManagerDialog", "Cancelling…")
+        )
         self.cancel_button.setEnabled(False)
-        self.set_message("Cancelling…")
+        self.set_message(
+            QCoreApplication.translate("ModelManagerDialog", "Cancelling…")
+        )
 
     def reject(self) -> None:
         if self._busy:
@@ -225,7 +296,10 @@ class ModelManagerDialog(QDialog):
 
     def _active_removal_guard(self, entry: ModelEntry) -> str | None:
         if self._active_model() == entry.model_id:
-            return "Cannot remove the model used by the active session."
+            return QCoreApplication.translate(
+                "ModelManagerDialog",
+                "Cannot remove the model used by the active session.",
+            )
         return None
 
     def refresh(self) -> None:
@@ -263,13 +337,16 @@ class ModelManagerDialog(QDialog):
             self.model_list.setCurrentRow(0)
         total = sum(entry.disk_size_bytes or 0 for entry in self._entries)
         total += self._obsolete_size_bytes
-        self.total_size_label.setText(
-            f"Total on disk: {format_source_file_size(total)}"
-        )
-        self.total_size_label.setAccessibleDescription(
-            f"Total on disk: {format_source_file_size(total)}"
-        )
-        self.set_message(f"{len(self._entries)} V1 model(s); cache: {self._cache_root}")
+        total_text = QCoreApplication.translate(
+            "ModelManagerDialog", "Total on disk: %s"
+        ) % format_source_file_size(total)
+        self.total_size_label.setText(total_text)
+        self.total_size_label.setAccessibleDescription(total_text)
+        entry_count = len(self._entries)
+        message = self.tr(
+            "%n V1 model(s); cache: %1", "", entry_count
+        ).replace("%1", str(self._cache_root))
+        self.set_message(message)
         self._update_outdated_notice(self._obsolete_size_bytes)
         self._update_actions()
 
@@ -280,9 +357,12 @@ class ModelManagerDialog(QDialog):
             return
         versions = ", ".join(self._catalog.obsolete_rembg_versions)
         self.outdated_notice_label.setText(
-            f"Outdated weights from rembg {versions} occupy "
-            f"{format_source_file_size(size_bytes)} on disk and cannot be used by "
-            "this version."
+            QCoreApplication.translate(
+                "ModelManagerDialog",
+                "Outdated weights from rembg %s occupy %s on disk and cannot be "
+                "used by this version.",
+            )
+            % (versions, format_source_file_size(size_bytes))
         )
         self.outdated_notice_label.setVisible(True)
 
@@ -298,14 +378,20 @@ class ModelManagerDialog(QDialog):
             self.remove_button.setAccessibleDescription(blocked)
         else:
             self.remove_button.setToolTip(
-                "Remove the selected downloaded weight and free its disk space."
+                QCoreApplication.translate(
+                    "ModelManagerDialog",
+                    "Remove the selected downloaded weight and free its disk space.",
+                )
             )
             self.remove_button.setAccessibleDescription("")
         self.download_button.setEnabled(
             not self._busy and entry is not None and not entry.cached
         )
         self.download_button.setToolTip(
-            "Download the selected weight now instead of waiting for a preview."
+            QCoreApplication.translate(
+                "ModelManagerDialog",
+                "Download the selected weight now instead of waiting for a preview.",
+            )
         )
         has_outdated = self._obsolete_size_bytes > 0
         self.delete_outdated_button.setVisible(has_outdated)

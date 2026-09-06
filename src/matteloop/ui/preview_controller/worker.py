@@ -137,6 +137,7 @@ class _PreviewWorker(QObject):
             )
         )
 
+
 def _qimage_from_rgba(value: ImmutableRgba) -> QImage:
     if not isinstance(value, ImmutableRgba):
         raise TypeError("preview result did not contain immutable RGBA pixels")

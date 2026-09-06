@@ -51,6 +51,10 @@ packages = ["src/matteloop"]
 [tool.hatch.build.targets.wheel.force-include]
 "resources/model-manifest.json" = "matteloop/resources/model-manifest.json"
 "resources/model-provenance.json" = "matteloop/resources/model-provenance.json"
+"resources/matteloop_en.qm" = "matteloop/resources/matteloop_en.qm"
+"resources/matteloop_de.qm" = "matteloop/resources/matteloop_de.qm"
+"resources/matteloop_en.ts" = "matteloop/resources/matteloop_en.ts"
+"resources/matteloop_de.ts" = "matteloop/resources/matteloop_de.ts"
 "resources/fonts/IBMPlexSans-Regular.ttf" = "matteloop/resources/fonts/IBMPlexSans-Regular.ttf"
 "resources/fonts/IBMPlexSans-SemiBold.ttf" = "matteloop/resources/fonts/IBMPlexSans-SemiBold.ttf"
 "resources/fonts/IBMPlexMono-Regular.ttf" = "matteloop/resources/fonts/IBMPlexMono-Regular.ttf"

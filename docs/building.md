@@ -37,6 +37,21 @@ build also includes Nuitka 2.8.10, PyAV 16.1.0, Pillow 12.3.0, NumPy 2.5.2,
 `rembg` 2.0.75, and CPU `onnxruntime` 1.29.0. Do not install a second Python
 environment for the build; run the commands below from the repository root.
 
+## Translation catalogues
+
+Regenerate the English and German Qt translation sources after changing
+user-visible copy:
+
+```sh
+uv run --frozen --no-sync pyside6-lupdate -extensions py -no-obsolete src/matteloop -ts resources/matteloop_en.ts resources/matteloop_de.ts
+```
+
+Compile the checked-in sources into the catalogues loaded by the application:
+
+```sh
+uv run --frozen --no-sync pyside6-lrelease resources/matteloop_en.ts resources/matteloop_de.ts
+```
+
 ## Licensing gate
 
 The repository's original code, documentation, and visual assets use 0BSD.
