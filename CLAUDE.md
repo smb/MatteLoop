@@ -129,15 +129,19 @@ from a report to the change answering it has to stay visible and reviewable.
 
 ## Static analysis on a pull request (REQUIRED)
 
-Every pull request is analysed by SonarCloud alongside the test matrix, and its
-findings are part of the review, not decoration. A green test suite says the
-code does what the tests ask; SonarCloud reports what the tests never look at —
-duplicated blocks, unreachable branches, swallowed exceptions, complexity that
-will be somebody's 3am page.
+Every pull request is analysed by **SonarCloud** and reviewed by the **Gitar
+bot** alongside the test matrix, and what they report is part of the review, not
+decoration. A green test suite says the code does what the tests ask. SonarCloud
+reports what the tests never look at — duplicated blocks, unreachable branches,
+swallowed exceptions, complexity that will be somebody's 3am page. Gitar reads
+the change as a reviewer would and argues about behaviour: an affordance that
+lies about what a control does, a comment that contradicts the code.
 
-- **Read the SonarCloud result before proposing that anything lands.** Check
-  the pull request's checks and the analysis link, not just the pass/fail
-  badge: the check can pass while the quality gate reports new issues.
+- **Read both results before proposing that anything lands.** Check the pull
+  request's checks, the SonarCloud analysis link and the Gitar review comment on
+  the pull request — not just the pass/fail badges. SonarCloud's check can pass
+  while the quality gate reports new issues, and Gitar posts its findings as a
+  review comment, so `gh pr checks` alone will not show them.
 - **Fix what it finds, in the same pull request, wherever fixing it is the
   smaller change.** A finding in code this branch introduced is this branch's
   work.
