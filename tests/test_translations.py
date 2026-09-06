@@ -75,3 +75,44 @@ def test_catalogues_match_lupdate_extraction(tmp_path: Path) -> None:
         checked = REPOSITORY_ROOT / "resources" / filename
         assert _message_keys(extracted) == _message_keys(checked)
         _assert_translations_are_complete(checked)
+
+
+def test_compiled_catalogues_match_their_sources(tmp_path: Path) -> None:
+    """A stale .qm ships the wrong words while every .ts review looks correct."""
+    lrelease = shutil.which("pyside6-lrelease")
+    if lrelease is None:
+        pytest.skip("pyside6-lrelease is not on PATH")
+    for name in ("matteloop_en", "matteloop_de"):
+        rebuilt = tmp_path / f"{name}.qm"
+        subprocess.run(
+            [
+                lrelease,
+                str(REPOSITORY_ROOT / "resources" / f"{name}.ts"),
+                "-qm",
+                str(rebuilt),
+            ],
+            check=True,
+        )
+        checked = REPOSITORY_ROOT / "resources" / f"{name}.qm"
+        assert rebuilt.read_bytes() == checked.read_bytes(), name
+
+
+def test_installing_translators_reaches_the_german_catalogue() -> None:
+    """app.py calls this at every GUI start; nothing else covers it."""
+    from PySide6.QtCore import QCoreApplication
+    from PySide6.QtWidgets import QApplication
+
+    from matteloop.ui.i18n import install_translators
+
+    application = QApplication.instance() or QApplication([])
+    assert isinstance(application, QApplication)
+    translators = install_translators(application, "de")
+    try:
+        assert translators
+        assert (
+            QCoreApplication.translate("ActionShelf", "Render Video")
+            == "Video rendern"
+        )
+    finally:
+        for translator in translators:
+            application.removeTranslator(translator)
