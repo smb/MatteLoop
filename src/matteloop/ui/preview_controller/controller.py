@@ -24,6 +24,7 @@ from matteloop.core.state import (
     SourceState,
     capabilities,
 )
+from matteloop.core.tokens import ProgressStage
 from matteloop.jobs.context import (
     CancellationState,
     ExclusiveJobScheduler,
@@ -284,11 +285,11 @@ class PreviewController(QObject):
         if self._dialog is None:
             return
         stage = getattr(notification, "stage", "")
-        if stage:
-            self._dialog.stage_label.setText(stage)
+        if isinstance(stage, str) and stage:
+            self._dialog.set_stage(stage)
         if isinstance(notification, ModelPrepared):
             self._dialog.setWindowTitle("Previewing selected frame")
-        elif stage and stage != "Segmentation":
+        elif stage and stage is not ProgressStage.SEGMENTATION:
             self._dialog.setWindowTitle("Preparing model")
 
     def _terminal_notification(

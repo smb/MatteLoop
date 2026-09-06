@@ -22,6 +22,7 @@ from matteloop.core.state import (
     ModelPrepared,
     PreviewFailed,
     PreviewInvalidated,
+    PreviewInvalidationReason,
     PreviewRequested,
     PreviewResult,
     PreviewState,
@@ -39,6 +40,7 @@ from matteloop.core.state import (
     capabilities,
     reduce,
 )
+from matteloop.core.tokens import ProgressStage
 
 SOURCE_ID = "source-1"
 SOURCE_REQUEST_ID = "load-1"
@@ -113,7 +115,10 @@ def current_preview(
 
 
 def stale_preview() -> AppState:
-    return reduce(current_preview(), PreviewInvalidated(category="Framing"))
+    return reduce(
+        current_preview(),
+        PreviewInvalidated(category=PreviewInvalidationReason.FRAMING),
+    )
 
 
 def failed_preview() -> AppState:
@@ -513,6 +518,27 @@ def test_matching_job_progress_updates_the_stage() -> None:
     assert progressed.job.stage == "Post-process"
 
 
+def test_segmentation_stage_token_advances_preparing_preview_without_copy() -> None:
+    preparing = running_preview(
+        job_id="job-1",
+        state=ready_state(model_available=False),
+        requires_model_preparation=True,
+    )
+
+    progressed = reduce(
+        preparing,
+        JobStageChanged(
+            "job-1",
+            SOURCE_ID,
+            "preview-1",
+            ProgressStage.SEGMENTATION,
+        ),
+    )
+
+    assert progressed.job.phase is JobState.PREVIEWING
+    assert progressed.job.stage is ProgressStage.SEGMENTATION
+
+
 def test_preview_failure_unlocks_only_for_matching_safe_terminal_event() -> None:
     running = running_preview(job_id="job-1")
     stale = PreviewFailed("job-old", SOURCE_ID, "preview-1", "stale failure")
@@ -580,11 +606,14 @@ def test_settings_change_stales_current_preview_without_deleting_it() -> None:
     current = current_preview()
     result = current.preview_result
 
-    stale = reduce(current, PreviewInvalidated(category="Framing"))
+    stale = reduce(
+        current,
+        PreviewInvalidated(category=PreviewInvalidationReason.FRAMING),
+    )
 
     assert stale.preview is PreviewState.STALE
     assert stale.preview_result is result
-    assert stale.stale_category == "Framing"
+    assert stale.stale_category is PreviewInvalidationReason.FRAMING
 
 
 def test_preflight_warning_does_not_start_or_queue_a_render() -> None:
@@ -713,7 +742,7 @@ def test_detected_edits_stale_current_preview_without_discarding_result() -> Non
 
     assert detected.preview is PreviewState.STALE
     assert detected.preview_result is result
-    assert detected.stale_category == "Edited cuts"
+    assert detected.stale_category is PreviewInvalidationReason.EDITED_CUTS
     assert capabilities(detected).can_rebuild
     assert capabilities(detected).focus_target is FocusTarget.REBUILD_ACTION
 

@@ -6,7 +6,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from matteloop.jobs.models.catalog import ModelCatalog
-from matteloop.ui.aligned_rows import ROW_DATA_ROLE, AlignedColumn, AlignedRow
+from matteloop.ui.aligned_rows import (
+    ROW_DATA_ROLE,
+    AlignedColumn,
+    AlignedRow,
+    RowStatus,
+)
 from matteloop.ui.source_presentation import format_source_file_size
 
 MODEL_ENTRY_ROLE = ROW_DATA_ROLE + 11
@@ -55,7 +60,7 @@ def present_model(entry: ModelEntry) -> AlignedRow:
     detail = f"{entry.display_name}; {size}; {cache_detail}; {active_status}"
     return AlignedRow(
         glyph,
-        "cached" if entry.cached else "uncached",
+        RowStatus.CACHED if entry.cached else RowStatus.UNCACHED,
         (
             AlignedColumn(entry.display_name),
             AlignedColumn(size, True),

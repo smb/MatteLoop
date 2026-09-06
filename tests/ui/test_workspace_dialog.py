@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from matteloop.core.state import JobKind
 from matteloop.jobs.models.catalog import ModelCatalog
-from matteloop.ui.aligned_rows import ACCESSIBLE_DESCRIPTION_ROLE, STATUS_ROLE
+from matteloop.ui.aligned_rows import (
+    ACCESSIBLE_DESCRIPTION_ROLE,
+    STATUS_ROLE,
+    RowStatus,
+)
 from matteloop.ui.workspace_dialog import SUMMARY_ROLE, WorkspacePickerDialog
 from tests.jobs.render_support import job, render_service, request
 
@@ -26,7 +30,7 @@ def test_cut_set_picker_lists_manifest_fields_and_external_edit_status(
     item = dialog.cut_set_list.item(0)
     assert item.data(SUMMARY_ROLE) == dialog.summaries[0]
     assert "source.mp4" in item.text()
-    assert item.data(STATUS_ROLE) == "edited"
+    assert item.data(STATUS_ROLE) is RowStatus.EDITED
     assert "edited" in item.data(ACCESSIBLE_DESCRIPTION_ROLE)
     assert "frames" in item.data(ACCESSIBLE_DESCRIPTION_ROLE)
     assert dialog.use_button.isEnabled()

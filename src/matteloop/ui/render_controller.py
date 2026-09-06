@@ -39,6 +39,7 @@ from matteloop.core.state import (
     SourceState,
     capabilities,
 )
+from matteloop.core.tokens import ProgressStage
 from matteloop.jobs.context import (
     CancellationState,
     ExclusiveJobScheduler,
@@ -653,7 +654,7 @@ class RenderController(QObject):
         self._dialog.reset(
             "Rebuilding from edited cuts" if rebuilding else "Rendering video"
         )
-        self._dialog.stage_label.setText("Validation" if rebuilding else "Decode")
+        self._dialog.set_stage("Validation" if rebuilding else ProgressStage.DECODE)
         self._dialog.set_job_details(
             request.segmentation.model_id, request.output.filename
         )
@@ -773,9 +774,9 @@ class RenderController(QObject):
 
 
 def _normalise_progress(event: ProgressEvent) -> ProgressEvent:
-    if event.stage != "render-cut":
+    if event.stage is not ProgressStage.RENDER_CUT:
         return event
-    return replace(event, stage="Decode")
+    return replace(event, stage=ProgressStage.DECODE)
 
 
 def _path_value(value: object) -> Path | None:

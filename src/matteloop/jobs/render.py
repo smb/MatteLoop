@@ -62,6 +62,7 @@ from matteloop.core.specs import (
     catalog_edge_mode,
 )
 from matteloop.core.timebase import sample_times, webp_delays
+from matteloop.core.tokens import ProgressStage
 from matteloop.core.webp import (
     EncodeSummary,
     WebPInfo,
@@ -118,7 +119,6 @@ class SourcePort(Protocol):
         context: JobContext,
         ownership: RgbaOwnershipTracker,
     ) -> DecodedFrame: ...
-
 
 class SegmentationPort(Protocol):
     def segment(self, frame: np.ndarray, request: SegmentRequest) -> np.ndarray: ...
@@ -1112,7 +1112,7 @@ class RenderService:
                     gc.collect(0)
                 context.checkpoint("cut-stage")
                 context.progress(
-                    "render-cut",
+                    ProgressStage.RENDER_CUT,
                     index + 1,
                     total=timestamp_count,
                     detail=f"Cut frame {index + 1} of {len(timestamps)}",

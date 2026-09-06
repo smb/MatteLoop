@@ -7,6 +7,7 @@ from pathlib import Path
 from matteloop.core.state import (
     AppState,
     DurationChanged,
+    PreviewInvalidationReason,
     PreviewRequested,
     PreviewResult,
     PreviewState,
@@ -44,7 +45,7 @@ def test_editing_duration_moves_end_without_moving_start() -> None:
     assert state.timeline.start == Fraction(0)
     assert state.timeline.end == Fraction(3, 2)
     assert state.preview is PreviewState.STALE
-    assert state.stale_category == "Export range"
+    assert state.stale_category is PreviewInvalidationReason.EXPORT_RANGE
 
 
 def test_duration_edit_stops_at_source_end() -> None:

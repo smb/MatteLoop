@@ -27,6 +27,7 @@ from matteloop.core.parameters import (
 from matteloop.core.specs import EdgeMode, TransformSpec
 from matteloop.core.state import (
     AppState,
+    PreviewInvalidationReason,
     PreviewRequested,
     PreviewResult,
     PreviewState,
@@ -107,7 +108,7 @@ def test_segmentation_parameter_changes_stale_the_current_preview() -> None:
 
     assert changed.parameters.model_id == "u2net"
     assert changed.preview is PreviewState.STALE
-    assert changed.stale_category == "Segmentation"
+    assert changed.stale_category is PreviewInvalidationReason.SEGMENTATION
     assert changed.model_available is False
 
     changed_again = reduce(changed, EdgeModeChanged(EdgeMode.DECONTAMINATE_COLORS))
@@ -120,7 +121,7 @@ def test_execution_provider_changes_stale_the_current_preview() -> None:
 
     assert changed.parameters.execution_provider == "CUDAExecutionProvider"
     assert changed.preview is PreviewState.STALE
-    assert changed.stale_category == "Compute acceleration"
+    assert changed.stale_category is PreviewInvalidationReason.COMPUTE_ACCELERATION
 
 
 def test_cleanup_parameter_changes_stale_the_current_preview() -> None:
@@ -137,7 +138,7 @@ def test_cleanup_parameter_changes_stale_the_current_preview() -> None:
     assert state.parameters.padding == 8
     assert state.parameters.stretch_x == Decimal("1.25")
     assert state.preview is PreviewState.STALE
-    assert state.stale_category == "Crop & cleanup"
+    assert state.stale_category is PreviewInvalidationReason.CROP_CLEANUP
 
 
 def test_output_fps_changes_sampling_and_stales_the_current_preview() -> None:
@@ -147,7 +148,7 @@ def test_output_fps_changes_sampling_and_stales_the_current_preview() -> None:
     assert changed.timeline is not None
     assert changed.timeline.fps == 90
     assert changed.preview is PreviewState.STALE
-    assert changed.stale_category == "Sampling"
+    assert changed.stale_category is PreviewInvalidationReason.SAMPLING
 
 
 def test_output_parameter_changes_keep_a_current_preview_current() -> None:

@@ -18,7 +18,7 @@ from matteloop.core.specs import (
 from matteloop.core.timeline import format_timecode
 from matteloop.jobs.models.catalog import ModelCatalog
 from matteloop.jobs.workspace import CutManifest, WorkspaceSummary
-from matteloop.ui.aligned_rows import AlignedColumn, AlignedRow
+from matteloop.ui.aligned_rows import AlignedColumn, AlignedRow, RowStatus
 from matteloop.ui.source_presentation import (
     format_source_dimensions,
     format_source_file_size,
@@ -51,9 +51,16 @@ def present_workspace(summary: WorkspaceSummary, catalog: ModelCatalog) -> Align
         f"{status_words}"
     )
     glyph = "✎" if manifest.edited else ("◆" if manifest.pinned else "✓")
+    status_token = (
+        RowStatus.EDITED
+        if manifest.edited
+        else RowStatus.PINNED
+        if manifest.pinned
+        else RowStatus.READY
+    )
     return AlignedRow(
         glyph,
-        "edited" if manifest.edited else ("pinned" if manifest.pinned else "ready"),
+        status_token,
         (
             AlignedColumn(format_source_filename(manifest.source_path)),
             AlignedColumn(f"{manifest.frame_count} frames", True),

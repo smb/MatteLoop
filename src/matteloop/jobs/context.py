@@ -12,13 +12,14 @@ from types import TracebackType
 
 from matteloop.core.errors import AppError, ErrorCode
 from matteloop.core.state import JobKind
+from matteloop.core.tokens import ProgressStage
 from matteloop.jobs.protocol import PROTOCOL_VERSION, CancelAck
 
 
 @dataclass(frozen=True, slots=True)
 class ProgressEvent:
     job_id: str
-    stage: str
+    stage: str | ProgressStage
     completed: int
     total: int | None = None
     detail: str = ""
@@ -69,7 +70,7 @@ class CancellationState:
 
 
 def _validate_progress_args(
-    stage: str,
+    stage: str | ProgressStage,
     completed: int,
     total: int | None,
     detail: str,
@@ -204,7 +205,7 @@ class JobContext:
 
     def progress(
         self,
-        stage: str,
+        stage: str | ProgressStage,
         completed: int,
         *,
         total: int | None = None,
@@ -254,7 +255,7 @@ class JobContext:
 
     def frame_progress(
         self,
-        stage: str,
+        stage: str | ProgressStage,
         completed: int,
         total: int,
         *,

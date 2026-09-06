@@ -28,6 +28,7 @@ from matteloop.core.state import (
     reduce,
 )
 from matteloop.core.timeline import EndChanged, StartChanged
+from matteloop.core.tokens import ProgressStage
 from matteloop.core.webp import validate_webp
 from matteloop.jobs.context import CancellationState, JobContext, ProgressEvent
 from matteloop.jobs.render import ImmutableRgba, PreparedSegmentation, RenderArtifact
@@ -71,11 +72,11 @@ def test_stage_change_preserves_current_frame_and_overall_counts(tmp_path) -> No
     )
     context.set_frame_context(12, 39, overall=(11, 78))
 
-    _StageReporter(context).report("Segmentation")
+    _StageReporter(context).report(ProgressStage.SEGMENTATION)
 
     assert events[-1] == ProgressEvent(
         "stage-context",
-        "Segmentation",
+        ProgressStage.SEGMENTATION,
         12,
         39,
         "Frame 12 of 39",
@@ -94,7 +95,7 @@ def test_stage_change_preserves_the_last_published_frame_event(tmp_path) -> None
         CancellationState(),
     )
     context.progress(
-        "render-cut",
+        ProgressStage.RENDER_CUT,
         12,
         total=39,
         detail="Cut frame 12 of 39",
@@ -102,11 +103,11 @@ def test_stage_change_preserves_the_last_published_frame_event(tmp_path) -> None
         overall_total=78,
     )
 
-    _StageReporter(context).report("Segmentation")
+    _StageReporter(context).report(ProgressStage.SEGMENTATION)
 
     assert events[-1] == ProgressEvent(
         "published-frame",
-        "Segmentation",
+        ProgressStage.SEGMENTATION,
         12,
         39,
         "Cut frame 12 of 39",
@@ -132,7 +133,7 @@ class FakeRenderRuntime(PreviewRuntime):
 
     def preview(self, request, playhead, context):
         del request, playhead
-        context.progress("Segmentation", 0)
+        context.progress(ProgressStage.SEGMENTATION, 0)
         image = Image.new("RGBA", (128, 128), (10, 20, 30, 255))
         return type(
             "Preview",
@@ -143,7 +144,13 @@ class FakeRenderRuntime(PreviewRuntime):
     def render(self, request, context) -> RenderArtifact:
         self.render_requests.append(request)
         self.render_thread_id = get_ident()
-        for stage in ("Decode", "Segmentation", "Post-process", "Encode", "Validate"):
+        for stage in (
+            ProgressStage.DECODE,
+            ProgressStage.SEGMENTATION,
+            "Post-process",
+            "Encode",
+            "Validate",
+        ):
             context.progress(stage, 0)
         return type("Artifact", (), {"output_path": request.output.path})()
 
@@ -314,7 +321,13 @@ def test_render_command_writes_default_request_off_gui_thread(tmp_path, qtbot) -
     assert store.state.artifact_result.output_path == request.output.path
     assert [
         event.stage for event in store.events if isinstance(event, JobStageChanged)
-    ] == ["Decode", "Segmentation", "Post-process", "Encode", "Validate"]
+    ] == [
+        ProgressStage.DECODE,
+        ProgressStage.SEGMENTATION,
+        "Post-process",
+        "Encode",
+        "Validate",
+    ]
     controller.shutdown()
 
 

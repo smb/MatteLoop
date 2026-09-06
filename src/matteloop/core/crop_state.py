@@ -43,6 +43,7 @@ def reduce_crop(state: AppState, event: CropEvent) -> AppState:
         capabilities,
         reduce,
     )
+    from matteloop.core.tokens import PreviewInvalidationReason
 
     if isinstance(event, CropToggleChanged):
         if not isinstance(event.enabled, bool) or event.enabled == state.crop_enabled:
@@ -59,7 +60,10 @@ def reduce_crop(state: AppState, event: CropEvent) -> AppState:
         candidate = clamp_crop(event.crop, *dimensions)
     if candidate == state.crop:
         return state
-    return reduce(replace(state, crop=candidate), PreviewInvalidated("Crop"))
+    return reduce(
+        replace(state, crop=candidate),
+        PreviewInvalidated(PreviewInvalidationReason.CROP),
+    )
 
 
 def _source_dimensions(metadata: object | None) -> tuple[int, int] | None:

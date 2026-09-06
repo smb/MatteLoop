@@ -10,6 +10,7 @@ from PySide6.QtCore import QSettings
 from matteloop.core.state import (
     AppState,
     PreviewInvalidated,
+    PreviewInvalidationReason,
     PreviewRequested,
     PreviewResult,
     PreviewSucceeded,
@@ -81,7 +82,10 @@ def window(qtbot):
         (_source_error(), "source_error_heading", "error"),
         (_current(), "result_canvas", "preview"),
         (
-            reduce(_current(), PreviewInvalidated("Crop & cleanup")),
+            reduce(
+                _current(),
+                PreviewInvalidated(PreviewInvalidationReason.CROP_CLEANUP),
+            ),
             "result_canvas",
             "stale",
         ),
