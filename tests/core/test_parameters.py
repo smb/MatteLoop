@@ -202,6 +202,12 @@ def test_transform_changed_is_ignored_while_a_job_runs() -> None:
     )
 
 
+def test_output_directory_changed_is_ignored_while_a_job_runs() -> None:
+    running = reduce(_ready(), RenderRequested("job", "req"))
+
+    assert reduce(running, OutputDirectoryChanged(Path("exports"))) is running
+
+
 def test_parameter_state_default_transform_is_identity() -> None:
     assert ParameterState().transform == TransformSpec()
     assert ParameterState().transform.is_identity

@@ -271,6 +271,7 @@ def test_fixed_shelf_only_contains_reachable_primary_actions_at_minimum(window) 
     assert {button.objectName() for button in visible_buttons} == {
         "preview_action",
         "render_action",
+        "preferences_action",
     }
     assert all(
         button.width() >= button.sizeHint().width() for button in visible_buttons
@@ -1776,4 +1777,3 @@ def test_complete_literal_presentation_matrix(
     assert value.open_folder_button.accessibleName() == row.open_folder_name
     assert value.replace_video_button.isEnabled() is not row.editor_locked
     assert value.inspector.isEnabled() is row.inspector_enabled
-

@@ -24,6 +24,8 @@ composite. MatteLoop is the whole path from that clip to that loop:
 - **Trim, crop and resize** the finished cut, and watch it loop on screen until
   it is right.
 - **Render** a lossless transparent animated WebP.
+- **Open Preferences** from the gear button to choose or clear the output
+  directory.
 
 The result is lossless and genuinely transparent — an alpha channel, not a
 matte painted onto a colour.
