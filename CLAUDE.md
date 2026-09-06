@@ -127,6 +127,26 @@ request that references the issue. Never push it to `main` directly.
 The repository is public and takes reports from other people, so the trail
 from a report to the change answering it has to stay visible and reviewable.
 
+## Static analysis on a pull request (REQUIRED)
+
+Every pull request is analysed by SonarCloud alongside the test matrix, and its
+findings are part of the review, not decoration. A green test suite says the
+code does what the tests ask; SonarCloud reports what the tests never look at —
+duplicated blocks, unreachable branches, swallowed exceptions, complexity that
+will be somebody's 3am page.
+
+- **Read the SonarCloud result before proposing that anything lands.** Check
+  the pull request's checks and the analysis link, not just the pass/fail
+  badge: the check can pass while the quality gate reports new issues.
+- **Fix what it finds, in the same pull request, wherever fixing it is the
+  smaller change.** A finding in code this branch introduced is this branch's
+  work.
+- **Never merge with open findings without saying so.** If a finding is a false
+  positive, or belongs to code the branch only touched in passing, say which
+  finding, why it stays, and ask the maintainer before merging. Silence about a
+  finding is not the same as a clean report, and "the checks were green" is not
+  an answer to "what did the analysis say?".
+
 ## Keeping the README honest (REQUIRED)
 
 The README is the product page, not a build note. A change a user can see is
