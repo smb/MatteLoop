@@ -130,7 +130,7 @@ class StretchChanged:
 
 @dataclass(frozen=True, slots=True)
 class OutputDirectoryChanged:
-    directory: Path
+    directory: Path | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,9 +166,12 @@ ParameterEvent = (
 
 def reduce_parameters(state: AppState, event: ParameterEvent) -> AppState:
     """Apply an inspector event and use the central stale-preview reducer."""
-    from matteloop.core.state import capabilities
+    from matteloop.core.state import JobState, capabilities
 
-    if not capabilities(state).can_edit:
+    if isinstance(event, OutputDirectoryChanged):
+        if state.job.phase is not JobState.IDLE:
+            return state
+    elif not capabilities(state).can_edit:
         return state
     if isinstance(event, ModelChanged):
         return _reduce_model(state, event)
@@ -292,8 +295,13 @@ def _reduce_output_directory(
     state: AppState, event: OutputDirectoryChanged
 ) -> AppState:
     if (
-        not isinstance(event.directory, Path)
-        or not is_local_path_syntax(event.directory)
+        (
+            event.directory is not None
+            and (
+                not isinstance(event.directory, Path)
+                or not is_local_path_syntax(event.directory)
+            )
+        )
         or event.directory == state.parameters.output_directory
     ):
         return state
