@@ -57,6 +57,7 @@ from matteloop.ui.ports import (
 from matteloop.ui.preview_controller import PreviewJobDialog, PreviewRuntime
 from matteloop.ui.render_worker import RenderRuntime, RenderWorker
 from matteloop.ui.request_builder import _preview_inputs, _render_request
+from matteloop.ui.worker_thread import WorkerThread
 from matteloop.ui.workspace_controller import WorkspacePickerController
 from matteloop.ui.workspace_dialog import WorkspacePickerDialog
 from matteloop.ui.workspace_presentation import request_for_workspace
@@ -330,14 +331,11 @@ class RenderController(QObject):
             self._resolve_collision(request)
             return
         worker = _WorkspaceProbeWorker(request, self._runtime)
-        thread = QThread(self)
-        worker.moveToThread(thread)
+        thread = WorkerThread(worker, self)
         worker.result.connect(self._reuse_probe_result)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(lambda: self._probe_finished(thread))
-        thread.finished.connect(thread.deleteLater)
-        thread.started.connect(worker.run)
         self._probe_worker = worker
         self._probe_thread = thread
         self._probe_request = request
@@ -582,8 +580,7 @@ class RenderController(QObject):
             context,
             rebuild_workspace,
         )
-        thread = QThread(self)
-        worker.moveToThread(thread)
+        thread = WorkerThread(worker, self)
         worker.notification.connect(self._notification)
         worker.provider_ready.connect(self._provider_ready)
         worker.provider_notice.connect(self._provider_notice)
@@ -591,8 +588,6 @@ class RenderController(QObject):
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(lambda job_id=job_id: self._thread_finished(job_id))
-        thread.finished.connect(thread.deleteLater)
-        thread.started.connect(worker.run)
         self._threads[job_id] = (thread, worker)
         return worker
 

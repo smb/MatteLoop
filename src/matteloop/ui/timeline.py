@@ -57,6 +57,7 @@ from matteloop.ui.theme import (
     TEXT_COLOR,
 )
 from matteloop.ui.timeline_presentation import TimelinePresentation
+from matteloop.ui.worker_thread import WorkerThread
 
 _FILMSTRIP_HEIGHT = 78
 _TELEMETRY_HEIGHT = 42
@@ -587,19 +588,16 @@ class TimelineWidget(QFrame):
         self._thumbnail_times = times
         self._thumbnail_signature = signature
         worker = ThumbnailWorker(batch)
-        thread = QThread(self)
-        worker.moveToThread(thread)
+        thread = WorkerThread(worker, self)
         worker.result.connect(self._thumbnail_ready)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
         thread.finished.connect(
             lambda thread=thread: self._thumbnail_thread_finished(thread)
         )
         self._thumbnail_threads.append((thread, worker))
         self._thumbnail_worker = worker
         self._thumbnail_thread = thread
-        thread.started.connect(worker.run)
         thread.start()
 
     @Slot(object)

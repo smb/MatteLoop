@@ -18,6 +18,7 @@ from matteloop.ui.source_presentation import (
     format_model_download_detail,
     format_source_file_size,
 )
+from matteloop.ui.worker_thread import WorkerThread
 
 from ._dialog import ModelManagerDialog
 from ._entries import ModelEntry, manager_active_id
@@ -151,8 +152,7 @@ class ModelManagerController(QObject):
             return
         cancel = CancellationState()
         worker = _ModelDownloadWorker(manager, value.model_id, cancel)
-        thread = QThread(self)
-        worker.moveToThread(thread)
+        thread = WorkerThread(worker, self)
         self._download_rate = DownloadRateEstimator()
         worker.progressed.connect(self._download_progressed)
         worker.downloaded.connect(self._download_succeeded)
@@ -160,7 +160,6 @@ class ModelManagerController(QObject):
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(self._removal_thread_finished)
-        thread.finished.connect(thread.deleteLater)
         self._remove_thread = thread
         self._remove_worker = worker
         self._removal_entry = value
@@ -168,7 +167,6 @@ class ModelManagerController(QObject):
         self._batch_position = ""
         self.dialog.set_busy(True, cancellable=True)
         self.dialog.set_message(f"Downloading {value.display_name}…")
-        thread.started.connect(worker.run)
         thread.start()
 
     def _delete_outdated_requested(self) -> None:
@@ -218,8 +216,7 @@ class ModelManagerController(QObject):
         cancel = CancellationState()
         self._batch = {entry.model_id: entry for entry in entries}
         worker = _OutdatedRedownloadWorker(manager, tuple(self._batch), cancel)
-        thread = QThread(self)
-        worker.moveToThread(thread)
+        thread = WorkerThread(worker, self)
         worker.started.connect(self._batch_model_started)
         worker.progressed.connect(self._download_progressed)
         worker.downloaded.connect(self._batch_model_downloaded)
@@ -228,7 +225,6 @@ class ModelManagerController(QObject):
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(self._removal_thread_finished)
-        thread.finished.connect(thread.deleteLater)
         self._remove_thread = thread
         self._remove_worker = worker
         self._cancel = cancel
@@ -240,7 +236,6 @@ class ModelManagerController(QObject):
         self.dialog.set_message(
             f"Re-downloading {len(self._batch)} outdated model weight(s)…"
         )
-        thread.started.connect(worker.run)
         thread.start()
 
     @Slot()
@@ -252,20 +247,17 @@ class ModelManagerController(QObject):
 
     def _start_obsolete_removal(self, manager: ModelRemovalService) -> None:
         worker = _ObsoleteRemovalWorker(manager)
-        thread = QThread(self)
-        worker.moveToThread(thread)
+        thread = WorkerThread(worker, self)
         worker.removed.connect(self._obsolete_removal_succeeded)
         worker.failed.connect(self._obsolete_removal_failed)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(self._removal_thread_finished)
-        thread.finished.connect(thread.deleteLater)
         self._remove_thread = thread
         self._remove_worker = worker
         self._removal_entry = None
         self.dialog.set_busy(True)
         self.dialog.set_message("Removing outdated model weights…")
-        thread.started.connect(worker.run)
         thread.start()
 
     @Slot(int, int)
@@ -393,19 +385,16 @@ class ModelManagerController(QObject):
 
     def _start_removal(self, manager: ModelRemovalService, entry: ModelEntry) -> None:
         worker = _ModelRemovalWorker(manager, entry.model_id)
-        thread = QThread(self)
-        worker.moveToThread(thread)
+        thread = WorkerThread(worker, self)
         worker.removed.connect(self._removal_succeeded)
         worker.failed.connect(self._removal_failed)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(self._removal_thread_finished)
-        thread.finished.connect(thread.deleteLater)
         self._remove_thread = thread
         self._remove_worker = worker
         self._removal_entry = entry
         self.dialog.set_busy(True)
-        thread.started.connect(worker.run)
         thread.start()
 
     @Slot(str, bool)

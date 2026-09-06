@@ -73,6 +73,7 @@ from matteloop.ui.render_controller import RenderController
 from matteloop.ui.timeline import SourceFrameWorker
 from matteloop.ui.transform_group import TransformGroup
 from matteloop.ui.transform_stage import TransformStageController
+from matteloop.ui.worker_thread import WorkerThread
 
 VIDEO_FILE_FILTER = "Video files (*.mp4 *.mov *.webm *.mkv)"
 _THREAD_SHUTDOWN_TIMEOUT_MS = 5000
@@ -390,18 +391,15 @@ class SourceController(QObject):
             next(self._decode_request_ids),
             self._source_adapter,
         )
-        thread = QThread(self)
-        worker.moveToThread(thread)
+        thread = WorkerThread(worker, self)
         worker.loaded.connect(self._source_loaded)
         worker.failed.connect(self._source_failed)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
         thread.finished.connect(
             lambda request_id=request_id: self._load_thread_finished(request_id)
         )
         self._threads[request_id] = (thread, worker)
-        thread.started.connect(worker.run)
         thread.start()
 
     @Slot(str, str, object)
@@ -559,15 +557,12 @@ class SourceController(QObject):
             revision,
             proof if isinstance(proof, SourceValidationProof) else None,
         )
-        thread = QThread(self)
-        worker.moveToThread(thread)
+        thread = WorkerThread(worker, self)
         worker.result.connect(self._frame_decoded)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
         thread.finished.connect(lambda thread=thread: self._forget_frame_thread(thread))
         self._frame_threads.append((thread, worker))
-        thread.started.connect(worker.run)
         thread.start()
 
     @Slot(object)

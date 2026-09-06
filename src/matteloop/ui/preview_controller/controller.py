@@ -45,6 +45,7 @@ from matteloop.ui.preview_controller.worker import (
     _notification_job_id,
     _PreviewWorker,
 )
+from matteloop.ui.worker_thread import WorkerThread
 
 
 class PreviewController(QObject):
@@ -189,8 +190,7 @@ class PreviewController(QObject):
             context,
         )
         worker_ref["worker"] = worker
-        thread = QThread(self)
-        worker.moveToThread(thread)
+        thread = WorkerThread(worker, self)
         worker.notification.connect(self._notification)
         worker.provider_ready.connect(self._provider_ready)
         worker.provider_notice.connect(self._provider_notice)
@@ -199,8 +199,6 @@ class PreviewController(QObject):
         thread.finished.connect(
             lambda job_id=job_id: self._thread_finished(job_id)
         )
-        thread.finished.connect(thread.deleteLater)
-        thread.started.connect(worker.run)
         self._contexts[job_id] = context
         self._threads[job_id] = (thread, worker)
         self._active_job_id = job_id
