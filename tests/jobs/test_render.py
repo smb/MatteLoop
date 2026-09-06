@@ -29,6 +29,7 @@ from matteloop.core.specs import (
     TransformSpec,
 )
 from matteloop.core.state import JobKind
+from matteloop.core.tokens import ProgressStage
 from matteloop.core.webp import EncodeSummary, encode_lossless_webp, validate_webp
 from matteloop.jobs.context import (
     CancellationState,
@@ -1275,7 +1276,7 @@ def test_render_keeps_decode_working_set_bounded_across_60_frames(tmp_path) -> N
     live: dict[int, int] = {}
 
     def progress(event: ProgressEvent) -> None:
-        if event.stage == "render-cut" and event.completed in {10, 60}:
+        if event.stage is ProgressStage.RENDER_CUT and event.completed in {10, 60}:
             live[event.completed] = sum(
                 isinstance(candidate, av.VideoFrame) for candidate in gc.get_objects()
             )
@@ -1313,7 +1314,7 @@ def test_render_reports_counted_stages_and_global_frame_units(tmp_path) -> None:
 
     render_service().render(request(tmp_path), context)
 
-    cuts = [event for event in events if event.stage == "render-cut"]
+    cuts = [event for event in events if event.stage is ProgressStage.RENDER_CUT]
     encode = [event for event in events if event.stage == "Encode"]
 
     assert [(event.completed, event.overall_completed) for event in cuts] == [
@@ -1439,7 +1440,7 @@ def test_render_auto_fit_validates_emitted_static_run_count(
         for event in auto_fit_events
     )
     assert all(event.overall_indeterminate for event in auto_fit_events)
-    cuts = [event for event in events if event.stage == "render-cut"]
+    cuts = [event for event in events if event.stage is ProgressStage.RENDER_CUT]
     framing = [event for event in events if event.stage == "Framing"]
     assert all(
         event.overall_completed is not None

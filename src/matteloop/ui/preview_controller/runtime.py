@@ -17,8 +17,9 @@ from matteloop.core.execution_providers import (
 )
 from matteloop.core.parameters import V1_MODEL_IDS
 from matteloop.core.specs import RenderRequest
+from matteloop.core.tokens import ProgressStage
 from matteloop.jobs.context import JobContext
-from matteloop.jobs.models.catalog import ModelCatalog
+from matteloop.jobs.models.catalog import ModelCatalog, ModelSpec
 from matteloop.jobs.models.download import ModelDownloader
 from matteloop.jobs.models.session import ModelSessionManager
 from matteloop.jobs.protocol import SegmentRequest
@@ -68,7 +69,7 @@ class _SessionHolder:
     def create(self, payload: dict[str, object]) -> SegmentationClient:
         if self.context is not None:
             self.context.progress(
-                "Preparing model",
+                ProgressStage.PREPARING_MODEL,
                 0,
                 detail="Starting segmentation session",
             )
@@ -151,6 +152,35 @@ class ProductionPreviewRuntime:
             model_id, artifact.runtime_filename
         )
 
+    def _report_model_preparation_progress(
+        self, spec: ModelSpec, requested_provider: str, context: JobContext
+    ) -> None:
+        if (
+            self._manager.active_id != spec.id
+            or self._manager.active_requested_provider != requested_provider
+        ):
+            filename = spec.artifact.runtime_filename if spec.artifact else ""
+            if self._cached(spec.id, filename):
+                context.progress(
+                    ProgressStage.PREPARING_MODEL,
+                    0,
+                    detail="Using cached model weights",
+                )
+            else:
+                self._download_model_name = spec.display_name
+                self._download_rate = DownloadRateEstimator()
+                context.progress(
+                    ProgressStage.DOWNLOADING_MODEL,
+                    0,
+                    detail=format_model_download_detail(spec.display_name),
+                )
+        else:
+            context.progress(
+                ProgressStage.PREPARING_MODEL,
+                0,
+                detail="Reusing prepared session",
+            )
+
     def prepare(
         self, model_id: str, extras: dict[str, object], context: JobContext
     ) -> PreparedSegmentation:
@@ -161,27 +191,7 @@ class ProductionPreviewRuntime:
         requested_provider = str(
             extras.get("execution_provider", CPU_EXECUTION_PROVIDER)
         )
-        if (
-            self._manager.active_id != model_id
-            or self._manager.active_requested_provider != requested_provider
-        ):
-            filename = spec.artifact.runtime_filename if spec.artifact else ""
-            if self._cached(spec.id, filename):
-                context.progress(
-                    "Preparing model",
-                    0,
-                    detail="Using cached model weights",
-                )
-            else:
-                self._download_model_name = spec.display_name
-                self._download_rate = DownloadRateEstimator()
-                context.progress(
-                    "Downloading model",
-                    0,
-                    detail=format_model_download_detail(spec.display_name),
-                )
-        else:
-            context.progress("Preparing model", 0, detail="Reusing prepared session")
+        self._report_model_preparation_progress(spec, requested_provider, context)
         result = self._manager.prepare(
             model_id,
             {"execution_provider": requested_provider},
@@ -208,7 +218,11 @@ class ProductionPreviewRuntime:
         self._prepared_requested_provider = requested_provider
         self._fallback_notice = result.fallback_notice
         if result.fallback_notice is not None:
-            context.progress("Preparing model", 0, detail=result.fallback_notice)
+            context.progress(
+                ProgressStage.PREPARING_MODEL,
+                0,
+                detail=result.fallback_notice,
+            )
         return self._prepared
 
     def preview(
@@ -315,7 +329,7 @@ class ProductionPreviewRuntime:
             return
         speed = self._download_rate.update(completed, time.monotonic())
         self._context.progress(
-            "Downloading model",
+            ProgressStage.DOWNLOADING_MODEL,
             completed,
             total=total,
             detail=format_model_download_detail(

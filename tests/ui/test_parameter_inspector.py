@@ -13,6 +13,7 @@ from matteloop.ui.aligned_rows import (
     ACCESSIBLE_DESCRIPTION_ROLE,
     ROW_DATA_ROLE,
     STATUS_ROLE,
+    RowStatus,
 )
 from matteloop.ui.inspector import Inspector
 
@@ -55,7 +56,10 @@ def test_inspector_exposes_the_thirteen_enabled_models_with_default_selected(
     assert inspector.model_picker.currentData() == "birefnet-portrait"
     portrait_index = inspector.model_picker.findData("birefnet-portrait")
     assert inspector.model_picker.itemText(portrait_index) == "BiRefNet Portrait"
-    assert inspector.model_picker.itemData(portrait_index, STATUS_ROLE) == "cached"
+    assert (
+        inspector.model_picker.itemData(portrait_index, STATUS_ROLE)
+        is RowStatus.CACHED
+    )
     assert "cached locally" in inspector.model_picker.itemData(
         portrait_index, ACCESSIBLE_DESCRIPTION_ROLE
     )

@@ -14,6 +14,7 @@ from matteloop.core.state import (
     ModelAvailabilityChanged,
     PreviewFailed,
     PreviewInvalidated,
+    PreviewInvalidationReason,
     PreviewRequested,
     PreviewResult,
     PreviewSucceeded,
@@ -114,7 +115,10 @@ def window(qtbot):
         (_ready(), "preview", "preview_action"),
         (_current(), "render", "result_canvas"),
         (
-            reduce(_current(), PreviewInvalidated("Crop & cleanup")),
+            reduce(
+                _current(),
+                PreviewInvalidated(PreviewInvalidationReason.CROP_CLEANUP),
+            ),
             "preview",
             "preview_action",
         ),

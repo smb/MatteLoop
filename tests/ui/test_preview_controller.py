@@ -20,6 +20,7 @@ from matteloop.core.state import (
     PreviewSucceeded,
 )
 from matteloop.core.timeline import EndChanged, PlayheadChanged, StartChanged
+from matteloop.core.tokens import ProgressStage
 from matteloop.jobs.context import JobContext, ProgressEvent
 from matteloop.jobs.render import ImmutableRgba, PreparedSegmentation, PreviewResult
 from matteloop.ui.controller import SourceController, SourceLoadResult
@@ -66,7 +67,7 @@ class FakePreviewRuntime(PreviewRuntime):
     ) -> PreparedSegmentation:
         self.prepare_calls.append((model_id, extras))
         context.progress(
-            "Downloading model",
+            ProgressStage.DOWNLOADING_MODEL,
             64,
             total=128,
             detail="64 / 128 bytes",
@@ -88,7 +89,7 @@ class FakePreviewRuntime(PreviewRuntime):
     ) -> PreviewResult:
         self.thread_ids.append(get_ident())
         self.requests.append((request, playhead))
-        context.progress("Segmentation", 0, detail="")
+        context.progress(ProgressStage.SEGMENTATION, 0, detail="")
         image = Image.new("RGBA", (128, 128), (200, 100, 40, 255))
         return PreviewResult(
             "preview-fingerprint",
@@ -311,13 +312,14 @@ def test_model_download_dialog_shows_human_byte_totals(qtbot) -> None:
     dialog.set_progress(
         ProgressEvent(
             "job",
-            "Downloading model",
+            ProgressStage.DOWNLOADING_MODEL,
             int(412.3 * 1024**2),
             int(927.6 * 1024**2),
             "Downloading BiRefNet Portrait — 412.3 MiB of 927.6 MiB",
         )
     )
 
+    assert dialog.stage_label.text() == "Downloading model"
     assert dialog.progress_bar.format() == "412.3 MiB of 927.6 MiB"
     assert dialog.detail_label.text() == (
         "Downloading BiRefNet Portrait — 412.3 MiB of 927.6 MiB"

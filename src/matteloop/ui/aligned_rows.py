@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 
 from PySide6.QtCore import QModelIndex, QPersistentModelIndex, QSize, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPalette, QPixmap
@@ -16,6 +17,15 @@ STATUS_ROLE = int(Qt.ItemDataRole.UserRole) + 3
 type ModelIndex = QModelIndex | QPersistentModelIndex
 
 
+class RowStatus(Enum):
+    CACHED = "cached"
+    UNCACHED = "uncached"
+    EDITED = "edited"
+    PINNED = "pinned"
+    READY = "ready"
+    NEUTRAL = "neutral"
+
+
 @dataclass(frozen=True, slots=True)
 class AlignedColumn:
     text: str
@@ -27,7 +37,7 @@ class AlignedRow:
     """Text and semantics for one delegate-painted row."""
 
     glyph: str
-    status: str
+    status: RowStatus
     columns: tuple[AlignedColumn, ...]
     accessible_description: str
 
@@ -128,7 +138,12 @@ class AlignedRowDelegate(QStyledItemDelegate):
     def row(index: ModelIndex) -> AlignedRow:
         row = index.data(ROW_DATA_ROLE)
         if not isinstance(row, AlignedRow):
-            return AlignedRow("", "", (AlignedColumn(str(index.data() or "")),), "")
+            return AlignedRow(
+                "",
+                RowStatus.NEUTRAL,
+                (AlignedColumn(str(index.data() or "")),),
+                "",
+            )
         return row
 
     def _column_widths(
@@ -156,10 +171,10 @@ class AlignedRowDelegate(QStyledItemDelegate):
         return tuple(widths)
 
 
-def _status_color(status: str) -> QColor:
+def _status_color(status: RowStatus) -> QColor:
     token = (
         ACCENT_COLOR
-        if status in {"cached", "edited", "pinned"}
+        if status in {RowStatus.CACHED, RowStatus.EDITED, RowStatus.PINNED}
         else SECONDARY_COLOR
     )
     return QColor(token)

@@ -5,6 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from fractions import Fraction
 from math import ceil
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from matteloop.core.tokens import PreviewInvalidationReason
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,25 +164,51 @@ TimelineEvent = (
 
 def update_timeline(
     timeline: TimelineState, event: TimelineEvent
-) -> tuple[TimelineState, str] | None:
+) -> tuple[TimelineState, PreviewInvalidationReason] | None:
     """Apply one editor event, returning its stale-preview category."""
+    from matteloop.core.tokens import PreviewInvalidationReason
+
     try:
         if isinstance(event, PlayheadChanged):
-            updated, category = timeline.move_playhead(event.timestamp), "Playhead"
+            updated, category = (
+                timeline.move_playhead(event.timestamp),
+                PreviewInvalidationReason.PLAYHEAD,
+            )
         elif isinstance(event, StepFrame):
-            updated, category = timeline.step(event.delta), "Playhead"
+            updated, category = (
+                timeline.step(event.delta),
+                PreviewInvalidationReason.PLAYHEAD,
+            )
         elif isinstance(event, StartChanged):
-            updated, category = timeline.set_start(event.timestamp), "Export range"
+            updated, category = (
+                timeline.set_start(event.timestamp),
+                PreviewInvalidationReason.EXPORT_RANGE,
+            )
         elif isinstance(event, EndChanged):
-            updated, category = timeline.set_end(event.timestamp), "Export range"
+            updated, category = (
+                timeline.set_end(event.timestamp),
+                PreviewInvalidationReason.EXPORT_RANGE,
+            )
         elif isinstance(event, DurationChanged):
-            updated, category = timeline.set_duration(event.duration), "Export range"
+            updated, category = (
+                timeline.set_duration(event.duration),
+                PreviewInvalidationReason.EXPORT_RANGE,
+            )
         elif isinstance(event, SetStartToPlayhead):
-            updated, category = timeline.set_start(timeline.playhead), "Export range"
+            updated, category = (
+                timeline.set_start(timeline.playhead),
+                PreviewInvalidationReason.EXPORT_RANGE,
+            )
         elif isinstance(event, SetEndToPlayhead):
-            updated, category = timeline.set_end(timeline.playhead), "Export range"
+            updated, category = (
+                timeline.set_end(timeline.playhead),
+                PreviewInvalidationReason.EXPORT_RANGE,
+            )
         elif isinstance(event, ResetRange):
-            updated, category = timeline.reset_range(), "Export range"
+            updated, category = (
+                timeline.reset_range(),
+                PreviewInvalidationReason.EXPORT_RANGE,
+            )
         else:
             return None
     except ValueError:

@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from matteloop.core.state import ArtifactResult
+from matteloop.core.tokens import ProgressStage
 from matteloop.jobs.context import ProgressEvent
 from matteloop.ui.source_presentation import (
     JobProgressMetrics,
@@ -30,6 +31,18 @@ from matteloop.ui.source_presentation import (
     format_source_file_size,
     format_source_frame_rate,
 )
+
+_STAGE_COPY: dict[str | ProgressStage, str] = {
+    ProgressStage.PREPARING_MODEL: "Preparing model",
+    ProgressStage.DOWNLOADING_MODEL: "Downloading model",
+    ProgressStage.SEGMENTATION: "Segmentation",
+    ProgressStage.DECODE: "Decode",
+    ProgressStage.RENDER_CUT: "Decode",
+}
+
+
+def _stage_copy(stage: str | ProgressStage) -> str:
+    return _STAGE_COPY.get(stage, stage)
 
 
 class PreviewJobDialog(QDialog):
@@ -246,8 +259,11 @@ class PreviewJobDialog(QDialog):
         self.provider_notice_label.setText(notice)
         self.provider_notice_label.show()
 
+    def set_stage(self, stage: str | ProgressStage) -> None:
+        self.stage_label.setText(_stage_copy(stage))
+
     def set_progress(self, event: ProgressEvent) -> None:
-        self.stage_label.setText(event.stage)
+        self.set_stage(event.stage)
         self.detail_label.setText(event.detail)
         self._apply_metrics(
             self._progress_presenter.update(
@@ -264,11 +280,11 @@ class PreviewJobDialog(QDialog):
             self.stage_progress_label.setText("Stage progress")
             self.progress_bar.setRange(0, event.total)
             self.progress_bar.setValue(event.completed)
-            if event.stage == "Downloading model":
+            if event.stage is ProgressStage.DOWNLOADING_MODEL:
                 self.progress_bar.setFormat(
                     format_model_download_progress(event.completed, event.total)
                 )
-            elif event.stage == "Decode":
+            elif event.stage is ProgressStage.DECODE:
                 self.progress_bar.setFormat("%v / %m frames")
             else:
                 self.progress_bar.setFormat("%v / %m")

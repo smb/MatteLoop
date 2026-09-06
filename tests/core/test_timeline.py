@@ -9,6 +9,7 @@ from matteloop.core.state import (
     AppState,
     CropChanged,
     CropToggleChanged,
+    PreviewInvalidationReason,
     PreviewRequested,
     PreviewResult,
     PreviewState,
@@ -116,13 +117,13 @@ def test_playhead_and_range_changes_stale_the_current_preview_by_category() -> N
     ranged = reduce(moved, StartChanged(Fraction(1, 2)))
 
     assert moved.preview is PreviewState.STALE
-    assert moved.stale_category == "Playhead"
+    assert moved.stale_category is PreviewInvalidationReason.PLAYHEAD
     assert ranged.preview is PreviewState.STALE
-    assert ranged.stale_category == "Playhead"
+    assert ranged.stale_category is PreviewInvalidationReason.PLAYHEAD
 
     current_again = reduce(current, EndChanged(Fraction(3)))
     assert current_again.preview is PreviewState.STALE
-    assert current_again.stale_category == "Export range"
+    assert current_again.stale_category is PreviewInvalidationReason.EXPORT_RANGE
 
 
 def test_crop_changes_stale_current_preview_and_keep_oriented_bounds() -> None:
@@ -141,7 +142,7 @@ def test_crop_changes_stale_current_preview_and_keep_oriented_bounds() -> None:
 
     assert cropped.crop == CropSpec(4, 5, 40, 30)
     assert cropped.preview is PreviewState.STALE
-    assert cropped.stale_category == "Crop"
+    assert cropped.stale_category is PreviewInvalidationReason.CROP
 
 
 def test_reset_crop_restores_the_oriented_source_frame() -> None:

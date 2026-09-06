@@ -19,6 +19,7 @@ from matteloop.core.state import (
     ModelAvailabilityChanged,
     PreviewFailed,
     PreviewInvalidated,
+    PreviewInvalidationReason,
     PreviewRequested,
     PreviewResult,
     PreviewSucceeded,
@@ -101,7 +102,9 @@ def _artifact(state: AppState) -> AppState:
         reduce(_ready(), ModelAvailabilityChanged(False)),
         reduce(_ready(), PreviewRequested("preview", "preview-request")),
         _current(),
-        reduce(_current(), PreviewInvalidated("Crop & cleanup")),
+        reduce(
+            _current(), PreviewInvalidated(PreviewInvalidationReason.CROP_CLEANUP)
+        ),
         reduce(
             reduce(_current(), PreviewRequested("retry", "retry-request")),
             PreviewFailed("retry", "source", "retry-request", "retry failed"),

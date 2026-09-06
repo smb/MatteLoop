@@ -16,6 +16,7 @@ from matteloop.core.state import (
     PreviewSucceeded,
 )
 from matteloop.core.state import PreviewResult as StatePreviewResult
+from matteloop.core.tokens import ProgressStage
 from matteloop.jobs.context import JobContext, JobTerminalState, ProgressEvent
 from matteloop.jobs.render import ImmutableRgba
 from matteloop.ui.preview_controller.request_assembly import (
@@ -56,7 +57,7 @@ class _PreviewWorker(QObject):
     @Slot()
     def run(self) -> None:
         try:
-            self._emit_stage("Preparing model")
+            self._emit_stage(ProgressStage.PREPARING_MODEL)
             request = _render_request(self._inputs)
             prepared = self._runtime.prepare(
                 request.segmentation.model_id,
@@ -81,10 +82,10 @@ class _PreviewWorker(QObject):
                     self._job_id,
                     self._source_id,
                     self._request_id,
-                    "Segmentation",
+                    ProgressStage.SEGMENTATION,
                 )
             )
-            self._emit_stage("Segmentation")
+            self._emit_stage(ProgressStage.SEGMENTATION)
             result = self._runtime.preview(
                 request, self._inputs.playhead, self._context
             )
@@ -106,7 +107,7 @@ class _PreviewWorker(QObject):
                 self._context.fail()
             self.finished.emit(self._job_id)
 
-    def _emit_stage(self, stage: str) -> None:
+    def _emit_stage(self, stage: ProgressStage) -> None:
         self.notification.emit(
             JobStageChanged(
                 self._job_id,

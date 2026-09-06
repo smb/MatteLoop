@@ -52,6 +52,7 @@ from matteloop.ui.aligned_rows import (
     AlignedColumn,
     AlignedRow,
     AlignedRowDelegate,
+    RowStatus,
     install_aligned_row,
     status_icon,
 )
@@ -174,7 +175,6 @@ class Inspector(QFrame):
                 artifact.size_bytes if artifact is not None else None
             )
             availability = self._model_options.get(model_id, False)
-            status = "cached" if availability else "uncached"
             status_words = "cached locally" if availability else "not cached yet"
             detail = (
                 f"{spec.display_name}; {spec.purpose}; {size}; {status_words}; "
@@ -182,7 +182,7 @@ class Inspector(QFrame):
             )
             row = AlignedRow(
                 "✓" if availability else "↓",
-                status,
+                RowStatus.CACHED if availability else RowStatus.UNCACHED,
                 (AlignedColumn(spec.display_name), AlignedColumn(size, True)),
                 detail,
             )

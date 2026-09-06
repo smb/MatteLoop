@@ -11,6 +11,7 @@ from PIL import Image
 
 from matteloop.core.rgba import RgbaOwnershipTracker
 from matteloop.core.specs import RenderRequest
+from matteloop.core.tokens import ProgressStage
 from matteloop.jobs.context import JobContext
 from matteloop.jobs.protocol import SegmentRequest
 from matteloop.jobs.render import (
@@ -37,7 +38,7 @@ class _StageReporter:
     def __init__(self, context: JobContext) -> None:
         self._context = context
 
-    def report(self, stage: str) -> None:
+    def report(self, stage: str | ProgressStage) -> None:
         frame = self._context.frame_context
         if frame is None:
             previous = self._context.last_progress
@@ -92,7 +93,7 @@ class _SourceStagePort:
         context: JobContext,
         ownership: RgbaOwnershipTracker,
     ) -> DecodedFrame:
-        self._reporter.report("Decode")
+        self._reporter.report(ProgressStage.DECODE)
         return self._delegate.decode(
             path, timestamp, request_id, source_info, context, ownership
         )
@@ -104,7 +105,7 @@ class _SegmentationStagePort:
         self._reporter = reporter
 
     def segment(self, frame: np.ndarray, request: SegmentRequest) -> np.ndarray:
-        self._reporter.report("Segmentation")
+        self._reporter.report(ProgressStage.SEGMENTATION)
         return self._delegate.segment(frame, request)
 
 

@@ -26,6 +26,7 @@ from matteloop.core.specs import (
 
 if TYPE_CHECKING:
     from matteloop.core.state import AppState
+    from matteloop.core.tokens import PreviewInvalidationReason
 
 V1_MODEL_IDS = (
     "u2net",
@@ -202,6 +203,7 @@ def reduce_parameters(state: AppState, event: ParameterEvent) -> AppState:
 
 def _reduce_model(state: AppState, event: ModelChanged) -> AppState:
     from matteloop.core.state import PreviewInvalidated, reduce
+    from matteloop.core.tokens import PreviewInvalidationReason
 
     parameters = state.parameters
     if event.model_id not in V1_MODEL_IDS or event.model_id == parameters.model_id:
@@ -209,11 +211,13 @@ def _reduce_model(state: AppState, event: ModelChanged) -> AppState:
     updated = replace(parameters, model_id=event.model_id)
     return reduce(
         replace(state, parameters=updated, model_available=False),
-        PreviewInvalidated("Segmentation"),
+        PreviewInvalidated(PreviewInvalidationReason.SEGMENTATION),
     )
 
 
 def _reduce_edge_mode(state: AppState, event: EdgeModeChanged) -> AppState:
+    from matteloop.core.tokens import PreviewInvalidationReason
+
     parameters = state.parameters
     if not isinstance(event.edge_mode, EdgeMode) or event.edge_mode not in {
         EdgeMode.STANDARD,
@@ -223,13 +227,15 @@ def _reduce_edge_mode(state: AppState, event: EdgeModeChanged) -> AppState:
     return _invalidate(
         state,
         replace(parameters, edge_mode=event.edge_mode),
-        "Segmentation",
+        PreviewInvalidationReason.SEGMENTATION,
     )
 
 
 def _reduce_execution_provider(
     state: AppState, event: ExecutionProviderChanged
 ) -> AppState:
+    from matteloop.core.tokens import PreviewInvalidationReason
+
     if (
         not is_allowed_provider(event.execution_provider)
         or event.execution_provider == state.parameters.execution_provider
@@ -238,12 +244,13 @@ def _reduce_execution_provider(
     return _invalidate(
         state,
         replace(state.parameters, execution_provider=event.execution_provider),
-        "Compute acceleration",
+        PreviewInvalidationReason.COMPUTE_ACCELERATION,
     )
 
 
 def _reduce_fps(state: AppState, event: OutputFpsChanged) -> AppState:
     from matteloop.core.state import PreviewInvalidated, reduce
+    from matteloop.core.tokens import PreviewInvalidationReason
 
     try:
         SamplingSpec(Fraction(0), Fraction(1), event.fps)
@@ -260,23 +267,27 @@ def _reduce_fps(state: AppState, event: OutputFpsChanged) -> AppState:
     updated_timeline = None if timeline is None else replace(timeline, fps=event.fps)
     return reduce(
         replace(state, parameters=updated, timeline=updated_timeline),
-        PreviewInvalidated("Sampling"),
+        PreviewInvalidated(PreviewInvalidationReason.SAMPLING),
     )
 
 
 def _reduce_trim(state: AppState, event: GlobalTrimChanged) -> AppState:
+    from matteloop.core.tokens import PreviewInvalidationReason
+
     if type(event.enabled) is not bool or event.enabled == state.parameters.trim:
         return state
     return _invalidate(
         state,
         replace(state.parameters, trim=event.enabled),
-        "Crop & cleanup",
+        PreviewInvalidationReason.CROP_CLEANUP,
     )
 
 
 def _reduce_cleanup_value(
     state: AppState, event: AlphaThresholdChanged | PaddingChanged | StretchChanged
 ) -> AppState:
+    from matteloop.core.tokens import PreviewInvalidationReason
+
     try:
         if isinstance(event, AlphaThresholdChanged):
             updated = replace(state.parameters, alpha_threshold=event.value)
@@ -288,7 +299,7 @@ def _reduce_cleanup_value(
         return state
     if updated == state.parameters:
         return state
-    return _invalidate(state, updated, "Crop & cleanup")
+    return _invalidate(state, updated, PreviewInvalidationReason.CROP_CLEANUP)
 
 
 def _reduce_output_directory(
@@ -349,7 +360,7 @@ def _reduce_transform(state: AppState, event: TransformChanged) -> AppState:
 
 
 def _invalidate(
-    state: AppState, parameters: ParameterState, category: str
+    state: AppState, parameters: ParameterState, category: PreviewInvalidationReason
 ) -> AppState:
     from matteloop.core.state import PreviewInvalidated, reduce
 

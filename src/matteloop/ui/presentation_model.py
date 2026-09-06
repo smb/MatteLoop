@@ -5,9 +5,30 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from matteloop.core.state import FocusTarget
+from matteloop.core.tokens import PreviewInvalidationReason
 from matteloop.ui.crop_presentation import CropPresentation
 from matteloop.ui.parameter_presentation import ParameterPresentation
 from matteloop.ui.timeline_presentation import TimelinePresentation
+
+_INVALIDATION_COPY = {
+    PreviewInvalidationReason.SEGMENTATION: "Segmentation",
+    PreviewInvalidationReason.COMPUTE_ACCELERATION: "Compute acceleration",
+    PreviewInvalidationReason.SAMPLING: "Sampling",
+    PreviewInvalidationReason.CROP_CLEANUP: "Crop & cleanup",
+    PreviewInvalidationReason.CROP: "Crop",
+    PreviewInvalidationReason.FRAMING: "Framing",
+    PreviewInvalidationReason.PLAYHEAD: "Playhead",
+    PreviewInvalidationReason.EXPORT_RANGE: "Export range",
+    PreviewInvalidationReason.PREVIEW_FAILED: "Preview failed",
+    PreviewInvalidationReason.EDITED_CUTS: "Edited cuts",
+}
+
+
+def preview_invalidation_copy(
+    reason: PreviewInvalidationReason | None,
+) -> str | None:
+    """Resolve an internal invalidation token into user-facing copy."""
+    return None if reason is None else _INVALIDATION_COPY[reason]
 
 
 @dataclass(frozen=True)
@@ -23,6 +44,7 @@ class PresentationModel:
     choose_enabled: bool
     replace_enabled: bool
     preview_enabled: bool
+    model_available: bool
     preview_label: str
     render_enabled: bool
     rebuild_enabled: bool
@@ -69,7 +91,7 @@ class PresentationModel:
     @property
     def model_status(self) -> str:
         """Describe the selected model using existing availability presentation."""
-        if self.preview_label != "Prepare & Preview":
+        if self.model_available:
             return "ready"
         return (
             "downloading"

@@ -20,6 +20,7 @@ from matteloop.core.state import (
     ModelAvailabilityChanged,
     PreviewFailed,
     PreviewInvalidated,
+    PreviewInvalidationReason,
     PreviewRequested,
     PreviewResult,
     PreviewSucceeded,
@@ -154,7 +155,9 @@ def _state_rows() -> list[tuple[str, AppState, str | None, str, bool, bool]]:
     )
     previewing = reduce(_ready(), PreviewRequested("preview", "preview-request"))
     previewing_old = reduce(_current(), PreviewRequested("preview", "retry-request"))
-    stale = reduce(_current(), PreviewInvalidated("Crop & cleanup"))
+    stale = reduce(
+        _current(), PreviewInvalidated(PreviewInvalidationReason.CROP_CLEANUP)
+    )
     failed_repreview = reduce(
         previewing_old,
         PreviewFailed("preview", "source", "retry-request", "failed"),
@@ -284,7 +287,7 @@ def test_fixed_shelf_only_contains_reachable_primary_actions_at_minimum(window) 
         (_ready(), "none", False, "Preview this frame to inspect the cutout"),
         (_current(), "current", True, "Current preview"),
         (
-            reduce(_current(), PreviewInvalidated("Crop")),
+            reduce(_current(), PreviewInvalidated(PreviewInvalidationReason.CROP)),
             "stale",
             True,
             "Settings changed — preview again",
@@ -326,6 +329,27 @@ def test_model_status_describes_cached_uncached_and_preparing_states(window) -> 
         reduce(unavailable, PreviewRequested("preview", "preview-request"))
     )
     assert value.inspector.model_status.text() == "◌ Downloading"
+
+
+def test_model_status_uses_availability_when_preview_copy_changes() -> None:
+    ready = present(_ready())
+    unavailable = present(reduce(_ready(), ModelAvailabilityChanged(False)))
+    downloading = present(
+        reduce(
+            reduce(_ready(), ModelAvailabilityChanged(False)),
+            PreviewRequested("preview", "preview-request"),
+        )
+    )
+
+    assert replace(ready, preview_label="translated preview action").model_status == (
+        "ready"
+    )
+    assert replace(
+        unavailable, preview_label="translated preview action"
+    ).model_status == "not_cached"
+    assert replace(
+        downloading, preview_label="translated preview action"
+    ).model_status == "downloading"
 
 
 def test_render_complete_banner_names_artifact_with_full_accessible_path(
@@ -456,7 +480,10 @@ def test_stale_category_is_visible_and_preview_accessible_name_is_dynamic(
     window,
 ) -> None:
     value, _ = window
-    stale = reduce(_current(), PreviewInvalidated("Crop & cleanup"))
+    stale = reduce(
+        _current(), PreviewInvalidated(PreviewInvalidationReason.CROP_CLEANUP)
+    )
+    assert stale.stale_category is PreviewInvalidationReason.CROP_CLEANUP
     value.render_state(stale)
     assert value.result_canvas.status_label.text() == (
         "Settings changed — preview again · Crop & cleanup"
@@ -510,7 +537,9 @@ def test_edited_cuts_without_preview_uses_neutral_copy() -> None:
 
 
 def test_stale_accessibility_and_workspace_flags_are_presenter_owned() -> None:
-    stale = present(reduce(_current(), PreviewInvalidated("Crop & cleanup")))
+    stale = present(
+        reduce(_current(), PreviewInvalidated(PreviewInvalidationReason.CROP_CLEANUP))
+    )
     assert stale.result_accessible_description == (
         "Crop & cleanup: Settings changed — preview again"
     )
@@ -709,7 +738,10 @@ def test_actual_tab_order_skips_hidden_widgets_and_reaches_success_actions(
         ),
         (
             "stale",
-            reduce(_current(), PreviewInvalidated("Crop & cleanup")),
+            reduce(
+                _current(),
+                PreviewInvalidated(PreviewInvalidationReason.CROP_CLEANUP),
+            ),
             "Settings changed — preview again",
             "preview",
             "stale",
@@ -1116,7 +1148,10 @@ def _literal_presentation_rows() -> list[LiteralPresentationRow]:
         ),
         LiteralPresentationRow(
             "stale",
-            reduce(_current(), PreviewInvalidated("Crop & cleanup")),
+            reduce(
+                _current(),
+                PreviewInvalidated(PreviewInvalidationReason.CROP_CLEANUP),
+            ),
             "Settings changed — preview again",
             "Settings changed — preview again · Crop & cleanup",
             "Crop & cleanup: Settings changed — preview again",

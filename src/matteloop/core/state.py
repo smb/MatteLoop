@@ -18,13 +18,14 @@ from matteloop.core.timeline import (
     timeline_from_metadata,
 )
 from matteloop.core.timeline_reducer import reduce_timeline
+from matteloop.core.tokens import PreviewInvalidationReason
+from matteloop.core.tokens import ProgressStage as Stage
 
 
 def __getattr__(name: str) -> object:
     if hasattr(_crop_state, name):
         return getattr(_crop_state, name)
     return getattr(_parameters, name)
-
 
 class SourceState(StrEnum):
     EMPTY = "empty"
@@ -55,7 +56,6 @@ class JobKind(StrEnum):
     PREVIEW = "preview"
     RENDER = "render"
     REBUILD = "rebuild"
-
 class FocusTarget(StrEnum):
     NONE = "none"
     CHOOSE_VIDEO = "choose_video"
@@ -104,7 +104,7 @@ class PreviewSnapshot:
     request_id: str | None
     error: object | None
     attempt_error: object | None
-    stale_category: str | None
+    stale_category: PreviewInvalidationReason | None
 
 @dataclass(frozen=True)
 class ActiveJob:
@@ -113,7 +113,7 @@ class ActiveJob:
     job_id: str | None = None
     kind: JobKind | None = None
     phase: JobState = JobState.IDLE
-    stage: str = ""
+    stage: str | Stage = ""
     initiator_focus: FocusTarget = FocusTarget.NONE
 
 @dataclass(frozen=True)
@@ -135,7 +135,7 @@ class AppState:
     preview_request_id: str | None = None
     preview_error: object | None = None
     preview_attempt_error: object | None = None
-    stale_category: str | None = None
+    stale_category: PreviewInvalidationReason | None = None
     preview_before_job: PreviewSnapshot | None = None
     job: ActiveJob = field(default_factory=ActiveJob)
     job_request_id: str | None = None
@@ -257,7 +257,7 @@ class ModelPrepared:
     job_id: str
     source_id: str
     request_id: str
-    stage: str = "Segmentation"
+    stage: Stage = Stage.SEGMENTATION
 
 
 @dataclass(frozen=True)
@@ -265,7 +265,7 @@ class JobStageChanged:
     job_id: str
     source_id: str
     request_id: str
-    stage: str
+    stage: str | Stage
 
 
 @dataclass(frozen=True)
@@ -284,7 +284,7 @@ class PreviewFailed:
 
 @dataclass(frozen=True)
 class PreviewInvalidated:
-    category: str
+    category: PreviewInvalidationReason
 
 
 @dataclass(frozen=True)
@@ -433,7 +433,7 @@ def reduce(state: AppState, event: Event) -> AppState:
             return state
         preparing = event.requires_model_preparation or not state.model_available
         phase = JobState.PREPARING_MODEL if preparing else JobState.PREVIEWING
-        stage = "Preparing model" if preparing else "Segmentation"
+        stage = Stage.PREPARING_MODEL if preparing else Stage.SEGMENTATION
         return replace(
             state,
             preview=PreviewState.RUNNING,
@@ -485,7 +485,7 @@ def reduce(state: AppState, event: Event) -> AppState:
         ):
             return state
         phase = state.job.phase
-        if phase is JobState.PREPARING_MODEL and event.stage == "Segmentation":
+        if phase is JobState.PREPARING_MODEL and event.stage is Stage.SEGMENTATION:
             phase = JobState.PREVIEWING
         return replace(state, job=replace(state.job, phase=phase, stage=event.stage))
     if isinstance(event, PreviewSucceeded):
@@ -527,7 +527,7 @@ def reduce(state: AppState, event: Event) -> AppState:
                 preview_request_id=previous.request_id,
                 preview_error=None,
                 preview_attempt_error=event.error,
-                stale_category="Preview failed",
+                stale_category=PreviewInvalidationReason.PREVIEW_FAILED,
                 preview_before_job=None,
                 job=ActiveJob(),
                 job_request_id=None,
@@ -697,7 +697,7 @@ def reduce(state: AppState, event: Event) -> AppState:
         stale_category = state.stale_category
         if event.detected and preview is PreviewState.CURRENT:
             preview = PreviewState.STALE
-            stale_category = "Edited cuts"
+            stale_category = PreviewInvalidationReason.EDITED_CUTS
         if event.error is not None:
             focus = FocusTarget.EDITED_CUT_RECOVERY
         elif event.detected:
@@ -767,7 +767,7 @@ def _start_render(
             job_id,
             kind,
             JobState.RENDERING,
-            "Decode",
+            Stage.DECODE,
             initiator_focus,
         ),
         job_request_id=request_id,
