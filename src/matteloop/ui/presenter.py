@@ -125,9 +125,7 @@ def present(state: AppState) -> PresentationModel:
         preview_enabled=allowed.can_preview,
         model_available=state.model_available,
         preview_label=(
-            "Prepare & Preview"
-            if not state.model_available
-            else "Preview Frame"
+            "Prepare & Preview" if not state.model_available else "Preview Frame"
         ),
         render_enabled=allowed.can_render,
         rebuild_enabled=allowed.can_rebuild,
@@ -174,6 +172,5 @@ def present(state: AppState) -> PresentationModel:
             state.preview_result.value if state.preview_result is not None else None
         ),
         source_loading=state.source is Source.LOADING,
-        inspector_enabled=not active
-        and state.source in {Source.EMPTY, Source.READY},
+        inspector_enabled=not active and state.source in {Source.EMPTY, Source.READY},
     )

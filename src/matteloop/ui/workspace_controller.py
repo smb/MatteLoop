@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QCoreApplication, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QMessageBox, QWidget
 
@@ -42,9 +42,7 @@ class WorkspacePickerController:
 
     def _open_selected(self, value: object) -> None:
         if isinstance(value, WorkspaceSummary):
-            QDesktopServices.openUrl(
-                QUrl.fromLocalFile(str(value.workspace.path))
-            )
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(value.workspace.path)))
 
     def _delete_selected(self, value: object) -> None:
         if not isinstance(value, WorkspaceSummary):
@@ -53,8 +51,10 @@ class WorkspacePickerController:
         if active is not None and active.path == value.workspace.path:
             QMessageBox.warning(
                 self.dialog,
-                "Cut set is in use",
-                "This cut set is being used by a running job.",
+                QCoreApplication.translate("WorkspacePicker", "Cut set is in use"),
+                QCoreApplication.translate(
+                    "WorkspacePicker", "This cut set is being used by a running job."
+                ),
             )
             return
         allow_pinned = value.pinned
@@ -66,7 +66,11 @@ class WorkspacePickerController:
         except AppError as error:
             if error.code is not ErrorCode.CUT_WORKSPACE_PINNED or allow_pinned:
                 QMessageBox.warning(
-                    self.dialog, "Could not delete cut set", str(error)
+                    self.dialog,
+                    QCoreApplication.translate(
+                        "WorkspacePicker", "Could not delete cut set"
+                    ),
+                    str(error),
                 )
                 return
             if not self._confirm_pinned_delete():
@@ -83,8 +87,10 @@ class WorkspacePickerController:
     def _confirm_pinned_delete(self) -> bool:
         answer = QMessageBox.question(
             self.dialog,
-            "Delete pinned cut set?",
-            "This set is pinned. Delete it anyway?",
+            QCoreApplication.translate("WorkspacePicker", "Delete pinned cut set?"),
+            QCoreApplication.translate(
+                "WorkspacePicker", "This set is pinned. Delete it anyway?"
+            ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )

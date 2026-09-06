@@ -1,12 +1,8 @@
 """GUI-thread render orchestration, confirmations, and output actions.
 
 Shutdown note: every widget this controller creates is destroyed in
-``shutdown``. The job dialog is the one that is easy to miss -- it survives
-its job to show the completion summary, and with no dialog parent it is a
-top-level widget kept alive by this controller's reference alone. Leaving it
-to Python's garbage collector meant a QWidget could be destroyed from inside
-a running event loop, which crashed the process with an access violation
-long after the job it belonged to had finished.
+``shutdown``. The job dialog survives its job to show the completion summary,
+so this controller keeps it alive until the event loop closes.
 """
 
 from __future__ import annotations
@@ -47,6 +43,7 @@ from matteloop.jobs.context import (
     ProgressEvent,
 )
 from matteloop.jobs.workspace import CutWorkspace, WorkspaceSummary
+from matteloop.ui.copy import render_copy
 from matteloop.ui.ports import (
     ManageWorkspacesRequested,
     OpenOutputFolderRequested,
@@ -291,13 +288,16 @@ class RenderController(QObject):
             return
         dialog = self._choice_dialog(
             "render_preflight_dialog",
-            "Preview recommended",
-            "Preview this frame before rendering?",
-            "A preview lets you verify the cutout before processing the whole video.",
+            render_copy("Preview recommended"),
+            render_copy("Preview this frame before rendering?"),
+            render_copy(
+                "A preview lets you verify the cutout before processing the whole "
+                "video."
+            ),
             (
-                ("Preview first", "preview"),
-                ("Render anyway", "render"),
-                ("Cancel", "cancel"),
+                (render_copy("Preview first"), "preview"),
+                (render_copy("Render anyway"), "render"),
+                (render_copy("Cancel"), "cancel"),
             ),
             0,
             self._finish_preflight,
@@ -383,13 +383,15 @@ class RenderController(QObject):
             return
         dialog = self._choice_dialog(
             "render_reuse_dialog",
-            "Matching cut set found",
-            "A validated cut set matches the current source and settings.",
-            "Rebuild reuses the cuts and only reruns framing and encoding.",
+            render_copy("Matching cut set found"),
+            render_copy("A validated cut set matches the current source and settings."),
+            render_copy(
+                "Rebuild reuses the cuts and only reruns framing and encoding."
+            ),
             (
-                ("Rebuild", "rebuild"),
-                ("Regenerate", "regenerate"),
-                ("Cancel", "cancel"),
+                (render_copy("Rebuild"), "rebuild"),
+                (render_copy("Regenerate"), "regenerate"),
+                (render_copy("Cancel"), "cancel"),
             ),
             0,
             self._finish_reuse,
@@ -493,13 +495,13 @@ class RenderController(QObject):
             return
         dialog = self._choice_dialog(
             "render_collision_dialog",
-            "Output already exists",
-            f"{self._collision_request.output.path} already exists.",
-            "Choose how to handle the existing output.",
+            render_copy("Output already exists"),
+            render_copy("%s already exists.") % self._collision_request.output.path,
+            render_copy("Choose how to handle the existing output."),
             (
-                ("Replace", "replace"),
-                ("Choose another name", "choose"),
-                ("Cancel", "cancel"),
+                (render_copy("Replace"), "replace"),
+                (render_copy("Choose another name"), "choose"),
+                (render_copy("Cancel"), "cancel"),
             ),
             2,
             self._finish_collision,
@@ -535,18 +537,16 @@ class RenderController(QObject):
     ) -> None:
         filename, _filter = QFileDialog.getSaveFileName(
             self._dialog_parent,
-            "Choose output name",
+            render_copy("Choose output name"),
             str(request.output.path),
-            "WebP files (*.webp)",
+            render_copy("WebP files (*.webp)"),
         )
         if not filename:
             return
         chosen = Path(filename)
         if chosen.suffix.casefold() != ".webp":
             chosen = (
-                chosen.with_suffix(".webp")
-                if chosen.suffix
-                else Path(f"{chosen}.webp")
+                chosen.with_suffix(".webp") if chosen.suffix else Path(f"{chosen}.webp")
             )
         try:
             selected = replace(
@@ -640,9 +640,7 @@ class RenderController(QObject):
         )
         self._threads[job_id][0].start()
 
-    def _open_dialog(
-        self, job_id: str, kind: JobKind, request: RenderRequest
-    ) -> None:
+    def _open_dialog(self, job_id: str, kind: JobKind, request: RenderRequest) -> None:
         if self._dialog is None:
             self._dialog = PreviewJobDialog(self._dialog_parent)
         if not self._dialog_cancel_connected:
@@ -651,9 +649,10 @@ class RenderController(QObject):
             self._dialog.open_folder_requested.connect(self._open_output_folder)
             self._dialog_cancel_connected = True
         rebuilding = kind is JobKind.REBUILD
-        self._dialog.reset(
+        title = render_copy(
             "Rebuilding from edited cuts" if rebuilding else "Rendering video"
         )
+        self._dialog.reset(title)
         self._dialog.set_stage("Validation" if rebuilding else ProgressStage.DECODE)
         self._dialog.set_job_details(
             request.segmentation.model_id, request.output.filename

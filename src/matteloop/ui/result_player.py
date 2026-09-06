@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Protocol
 
 from PIL import Image, UnidentifiedImageError
-from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal, Slot
+from PySide6.QtCore import QCoreApplication, QObject, QSize, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QPushButton, QWidget
 
@@ -42,11 +42,6 @@ from matteloop.ui.crop_presentation import CropPresentation
 PLAYER_CACHE_BUDGET_BYTES = 128 * 1024 * 1024
 PLAYER_MIN_DISPLAY_SIDE = 64
 _PLAY_BUTTON_CLEARANCE_GAP = 8.0
-
-_PLAY_TEXT = "Play"
-_PLAY_ACCESSIBLE_NAME = "Play the result loop"
-_PAUSE_TEXT = "Pause"
-_PAUSE_ACCESSIBLE_NAME = "Pause the result loop"
 
 
 class _FrameLoadCancelled(Exception):
@@ -85,7 +80,7 @@ class ResultPlayerCanvas(CropCanvas):
     ) -> None:
         super().__init__(
             parent,
-            title="Result",
+            title=QCoreApplication.translate("ResultPlayerCanvas", "Result"),
             object_name="result_canvas",
             runtime_root=runtime_root,
         )
@@ -101,9 +96,13 @@ class ResultPlayerCanvas(CropCanvas):
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._advance)
-        self.play_button = QPushButton("Play", self)
+        self.play_button = QPushButton(
+            QCoreApplication.translate("ResultPlayerCanvas", "Play"), self
+        )
         self.play_button.setObjectName("result_play")
-        self.play_button.setAccessibleName(_PLAY_ACCESSIBLE_NAME)
+        self.play_button.setAccessibleName(
+            QCoreApplication.translate("ResultPlayerCanvas", "Play the result loop")
+        )
         self.play_button.setCheckable(True)
         self.play_button.hide()
         self.play_button.toggled.connect(self._play_toggled)
@@ -213,9 +212,17 @@ class ResultPlayerCanvas(CropCanvas):
         """
         if self.play_button.isChecked() != playing:
             self.play_button.setChecked(playing)
-        self.play_button.setText(_PAUSE_TEXT if playing else _PLAY_TEXT)
+        self.play_button.setText(
+            QCoreApplication.translate("ResultPlayerCanvas", "Pause")
+            if playing
+            else QCoreApplication.translate("ResultPlayerCanvas", "Play")
+        )
         self.play_button.setAccessibleName(
-            _PAUSE_ACCESSIBLE_NAME if playing else _PLAY_ACCESSIBLE_NAME
+            QCoreApplication.translate("ResultPlayerCanvas", "Pause the result loop")
+            if playing
+            else QCoreApplication.translate(
+                "ResultPlayerCanvas", "Play the result loop"
+            )
         )
 
     @property
@@ -329,7 +336,11 @@ class ResultPlayerCanvas(CropCanvas):
     def _update_truncation_marker(self, frames: PlayerFrames) -> None:
         if frames.cached < frames.frame_count:
             self.set_status_marker(
-                f"Previewing the first {frames.cached} of {frames.frame_count} frames"
+                QCoreApplication.translate(
+                    "ResultPlayerCanvas",
+                    "Previewing the first %s of %s frames",
+                )
+                % (frames.cached, frames.frame_count)
             )
         else:
             self.set_status_marker(None)
@@ -412,7 +423,12 @@ class FrameLoadWorker(QObject):
         except _FrameLoadCancelled:
             pass
         except (OSError, UnidentifiedImageError):
-            self.failed.emit("Cut frames could not be read", self._generation)
+            self.failed.emit(
+                QCoreApplication.translate(
+                    "ResultPlayerCanvas", "Cut frames could not be read"
+                ),
+                self._generation,
+            )
         else:
             self.succeeded.emit(frames, self._generation)
         finally:

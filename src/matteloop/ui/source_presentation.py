@@ -9,7 +9,10 @@ from fractions import Fraction
 from pathlib import Path
 from typing import TypedDict
 
+from PySide6.QtCore import QCoreApplication
+
 from matteloop.core.timeline import format_timecode
+from matteloop.ui.i18n import display_locale
 
 _SOURCE_FILENAME_MAX_LENGTH = 40
 # The download callback fires per 256 KiB chunk — about 60 times a second at
@@ -97,7 +100,9 @@ class JobProgressPresenter:
             and self._overall_total is not None
         ):
             remaining = self._overall_total - self._overall_completed
-            estimate = f"{format_elapsed(remaining / self._rate)} remaining"
+            estimate = QCoreApplication.translate(
+                "SourcePresentation", "%s remaining"
+            ) % format_elapsed(remaining / self._rate)
         return JobProgressMetrics(
             format_elapsed(elapsed),
             format_frame_rate(self._rate),
@@ -142,7 +147,7 @@ def format_source_duration(duration: object) -> str:
     """Return a source duration using the shared millisecond timecode format."""
     if not isinstance(duration, Fraction) or duration < 0:
         return ""
-    return format_timecode(duration)
+    return _localized_timecode(duration)
 
 
 def format_source_frame_rate(rate: object) -> str:
@@ -151,8 +156,8 @@ def format_source_frame_rate(rate: object) -> str:
         return ""
     hundredths = _rounded_hundredths(rate)
     whole, decimal = divmod(hundredths, 100)
-    value = f"{whole}.{decimal:02d}".rstrip("0").rstrip(".")
-    return f"{value} fps"
+    value = _localized_decimal(whole, decimal, 2)
+    return QCoreApplication.translate("SourcePresentation", "%s fps") % value
 
 
 def format_source_file_size(size: object) -> str:
@@ -162,7 +167,7 @@ def format_source_file_size(size: object) -> str:
     value = float(size)
     for unit in ("B", "KiB", "MiB", "GiB"):
         if value < 1024 or unit == "GiB":
-            return f"{value:.1f} {unit}"
+            return f"{display_locale().toString(value, 'f', 1)} {unit}"
         value /= 1024
     return ""
 
@@ -176,7 +181,9 @@ def format_elapsed(seconds: object) -> str:
         or seconds < 0
     ):
         return ""
-    return format_timecode(Fraction(math.floor(float(seconds)))).removesuffix(".000")
+    return _localized_timecode(Fraction(math.floor(float(seconds)))).removesuffix(
+        display_locale().decimalPoint() + "000"
+    )
 
 
 def format_frame_rate(frames_per_second: object) -> str:
@@ -188,7 +195,8 @@ def format_frame_rate(frames_per_second: object) -> str:
         or frames_per_second <= 0
     ):
         return ""
-    return f"{float(frames_per_second):.1f} fps"
+    value = display_locale().toString(float(frames_per_second), "f", 1)
+    return QCoreApplication.translate("SourcePresentation", "%s fps") % value
 
 
 class DownloadRateEstimator:
@@ -234,7 +242,11 @@ def format_download_speed(bytes_per_second: object) -> str:
     ):
         return ""
     value = format_source_file_size(int(bytes_per_second))
-    return f"{value}/s" if value else ""
+    return (
+        QCoreApplication.translate("SourcePresentation", "%s/s") % value
+        if value
+        else ""
+    )
 
 
 def format_model_download_progress(completed: object, total: object) -> str:
@@ -243,7 +255,10 @@ def format_model_download_progress(completed: object, total: object) -> str:
     total_size = format_source_file_size(total)
     if not completed_size or not total_size:
         return ""
-    return f"{completed_size} of {total_size}"
+    return QCoreApplication.translate("SourcePresentation", "%s of %s") % (
+        completed_size,
+        total_size,
+    )
 
 
 def format_model_download_detail(
@@ -255,13 +270,15 @@ def format_model_download_detail(
     """Return the model download detail shown below the current stage."""
     if not isinstance(model_name, str) or not model_name:
         return ""
-    detail = f"Downloading {model_name}"
+    detail = QCoreApplication.translate("SourcePresentation", "Downloading %s") % (
+        model_name
+    )
     progress = format_model_download_progress(completed, total)
     if progress:
-        detail += f" — {progress}"
+        detail += QCoreApplication.translate("SourcePresentation", " — %s") % progress
     speed = format_download_speed(bytes_per_second)
     if speed:
-        detail += f" · {speed}"
+        detail += QCoreApplication.translate("SourcePresentation", " · %s") % speed
     return detail
 
 
@@ -271,7 +288,11 @@ def present_source_metadata(
     """Return source-strip text and the unshortened path for accessibility."""
     if metadata is None:
         return {
-            "source_filename": "Reading video…" if loading else "",
+            "source_filename": (
+                QCoreApplication.translate("SourcePresentation", "Reading video…")
+                if loading
+                else ""
+            ),
             "source_dimensions": "",
             "source_duration": "",
             "source_frame_rate": "",
@@ -287,9 +308,7 @@ def present_source_metadata(
         "source_dimensions": format_source_dimensions(
             getattr(metadata, "width", None), getattr(metadata, "height", None)
         ),
-        "source_duration": format_source_duration(
-            getattr(metadata, "duration", None)
-        ),
+        "source_duration": format_source_duration(getattr(metadata, "duration", None)),
         "source_frame_rate": format_source_frame_rate(rate),
         "source_file_size": format_source_file_size(
             getattr(metadata, "file_size", None)
@@ -301,3 +320,18 @@ def present_source_metadata(
 def _rounded_hundredths(value: Fraction) -> int:
     rounded = value * 100 + Fraction(1, 2)
     return rounded.numerator // rounded.denominator
+
+
+def _localized_decimal(whole: int, fraction: int, places: int) -> str:
+    value = f"{whole}.{fraction:0{places}d}"
+    decimal_point = display_locale().decimalPoint()
+    return value.replace(".", decimal_point).rstrip("0").rstrip(decimal_point)
+
+
+def _localized_timecode(value: Fraction) -> str:
+    return format_timecode(value).replace(".", display_locale().decimalPoint())
+
+
+def format_localized_timecode(value: Fraction) -> str:
+    """Format a timeline value using the selected interface locale."""
+    return _localized_timecode(value)

@@ -28,11 +28,11 @@
     "long_functions": 11
   },
   "src/matteloop/jobs/segmentation_host.py": {
-    "lines": 1875,
+    "lines": 1874,
     "long_functions": 8
   },
   "src/matteloop/jobs/source.py": {
-    "lines": 1710,
+    "lines": 1708,
     "long_functions": 5
   },
   "src/matteloop/jobs/thumbnails.py": {
@@ -80,11 +80,19 @@
     "long_functions": 1
   },
   "src/matteloop/ui/main_window.py": {
-    "lines": 380,
+    "lines": 328,
     "long_functions": 1
   },
   "src/matteloop/ui/presenter.py": {
-    "lines": 179,
+    "lines": 176,
     "long_functions": 1
+  },
+  "src/matteloop/ui/inspector.py": {
+    "lines": 897,
+    "long_functions": 0
+  },
+  "src/matteloop/ui/timeline.py": {
+    "lines": 842,
+    "long_functions": 0
   }
 }

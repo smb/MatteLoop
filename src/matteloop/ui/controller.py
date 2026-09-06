@@ -75,7 +75,6 @@ from matteloop.ui.transform_group import TransformGroup
 from matteloop.ui.transform_stage import TransformStageController
 from matteloop.ui.worker_thread import WorkerThread
 
-VIDEO_FILE_FILTER = "Video files (*.mp4 *.mov *.webm *.mkv)"
 _THREAD_SHUTDOWN_TIMEOUT_MS = 5000
 
 
@@ -365,12 +364,11 @@ class SourceController(QObject):
 
     def _choose_video(self, replace: bool) -> None:
         del replace
-        caption = "Open video"
         filename, _selected_filter = QFileDialog.getOpenFileName(
             self._dialog_parent,
-            caption,
+            self.tr("Open video"),
             "",
-            VIDEO_FILE_FILTER,
+            self.tr("Video files (*.mp4 *.mov *.webm *.mkv)"),
         )
         if filename:
             self._start_load(Path(filename))
@@ -524,7 +522,7 @@ class SourceController(QObject):
         current = output_directory_for_source(state.parameters, source)
         selected = QFileDialog.getExistingDirectory(
             self._dialog_parent,
-            "Choose output directory",
+            self.tr("Choose output directory"),
             str(current),
         )
         if selected:

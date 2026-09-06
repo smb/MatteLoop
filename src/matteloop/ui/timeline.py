@@ -7,7 +7,16 @@ from fractions import Fraction
 from pathlib import Path
 
 from PIL import Image
-from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QThread, Signal, Slot
+from PySide6.QtCore import (
+    QCoreApplication,
+    QObject,
+    QPointF,
+    QRectF,
+    Qt,
+    QThread,
+    Signal,
+    Slot,
+)
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -37,7 +46,6 @@ from matteloop.core.timeline import (
     StartChanged,
     StepFrame,
     absolute_frame_number,
-    format_timecode,
 )
 from matteloop.jobs.cache import PixmapCache, ThumbnailCacheKey, ThumbnailDiskCache
 from matteloop.jobs.source import SourceRevision, SourceValidationProof, decode_frame
@@ -47,6 +55,7 @@ from matteloop.jobs.thumbnails import (
     filmstrip_timestamps,
     generate_thumbnail,
 )
+from matteloop.ui.source_presentation import format_localized_timecode
 from matteloop.ui.theme import (
     ACCENT_COLOR,
     BACKGROUND_COLOR,
@@ -98,9 +107,7 @@ class ThumbnailWorker(QObject):
                 if self._cancelled():
                     return
                 try:
-                    result = self._thumbnail_result(
-                        timestamp, fingerprint, disk_cache
-                    )
+                    result = self._thumbnail_result(timestamp, fingerprint, disk_cache)
                 except BaseException:
                     if self._cancelled():
                         return
@@ -210,7 +217,9 @@ class TimelineWidget(QFrame):
     def __init__(self, parent: QFrame | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("timeline")
-        self.setAccessibleName("Video timeline")
+        self.setAccessibleName(
+            QCoreApplication.translate("TimelineWidget", "Video timeline")
+        )
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMinimumHeight(176)
         self.setMouseTracking(True)
@@ -233,21 +242,37 @@ class TimelineWidget(QFrame):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(16, 132, 16, 12)
         layout.setSpacing(12)
-        self.timecode_label = QLabel("0:00.000")
+        self.timecode_label = QLabel(format_localized_timecode(Fraction(0)))
         self.timecode_label.setObjectName("timeline_timecode")
-        self.frame_label = QLabel("Frame —")
+        self.frame_label = QLabel(
+            QCoreApplication.translate("TimelineWidget", "Frame —")
+        )
         self.frame_label.setObjectName("timeline_frame")
-        self.range_label = QLabel("IN —   OUT —")
+        self.range_label = QLabel(
+            QCoreApplication.translate("TimelineWidget", "IN —   OUT —")
+        )
         self.range_label.setObjectName("timeline_range")
         self.range_status_label = QLabel()
         self.range_status_label.setObjectName("timeline_range_status")
         self.range_status_label.setProperty("secondary", True)
-        self.set_start_button = QPushButton("Set IN")
-        self.set_start_button.setAccessibleName("Set export start to playhead")
-        self.set_end_button = QPushButton("Set OUT")
-        self.set_end_button.setAccessibleName("Set export end to playhead")
-        self.reset_range_button = QPushButton("Reset Range")
-        self.reset_range_button.setAccessibleName("Reset export range")
+        self.set_start_button = QPushButton(
+            QCoreApplication.translate("TimelineWidget", "Set IN")
+        )
+        self.set_start_button.setAccessibleName(
+            QCoreApplication.translate("TimelineWidget", "Set export start to playhead")
+        )
+        self.set_end_button = QPushButton(
+            QCoreApplication.translate("TimelineWidget", "Set OUT")
+        )
+        self.set_end_button.setAccessibleName(
+            QCoreApplication.translate("TimelineWidget", "Set export end to playhead")
+        )
+        self.reset_range_button = QPushButton(
+            QCoreApplication.translate("TimelineWidget", "Reset Range")
+        )
+        self.reset_range_button.setAccessibleName(
+            QCoreApplication.translate("TimelineWidget", "Reset export range")
+        )
         for label in (
             self.timecode_label,
             self.frame_label,
@@ -262,6 +287,9 @@ class TimelineWidget(QFrame):
         layout.addWidget(self.set_start_button)
         layout.addWidget(self.set_end_button)
         layout.addWidget(self.reset_range_button)
+        self._connect_telemetry_controls()
+
+    def _connect_telemetry_controls(self) -> None:
         self.set_start_button.clicked.connect(
             lambda: self.command_requested.emit(SetStartToPlayhead())
         )
@@ -333,7 +361,9 @@ class TimelineWidget(QFrame):
         geometry = self._geometry
         if geometry is None:
             painter.setPen(QColor(DISABLED_COLOR))
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Timeline")
+            painter.drawText(
+                self.rect(), Qt.AlignmentFlag.AlignCenter, self.tr("Timeline")
+            )
             return
         timeline = _qt_rect(geometry.visual["timeline"])
         painter.fillRect(timeline, QColor(CONTROL_COLOR))
@@ -412,9 +442,7 @@ class TimelineWidget(QFrame):
         self._paint_handle(painter, geometry.visual["end_handle"], "OUT")
         painter.fillRect(_qt_rect(geometry.visual["playhead"]), QColor(ACCENT_COLOR))
 
-    def _paint_focus(
-        self, painter: QPainter, geometry: InteractionGeometry
-    ) -> None:
+    def _paint_focus(self, painter: QPainter, geometry: InteractionGeometry) -> None:
         target = geometry.dragged or geometry.focused or "playhead"
         focused = geometry.focus.get(target)
         if focused is None:
@@ -531,25 +559,46 @@ class TimelineWidget(QFrame):
     def _update_telemetry(self) -> None:
         presentation = self._presentation
         if presentation is None:
-            self.timecode_label.setText("0:00.000")
-            self.frame_label.setText("Frame —")
-            self.range_label.setText("IN —   OUT —")
+            self.timecode_label.setText(format_localized_timecode(Fraction(0)))
+            self.frame_label.setText(
+                QCoreApplication.translate("TimelineWidget", "Frame —")
+            )
+            self.range_label.setText(
+                QCoreApplication.translate("TimelineWidget", "IN —   OUT —")
+            )
             self.range_status_label.clear()
             return
         state = presentation.state
-        self.timecode_label.setText(format_timecode(state.playhead))
+        self.timecode_label.setText(format_localized_timecode(state.playhead))
         self.frame_label.setText(
-            f"Frame {absolute_frame_number(state.playhead, state.source_fps):06d}"
+            QCoreApplication.translate("TimelineWidget", "Frame %s")
+            % f"{absolute_frame_number(state.playhead, state.source_fps):06d}"
         )
         self.range_label.setText(
-            f"IN {format_timecode(state.start)}   OUT {format_timecode(state.end)}"
+            QCoreApplication.translate("TimelineWidget", "IN %s   OUT %s")
+            % (
+                format_localized_timecode(state.start),
+                format_localized_timecode(state.end),
+            )
         )
         outside = not state.start <= state.playhead < state.end
-        self.range_status_label.setText("Outside export range" if outside else "")
+        self.range_status_label.setText(
+            QCoreApplication.translate("TimelineWidget", "Outside export range")
+            if outside
+            else ""
+        )
         self.setAccessibleDescription(
-            f"Preview frame playhead {self.timecode_label.text()}, "
-            f"{self.frame_label.text()}; {self.range_label.text()}"
-            + ("; Outside export range" if outside else "")
+            QCoreApplication.translate(
+                "TimelineWidget", "Preview frame playhead %s, %s; %s%s"
+            )
+            % (
+                self.timecode_label.text(),
+                self.frame_label.text(),
+                self.range_label.text(),
+                QCoreApplication.translate("TimelineWidget", "; Outside export range")
+                if outside
+                else "",
+            )
         )
 
     def _thumbnail_layout_signature(
@@ -660,9 +709,7 @@ class TimelineWidget(QFrame):
             return
         painter.setFont(QFont(MONO_FONT, 8))
         painter.setPen(QColor(TEXT_COLOR))
-        frame = absolute_frame_number(
-            timestamp, self._presentation.state.source_fps
-        )
+        frame = absolute_frame_number(timestamp, self._presentation.state.source_fps)
         painter.drawText(
             tile.adjusted(4, 4, -4, -4), Qt.AlignmentFlag.AlignLeft, str(frame)
         )
@@ -683,9 +730,10 @@ class TimelineWidget(QFrame):
                 painter.drawText(
                     QRectF(x - 42, 114, 84, 16),
                     Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
-                    format_timecode(timestamp),
+                    format_localized_timecode(timestamp),
                 )
         painter.restore()
+
 
 def _qt_rect(rect: RectF) -> QRectF:
     return QRectF(rect.x, rect.y, rect.width, rect.height)
@@ -774,11 +822,7 @@ def _thumbnail_edge(
 ) -> Fraction:
     timestamp = timestamps[index]
     if left:
-        return (
-            Fraction(0)
-            if index == 0
-            else (timestamps[index - 1] + timestamp) / 2
-        )
+        return Fraction(0) if index == 0 else (timestamps[index - 1] + timestamp) / 2
     return (
         duration
         if index + 1 == len(timestamps)

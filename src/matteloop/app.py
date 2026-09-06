@@ -36,6 +36,11 @@ def _run_gui() -> int:
     from matteloop.core.state import AppState, ModelAvailabilityChanged
     from matteloop.logs import configure_logging
     from matteloop.ui.controller import SourceController
+    from matteloop.ui.i18n import (
+        configure_locale,
+        install_translators,
+        selected_language,
+    )
     from matteloop.ui.main_window import MainWindow
     from matteloop.ui.preferences import load_parameters
     from matteloop.ui.store import ReducerStore
@@ -49,8 +54,11 @@ def _run_gui() -> int:
     application.setApplicationDisplayName("MatteLoop")
     application.setOrganizationName("MatteLoop")
     application.setApplicationVersion(__version__)
-    install_theme(application)
     settings = QSettings()
+    language = selected_language(settings)
+    configure_locale(language)
+    _translators = install_translators(application, language)
+    install_theme(application)
     stored_model = settings.value("parameters/model_id")
     model_id = stored_model if stored_model in V1_MODEL_IDS else "birefnet-portrait"
     _log_runtime_diagnostics()

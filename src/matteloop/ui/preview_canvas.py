@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QRect, QSize, Qt
+from PySide6.QtCore import QCoreApplication, QRect, QSize, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
@@ -39,7 +39,10 @@ class StatusLabel(QLabel):
         self.setMinimumHeight(24)
         margins = self.contentsMargins()
         self._text_margins = (
-            margins.left(), margins.top(), margins.right(), margins.bottom()
+            margins.left(),
+            margins.top(),
+            margins.right(),
+            margins.bottom(),
         )
 
     def set_status_icon(self, name: str | None, requested_size: int = 24) -> None:
@@ -127,9 +130,11 @@ class PreviewCanvas(QLabel):
         self._cover_frame = False
         self.setObjectName(object_name)
         self.setAccessibleName(
-            "Original video frame"
-            if title == "Original"
-            else "Background-removed result"
+            QCoreApplication.translate("PreviewCanvas", "Original video frame")
+            if object_name == "original_canvas"
+            else QCoreApplication.translate(
+                "PreviewCanvas", "Background-removed result"
+            )
         )
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
@@ -276,11 +281,15 @@ class PreviewStage(QFrame):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(8)
-        self.original_canvas = CropCanvas()
+        self.original_canvas = CropCanvas(
+            title=QCoreApplication.translate("PreviewCanvas", "Original")
+        )
         self.result_canvas = ResultPlayerCanvas(runtime_root=runtime_root)
         self.original_canvas.set_cover_frame(False)
         self.result_canvas.set_cover_frame(True)
-        self.original_canvas.setText("Original")
+        self.original_canvas.setText(
+            QCoreApplication.translate("PreviewStage", "Original")
+        )
         self.result_canvas.setProperty("status", "none")
         self.result_canvas.setProperty("checkerboard", False)
         layout.addWidget(self.original_canvas, 1)

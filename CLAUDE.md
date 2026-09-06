@@ -161,6 +161,8 @@ not finished until the README shows the application as it now is.
   screenshots match what ships. A pull request that adds one and leaves the
   README describing the previous application is incomplete, the same way one
   without a test is.
+- **A new user-visible string is not done until it is wrapped for Qt
+  translation and present in the German catalogue.**
 - **A minor release checks the README and the screenshots before the version
   bump.** A patch carries corrections and needs no pass. A minor carries
   something new — and the screenshots are the part that rots silently, because

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QCoreApplication, QSettings, Qt
 from PySide6.QtWidgets import QSizePolicy, QToolButton
 
 
@@ -34,7 +34,11 @@ def configure_disclosure(
 
 def update_disclosure(button: QToolButton, title: str, expanded: bool) -> None:
     """Set the disclosure arrow and non-visual state wording together."""
-    state = "expanded" if expanded else "collapsed"
+    state = (
+        QCoreApplication.translate("InspectorDisclosure", "expanded")
+        if expanded
+        else QCoreApplication.translate("InspectorDisclosure", "collapsed")
+    )
     button.setArrowType(
         Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow
     )

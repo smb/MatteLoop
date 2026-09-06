@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from fractions import Fraction
 from itertools import groupby
 
-from PySide6.QtCore import QSignalBlocker, Qt, Signal
+from PySide6.QtCore import QCoreApplication, QSignalBlocker, Qt, Signal
 from PySide6.QtGui import QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -43,6 +43,7 @@ from matteloop.ui.parameter_presentation import (
 )
 from matteloop.ui.source_presentation import (
     format_source_dimensions,
+    format_source_duration,
     format_source_file_size,
 )
 
@@ -63,6 +64,42 @@ _MISMATCH_LABELS: tuple[tuple[str, MismatchMode], ...] = (
 )
 
 _RESIZE_ERROR = "Set at least one of width or height."
+
+
+def _transform_label(value: str) -> str:
+    return {
+        "Free": QCoreApplication.translate("TransformGroup", "Free"),
+        "First frame": QCoreApplication.translate("TransformGroup", "First frame"),
+        "Last frame": QCoreApplication.translate("TransformGroup", "Last frame"),
+        "X": QCoreApplication.translate("TransformGroup", "X"),
+        "Y": QCoreApplication.translate("TransformGroup", "Y"),
+        "Width": QCoreApplication.translate("TransformGroup", "Width"),
+        "Height": QCoreApplication.translate("TransformGroup", "Height"),
+        "Aspect": QCoreApplication.translate("TransformGroup", "Aspect"),
+        "Percent": QCoreApplication.translate("TransformGroup", "Percent"),
+        "Mismatch": QCoreApplication.translate("TransformGroup", "Mismatch"),
+        "Preset": QCoreApplication.translate("TransformGroup", "Preset"),
+        "Keep original aspect ratio": QCoreApplication.translate(
+            "TransformGroup", "Keep original aspect ratio"
+        ),
+        "Stretch to fit": QCoreApplication.translate(
+            "TransformGroup", "Stretch to fit"
+        ),
+        "Center and crop to fit": QCoreApplication.translate(
+            "TransformGroup", "Center and crop to fit"
+        ),
+        "Add transparent padding": QCoreApplication.translate(
+            "TransformGroup", "Add transparent padding"
+        ),
+        "Crop": QCoreApplication.translate("TransformGroup", "Crop"),
+        "Trim": QCoreApplication.translate("TransformGroup", "Trim"),
+        "Resize": QCoreApplication.translate("TransformGroup", "Resize"),
+        "1:1": QCoreApplication.translate("TransformGroup", "1:1"),
+        "2:1": QCoreApplication.translate("TransformGroup", "2:1"),
+        "3:1": QCoreApplication.translate("TransformGroup", "3:1"),
+        "4:3": QCoreApplication.translate("TransformGroup", "4:3"),
+        "16:9": QCoreApplication.translate("TransformGroup", "16:9"),
+    }.get(value, value)
 
 
 @dataclass(frozen=True)
@@ -92,7 +129,9 @@ class TransformGroup(QWidget):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("transform_group")
-        self.setAccessibleName("Transform")
+        self.setAccessibleName(
+            QCoreApplication.translate("TransformGroup", "Transform")
+        )
         self._emit = emit
         self._presets = presets
         self._transform = TransformSpec()
@@ -170,26 +209,44 @@ class TransformGroup(QWidget):
     def _build_trim_widgets(self) -> None:
         self.first_frame_spinbox = compact_field(QSpinBox())
         self.first_frame_spinbox.setObjectName("transform_first_frame")
-        self.first_frame_spinbox.setAccessibleName("First frame")
-        self.first_playhead_button = QPushButton("Use Playhead")
+        self.first_frame_spinbox.setAccessibleName(
+            QCoreApplication.translate("TransformGroup", "First frame")
+        )
+        self.first_playhead_button = QPushButton(
+            QCoreApplication.translate("TransformGroup", "Use Playhead")
+        )
         self.first_playhead_button.setObjectName("transform_first_playhead")
-        self.first_playhead_button.setAccessibleName("Use playhead for first frame")
+        self.first_playhead_button.setAccessibleName(
+            QCoreApplication.translate("TransformGroup", "Use playhead for first frame")
+        )
         self.last_frame_spinbox = compact_field(QSpinBox())
         self.last_frame_spinbox.setObjectName("transform_last_frame")
-        self.last_frame_spinbox.setAccessibleName("Last frame")
-        self.last_playhead_button = QPushButton("Use Playhead")
+        self.last_frame_spinbox.setAccessibleName(
+            QCoreApplication.translate("TransformGroup", "Last frame")
+        )
+        self.last_playhead_button = QPushButton(
+            QCoreApplication.translate("TransformGroup", "Use Playhead")
+        )
         self.last_playhead_button.setObjectName("transform_last_playhead")
-        self.last_playhead_button.setAccessibleName("Use playhead for last frame")
+        self.last_playhead_button.setAccessibleName(
+            QCoreApplication.translate("TransformGroup", "Use playhead for last frame")
+        )
 
     def _build_crop_widgets(self) -> None:
-        self.crop_edit_checkbox = QCheckBox("Edit crop")
+        self.crop_edit_checkbox = QCheckBox(
+            QCoreApplication.translate("TransformGroup", "Edit crop")
+        )
         self.crop_edit_checkbox.setObjectName("transform_crop_edit")
-        self.crop_edit_checkbox.setAccessibleName("Edit crop")
+        self.crop_edit_checkbox.setAccessibleName(
+            QCoreApplication.translate("TransformGroup", "Edit crop")
+        )
         self.aspect_combo = compact_field(QComboBox())
         self.aspect_combo.setObjectName("transform_aspect")
-        self.aspect_combo.setAccessibleName("Crop aspect ratio")
+        self.aspect_combo.setAccessibleName(
+            QCoreApplication.translate("TransformGroup", "Crop aspect ratio")
+        )
         for label, ratio in _ASPECT_PRESETS:
-            self.aspect_combo.addItem(label, ratio)
+            self.aspect_combo.addItem(_transform_label(label), ratio)
         self.crop_x_spinbox = self._crop_spinbox("x")
         self.crop_y_spinbox = self._crop_spinbox("y")
         self.crop_width_spinbox = self._crop_spinbox("width")
@@ -198,7 +255,10 @@ class TransformGroup(QWidget):
     def _crop_spinbox(self, name: str) -> QSpinBox:
         field = compact_field(QSpinBox())
         field.setObjectName(f"transform_crop_{name}")
-        field.setAccessibleName(f"Crop {name}")
+        field.setAccessibleName(
+            QCoreApplication.translate("TransformGroup", "Crop %s")
+            % _transform_label(name)
+        )
         field.setMaximum(MAX_FINAL_DIMENSION)
         return field
 
@@ -207,30 +267,38 @@ class TransformGroup(QWidget):
         self.height_spinbox = self._dimension_spinbox("height")
         self.percent_spinbox = compact_field(QDoubleSpinBox())
         self.percent_spinbox.setObjectName("transform_percent")
-        self.percent_spinbox.setAccessibleName("Resize percentage")
+        self.percent_spinbox.setAccessibleName(
+            QCoreApplication.translate("TransformGroup", "Resize percentage")
+        )
         self.percent_spinbox.setRange(0, 1000)
-        self.percent_spinbox.setSuffix(" %")
+        self.percent_spinbox.setSuffix(
+            QCoreApplication.translate("TransformGroup", " %")
+        )
         self.mismatch_combo = compact_field(QComboBox())
         self.mismatch_combo.setObjectName("transform_mismatch")
-        self.mismatch_combo.setAccessibleName("Aspect mismatch handling")
+        self.mismatch_combo.setAccessibleName(
+            QCoreApplication.translate("TransformGroup", "Aspect mismatch handling")
+        )
         for label, mode in _MISMATCH_LABELS:
-            self.mismatch_combo.addItem(label, mode)
+            self.mismatch_combo.addItem(_transform_label(label), mode)
         self.size_preset_combo = compact_field(QComboBox())
         self.size_preset_combo.setObjectName("transform_size_preset")
-        self.size_preset_combo.setAccessibleName("Output size preset")
+        self.size_preset_combo.setAccessibleName(
+            QCoreApplication.translate("TransformGroup", "Output size preset")
+        )
         self.size_preset_combo.setModel(self._preset_model())
 
     def _dimension_spinbox(self, name: str) -> QSpinBox:
         field = compact_field(QSpinBox())
         field.setObjectName(f"transform_{name}")
-        field.setAccessibleName(name.capitalize())
+        field.setAccessibleName(_transform_label(name.capitalize()))
         field.setRange(MIN_FINAL_DIMENSION - 1, MAX_FINAL_DIMENSION)
-        field.setSpecialValueText("Auto")
+        field.setSpecialValueText(QCoreApplication.translate("TransformGroup", "Auto"))
         return field
 
     def _preset_model(self) -> QStandardItemModel:
         model = QStandardItemModel(self.size_preset_combo)
-        custom = QStandardItem("Custom")
+        custom = QStandardItem(QCoreApplication.translate("TransformGroup", "Custom"))
         custom.setData(None, Qt.ItemDataRole.UserRole)
         model.appendRow(custom)
         grouped = groupby(self._presets, key=lambda preset: preset.platform)
@@ -247,7 +315,9 @@ class TransformGroup(QWidget):
     def _build_readout_widget(self) -> None:
         self.readout_label = QLabel()
         self.readout_label.setObjectName("transform_readout")
-        self.readout_label.setAccessibleName("Transform summary")
+        self.readout_label.setAccessibleName(
+            QCoreApplication.translate("TransformGroup", "Transform summary")
+        )
         self.readout_label.setWordWrap(True)
 
     def _connect_signals(self) -> None:
@@ -283,22 +353,24 @@ class TransformGroup(QWidget):
         siblings (e.g. crop's Width/Height from resize's), matching the
         bold, non-interactive heading idiom the disclosure headers already
         use (``theme.py``'s ``QToolButton { font-weight: 600; }``)."""
-        heading = QLabel(text)
+        heading = QLabel(_transform_label(text))
         heading.setObjectName(object_name)
         heading.setProperty("heading", True)
-        heading.setAccessibleName(text)
+        heading.setAccessibleName(_transform_label(text))
         return heading
 
     def _trim_section(self) -> QWidget:
         section = QWidget()
         layout = QFormLayout(section)
         layout.addRow(self._section_heading("Trim", "transform_trim_heading"))
-        layout.addRow("First frame", self._trim_row(
-            self.first_frame_spinbox, self.first_playhead_button
-        ))
-        layout.addRow("Last frame", self._trim_row(
-            self.last_frame_spinbox, self.last_playhead_button
-        ))
+        layout.addRow(
+            _transform_label("First frame"),
+            self._trim_row(self.first_frame_spinbox, self.first_playhead_button),
+        )
+        layout.addRow(
+            _transform_label("Last frame"),
+            self._trim_row(self.last_frame_spinbox, self.last_playhead_button),
+        )
         return section
 
     def _trim_row(self, spinbox: QSpinBox, button: QPushButton) -> QWidget:
@@ -314,22 +386,22 @@ class TransformGroup(QWidget):
         layout = QFormLayout(section)
         layout.addRow(self._section_heading("Crop", "transform_crop_heading"))
         layout.addRow(self.crop_edit_checkbox)
-        layout.addRow("Aspect", self.aspect_combo)
-        layout.addRow("X", self.crop_x_spinbox)
-        layout.addRow("Y", self.crop_y_spinbox)
-        layout.addRow("Width", self.crop_width_spinbox)
-        layout.addRow("Height", self.crop_height_spinbox)
+        layout.addRow(_transform_label("Aspect"), self.aspect_combo)
+        layout.addRow(_transform_label("X"), self.crop_x_spinbox)
+        layout.addRow(_transform_label("Y"), self.crop_y_spinbox)
+        layout.addRow(_transform_label("Width"), self.crop_width_spinbox)
+        layout.addRow(_transform_label("Height"), self.crop_height_spinbox)
         return section
 
     def _resize_section(self) -> QWidget:
         section = QWidget()
         layout = QFormLayout(section)
         layout.addRow(self._section_heading("Resize", "transform_resize_heading"))
-        layout.addRow("Width", self.width_spinbox)
-        layout.addRow("Height", self.height_spinbox)
-        layout.addRow("Percent", self.percent_spinbox)
-        layout.addRow("Mismatch", self.mismatch_combo)
-        layout.addRow("Preset", self.size_preset_combo)
+        layout.addRow(_transform_label("Width"), self.width_spinbox)
+        layout.addRow(_transform_label("Height"), self.height_spinbox)
+        layout.addRow(_transform_label("Percent"), self.percent_spinbox)
+        layout.addRow(_transform_label("Mismatch"), self.mismatch_combo)
+        layout.addRow(_transform_label("Preset"), self.size_preset_combo)
         return section
 
     # -- reducer-owned state -> widgets --------------------------------------
@@ -372,7 +444,9 @@ class TransformGroup(QWidget):
         self._mismatch = resize.mismatch if resize is not None else MismatchMode.KEEP
         self.width_spinbox.setValue(self._dimension_display(resize, "width"))
         self.height_spinbox.setValue(self._dimension_display(resize, "height"))
-        self.mismatch_combo.setCurrentIndex(self.mismatch_combo.findData(self._mismatch))
+        self.mismatch_combo.setCurrentIndex(
+            self.mismatch_combo.findData(self._mismatch)
+        )
         self.percent_spinbox.setValue(0)
         self.size_preset_combo.setCurrentIndex(0)
 
@@ -569,15 +643,18 @@ class TransformGroup(QWidget):
         kept = self._transform.kept_range(facts.frame_count)
         delays = self._transform.select_kept(facts.delays_ms)
         duration = sum(delays) / 1000
-        text = (
-            f"{len(kept)} of {facts.frame_count} frames · {duration:.3f} s · "
-            f"{format_source_dimensions(*size)} px"
-        )
+        kept_count = len(kept)
+        text = self.tr("%n of %1 frames · %2 s · %3 px", "", kept_count)
+        text = text.replace("%1", str(facts.frame_count))
+        text = text.replace("%2", format_source_duration(Fraction(duration)))
+        text = text.replace("%3", format_source_dimensions(*size))
         artifact = self._artifact
         if artifact is not None and artifact.width and artifact.height:
             rendered = format_source_dimensions(artifact.width, artifact.height)
             file_size = format_source_file_size(artifact.file_size)
-            text += f" · rendered {rendered} px, {file_size}"
+            text += QCoreApplication.translate(
+                "TransformGroup", " · rendered %s px, %s"
+            ) % (rendered, file_size)
         return text
 
     def _show_transform_error(self, message: str) -> None:
@@ -589,7 +666,13 @@ class TransformGroup(QWidget):
 
     def _show_resize_error(self) -> None:
         for spin in (self.width_spinbox, self.height_spinbox):
-            self._set_widget_invalid(spin, True, _RESIZE_ERROR)
+            self._set_widget_invalid(
+                spin,
+                True,
+                QCoreApplication.translate(
+                    "TransformGroup", "Set at least one of width or height."
+                ),
+            )
 
     def _clear_resize_error(self) -> None:
         for spin in (self.width_spinbox, self.height_spinbox):
