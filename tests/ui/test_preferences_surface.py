@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from PySide6.QtCore import QSettings
 from PySide6.QtGui import QKeySequence
-from PySide6.QtWidgets import QFileDialog
+from PySide6.QtWidgets import QDialogButtonBox, QFileDialog
 
 from matteloop.core.parameters import ParameterState
 from matteloop.core.state import (
@@ -155,3 +155,13 @@ def test_preferences_disable_output_directory_controls_while_a_job_runs(
         dialog.description_label.text()
         == "Output directory controls are disabled while a job is running."
     )
+
+
+def test_preferences_offers_no_cancel_it_cannot_honour(qtbot) -> None:
+    """Every change applies at once, so a Cancel button would be a lie."""
+    dialog = SettingsDialog(ReducerStore(AppState()), Services())
+    qtbot.addWidget(dialog)
+
+    assert dialog.button_box.button(QDialogButtonBox.StandardButton.Close)
+    assert dialog.button_box.button(QDialogButtonBox.StandardButton.Cancel) is None
+    assert dialog.button_box.button(QDialogButtonBox.StandardButton.Ok) is None

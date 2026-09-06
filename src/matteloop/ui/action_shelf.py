@@ -83,6 +83,6 @@ class ActionShelf(QFrame):
         self.preferences_button.clicked.connect(self.open_preferences)
 
     def open_preferences(self) -> None:
-        """Reload current state and show the modeless Preferences dialog."""
+        """Reload current state and show the window-modal Preferences dialog."""
         self.preferences_dialog.load()
         self.preferences_dialog.open()

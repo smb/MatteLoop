@@ -63,12 +63,10 @@ class SettingsDialog(QDialog):
             "Clear output directory"
         )
         self.button_box = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok
-            | QDialogButtonBox.StandardButton.Cancel
+            QDialogButtonBox.StandardButton.Close
         )
         self.button_box.setObjectName("settings_actions")
         self.button_box.setAccessibleName("Preferences actions")
-        self._name_standard_buttons()
         self._build_layout()
         self._connect_controls()
         self.load()
@@ -106,33 +104,22 @@ class SettingsDialog(QDialog):
     def _connect_controls(self) -> None:
         self.choose_output_directory_button.clicked.connect(self._choose_directory)
         self.clear_output_directory_button.clicked.connect(self._clear_directory)
-        self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
-        ok_button = self.button_box.button(QDialogButtonBox.StandardButton.Ok)
-        cancel_button = self.button_box.button(
-            QDialogButtonBox.StandardButton.Cancel
+        close_button = self.button_box.button(
+            QDialogButtonBox.StandardButton.Close
         )
-        if ok_button is not None and cancel_button is not None:
-            self.setTabOrder(
-                self.output_directory_edit,
-                self.choose_output_directory_button,
-            )
-            self.setTabOrder(
-                self.choose_output_directory_button,
-                self.clear_output_directory_button,
-            )
-            self.setTabOrder(self.clear_output_directory_button, ok_button)
-            self.setTabOrder(ok_button, cancel_button)
-
-    def _name_standard_buttons(self) -> None:
-        names = {
-            QDialogButtonBox.StandardButton.Ok: "Save preferences",
-            QDialogButtonBox.StandardButton.Cancel: "Cancel preferences",
-        }
-        for standard_button, name in names.items():
-            button = self.button_box.button(standard_button)
-            if button is not None:
-                button.setAccessibleName(name)
+        if close_button is not None:
+            close_button.setAccessibleName("Close preferences")
+        self.setTabOrder(
+            self.output_directory_edit,
+            self.choose_output_directory_button,
+        )
+        self.setTabOrder(
+            self.choose_output_directory_button,
+            self.clear_output_directory_button,
+        )
+        if close_button is not None:
+            self.setTabOrder(self.clear_output_directory_button, close_button)
 
     def load(self) -> None:
         """Reload the current reducer-owned value before showing the dialog."""
@@ -149,7 +136,8 @@ class SettingsDialog(QDialog):
             controls_enabled and directory is not None
         )
         self.description_label.setText(
-            "Choose where rendered output files are saved."
+            "Choose where rendered output files are saved. "
+            "Changes apply immediately."
             if controls_enabled
             else "Output directory controls are disabled while a job is running."
         )
